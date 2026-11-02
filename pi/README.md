@@ -78,7 +78,7 @@ A reset event sets the copies of ports 0x7FFD and 0x1FFD to 0, so bank 5 is show
 
 ### Renderer
 
-`src/renderer.cpp` draws a 320 x 240 picture: the 256 x 192 Spectrum screen with 32 pixels of border left and right and 24 top and bottom. The firmware scales it to the HDMI mode.
+`src/renderer.cpp` draws a 320 x 240 picture: the 256 x 192 Spectrum screen with 32 pixels of border left and right and 24 top and bottom. The firmware scales it to the HDMI mode, which `config.txt` sets to 1920 x 1080 at 50 Hz (CEA mode 31), with HDMI on even when no display is detected at start-up.
 
 The frame buffer is 32 bits per pixel, 320 x 480: two 320 x 240 halves. Each frame:
 
@@ -90,7 +90,7 @@ The screen only ever shows a finished frame.
 
 32 bits per pixel gives the exact colours in both modes with no palette changes. Normal mode uses the Spectrum colours (0xA0 per channel, 0xFF when BRIGHT). ULAplus mode converts each GGGRRRBB palette entry to 24-bit colour. Changing mode is a renderer flag, with no new frame buffer and no mailbox call. The cost over 8 bits per pixel is 300 KB of memory traffic per frame instead of 75 KB, which is small for this Pi.
 
-FLASH counts renderer frames and changes phase every 16 frames. The renderer runs at the HDMI frame rate, which is usually 60 Hz, so FLASH is faster than on a 50 Hz Spectrum. In ULAplus mode FLASH selects a palette group and does not flash.
+FLASH counts renderer frames and changes phase every 16 frames. The renderer runs at the HDMI frame rate, 50 Hz, the same rate as the Spectrum. The two are not in step. In ULAplus mode FLASH selects a palette group and does not flash.
 
 ## Building
 

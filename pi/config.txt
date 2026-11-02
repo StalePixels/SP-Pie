@@ -9,3 +9,9 @@ arm_64bit=1
 kernel=kernel8.img
 kernel_address=0x80000
 initial_turbo=0
+
+# HDMI on even when no display is detected at start-up, in CEA mode 31
+# (1920 x 1080, 50 Hz). 50 Hz is the Spectrum frame rate.
+hdmi_force_hotplug=1
+hdmi_group=1
+hdmi_mode=31
