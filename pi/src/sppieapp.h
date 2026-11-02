@@ -7,8 +7,10 @@
 //          Spectrum frames from the event log through the Fuse ULA model
 //          (CFramePresenter), copies the picture to the hidden half of a
 //          double-height frame buffer, moves the display to that half, and
-//          waits for HDMI vertical sync. Core 0 also takes Circle's
-//          peripheral interrupts (the system timer).
+//          waits for HDMI vertical sync. With each Spectrum frame it
+//          makes the frame's sound (fusesound.h) and writes the samples
+//          to the audio ring. Core 0 also takes Circle's peripheral
+//          interrupts (the system timer).
 //  Core 1: event intake. Polls the DMA producer position, decodes the new
 //          ring words into pairs, rebuilds the CPLD clock count of every
 //          event (CTStateClock) and hands counts, read times and events to
@@ -18,10 +20,14 @@
 //  Core 2: learns the model from the clock (CUlaClock), gives each event
 //          its frame and T-state (CFrameClock) and writes it to the event
 //          log.
-//  Core 3: unused; it returns from Run () and halts.
+//  Core 3: audio output. Reads the audio ring through the resampler
+//          (audiostream.h) and writes each sample to Circle's HDMI sound
+//          device in polling mode, as fast as its FIFO takes them. With
+//          no HDMI sound it returns from Run () and halts.
 //
 // Core 1 hands to core 2 through the queue, core 2 to core 0 through the
-// event log (both lock-free, one writer and one reader each). The counters
+// event log, core 0 to core 3 through the audio ring (all lock-free, one
+// writer and one reader each). The counters
 // in TIntakeShared are written by cores 1 and 2 with atomic stores, each
 // field by one core, and read by core 0 with atomic loads.
 //
@@ -30,6 +36,7 @@
 #ifndef _sppie_sppieapp_h
 #define _sppie_sppieapp_h
 
+#include "audiostream.h"
 #include "eventlog.h"
 #include "frameclock.h"
 #include "machine.h"
@@ -41,6 +48,7 @@
 #include <circle/bcmframebuffer.h>
 #include <circle/memory.h>
 #include <circle/multicore.h>
+#include <circle/sound/hdmisoundbasedevice.h>
 #include <circle/types.h>
 
 namespace sppie {
@@ -84,8 +92,11 @@ struct TIntakeShared
 class CSpPieApp : public CMultiCoreSupport
 {
 public:
+	// pSound is the started HDMI sound device in polling mode, or 0 for
+	// none.
 	CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffer,
-		   CSmiEventReader *pReader, unsigned nArmClockMHz, TMachineChoice Choice);
+		   CSmiEventReader *pReader, CHDMISoundBaseDevice *pSound,
+		   unsigned nArmClockMHz, TMachineChoice Choice);
 
 	// Allocates the picture and starts Fuse. Core 0, before Initialize ().
 	boolean InitializeRenderer (void);
@@ -96,12 +107,14 @@ private:
 	void RunRenderer (void);
 	void RunIntake (void);
 	void RunUla (void);
+	void RunAudio (void);
 	void Publish (u64 *pField, u64 nValue);
 	u64 Fetch (const u64 *pField);
 
 private:
 	CBcmFrameBuffer	*m_pFrameBuffer;
 	CSmiEventReader	*m_pReader;
+	CHDMISoundBaseDevice *m_pSound;
 	unsigned	m_nArmClockMHz;
 
 	CEventLog	m_Log;
@@ -109,6 +122,8 @@ private:
 	CUlaClock	m_UlaClock;	// core 2
 	CUlaQueue	m_Queue;	// core 1 to core 2
 	CTStateClock	m_TStateClock;	// core 1
+	CAudioFifo	m_Audio;	// core 0 to core 3
+	CAudioResampler	m_Resampler;	// core 3
 	CFramePresenter	m_Presenter;	// core 0
 	u32		*m_pDraw;	// core 0: the whole display in RAM
 	u8		*m_pContention[MachineCount];	// Fuse's contention tables

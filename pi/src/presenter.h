@@ -19,6 +19,14 @@
 // threshold gives a frame of slack, so a late vertical sync does not cause
 // a skip followed by a repeat.
 //
+// The frame's sound comes from the same events (fusesound.h): the AY,
+// TurboSound, beeper and Covox writes go to Fuse's sound generator at
+// their T-states, and at the end of each frame, shown or skipped, its
+// samples go to the audio ring for the audio core. Writes to SP-Pie's
+// control ports (controlports.h) change the attached devices at their
+// place in the frame, and the border extension and the HUD from the frame
+// they are in; a reset restores the defaults.
+//
 // No platform dependencies.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -26,6 +34,8 @@
 #ifndef _sppie_presenter_h
 #define _sppie_presenter_h
 
+#include "audiostream.h"
+#include "controlports.h"
 #include "eventlog.h"
 #include "machine.h"
 #include <stdint.h>
@@ -37,10 +47,12 @@ class CFramePresenter
 public:
 	static const uint32_t SkipThreshold = 3;
 
-	explicit CFramePresenter (CEventLog *pLog);
+	// pAudio receives each frame's samples; 0 drops them.
+	explicit CFramePresenter (CEventLog *pLog, CAudioFifo *pAudio = 0);
 
-	// Starts Fuse, drawing into the 352 x 270 picture at pPicture with
-	// nPitch pixels between rows. FALSE when Fuse does not start.
+	// Starts Fuse and its sound, drawing into the 352 x 270 picture at
+	// pPicture with nPitch pixels between rows. FALSE when Fuse does not
+	// start.
 	bool Initialize (uint32_t *pPicture, unsigned nPitch);
 
 	// Clears the counters; the next frame shown is frame nFirstFrame.
@@ -56,11 +68,18 @@ public:
 	uint32_t Skipped (void) const		{ return m_nSkipped; }
 	uint32_t Repeated (void) const		{ return m_nRepeated; }
 
+	// The control ports as at the end of the last frame run.
+	const CControlPorts &Control (void) const { return m_Control; }
+	bool Hud (void) const			{ return m_Control.Hud (); }
+	bool BorderExtended (void) const	{ return m_Control.BorderExtended (); }
+
 private:
 	void RunFrame (uint32_t nFrame);
 
 private:
 	CEventLog	*m_pLog;
+	CAudioFifo	*m_pAudio;
+	CControlPorts	m_Control;
 
 	uint32_t	m_nNext;		// next frame to run
 	uint32_t	m_nLastFrame;

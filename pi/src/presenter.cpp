@@ -6,18 +6,37 @@
 #include "presenter.h"
 #include "event.h"
 #include "../fuseula/fuseula.h"
+#include "../fuseula/fusesound.h"
 
 namespace sppie {
 
-CFramePresenter::CFramePresenter (CEventLog *pLog)
-:	m_pLog (pLog)
+static_assert (CControlPorts::DeviceAy == FUSESOUND_AY
+	       && CControlPorts::DeviceTurboSound == FUSESOUND_TURBOSOUND
+	       && CControlPorts::DeviceBeeper == FUSESOUND_BEEPER
+	       && CControlPorts::DeviceCovoxFB == FUSESOUND_COVOX_FB
+	       && CControlPorts::DeviceCovoxDD == FUSESOUND_COVOX_DD
+	       && CControlPorts::DeviceCovoxDF == FUSESOUND_COVOX_DF
+	       && CControlPorts::DevicesDefault == FUSESOUND_DEFAULT,
+	       "the device bits of the control port are the sound layer's");
+
+CFramePresenter::CFramePresenter (CEventLog *pLog, CAudioFifo *pAudio)
+:	m_pLog (pLog),
+	m_pAudio (pAudio)
 {
 	Reset ();
 }
 
 bool CFramePresenter::Initialize (uint32_t *pPicture, unsigned nPitch)
 {
-	return fuseula_init (pPicture, nPitch) == 0;
+	if (fuseula_init (pPicture, nPitch) != 0 || fusesound_init () != 0)
+	{
+		return false;
+	}
+
+	m_Control.Reset ();
+	fusesound_devices (0, m_Control.Devices ());
+
+	return true;
 }
 
 void CFramePresenter::Reset (uint32_t nFirstFrame)
@@ -36,6 +55,7 @@ void CFramePresenter::RunFrame (uint32_t nFrame)
 {
 	TFrameRecord Record = m_pLog->Record (nFrame);
 	fuseula_select ((fuseula_machine) Record.Machine);
+	fusesound_begin_frame ((fuseula_machine) Record.Machine);
 
 	TFrameSpan Span = m_pLog->TakeFrame (nFrame);
 	for (uint32_t i = 0; i < Span.nCount; i++)
@@ -48,11 +68,19 @@ void CFramePresenter::RunFrame (uint32_t nFrame)
 			break;
 
 		case KindIo:
+			if (m_Control.Write (rEvent.Address, rEvent.Data))
+			{
+				fusesound_devices (rEvent.TState, m_Control.Devices ());
+			}
 			fuseula_io_write (rEvent.TState, rEvent.Address, rEvent.Data);
+			fusesound_io_write (rEvent.TState, rEvent.Address, rEvent.Data);
 			break;
 
 		case KindReset:
 			fuseula_reset (rEvent.TState);
+			m_Control.Reset ();
+			fusesound_devices (rEvent.TState, m_Control.Devices ());
+			fusesound_reset (rEvent.TState);
 			break;
 
 		default:
@@ -62,6 +90,13 @@ void CFramePresenter::RunFrame (uint32_t nFrame)
 	m_pLog->Release (Span);
 
 	fuseula_end_frame ();
+
+	const int32_t *pSamples;
+	unsigned nSamples = fusesound_end_frame (&pSamples);
+	if (m_pAudio != 0)
+	{
+		m_pAudio->Write (pSamples, nSamples);
+	}
 
 	m_nLastFrame = nFrame;
 	m_LastRecord = Record;

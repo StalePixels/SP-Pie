@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 #include "sppieapp.h"
+#include "borderextension.h"
 #include "intake.h"
 #include "picture.h"
 #include "timebase.h"
@@ -51,15 +52,18 @@ static const uint32_t *FuseFrameTStates (void)
 }
 
 CSpPieApp::CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffer,
-		      CSmiEventReader *pReader, unsigned nArmClockMHz, TMachineChoice Choice)
+		      CSmiEventReader *pReader, CHDMISoundBaseDevice *pSound,
+		      unsigned nArmClockMHz, TMachineChoice Choice)
 :	CMultiCoreSupport (pMemorySystem),
 	m_pFrameBuffer (pFrameBuffer),
 	m_pReader (pReader),
+	m_pSound (pSound),
 	m_nArmClockMHz (nArmClockMHz),
 	m_FrameClock (&m_Log, FuseFrameTStates (), Choice),
 	m_UlaClock (&m_FrameClock, &m_FrameClock, TickFrequency ()),
 	m_TStateClock (&m_Queue, TickFrequency (), NominalClockHz),
-	m_Presenter (&m_Log),
+	m_Resampler (&m_Audio),
+	m_Presenter (&m_Log, &m_Audio),
 	m_pDraw (0)
 {
 	memset (&m_Shared, 0, sizeof m_Shared);
@@ -122,6 +126,10 @@ void CSpPieApp::Run (unsigned nCore)
 		RunUla ();
 		break;
 
+	case 3:
+		RunAudio ();
+		break;
+
 	default:
 		break;
 	}
@@ -172,6 +180,28 @@ void CSpPieApp::RunUla (void)
 		Publish (&m_Shared.FrameClocks, m_UlaClock.LastFrameClocks ());
 		Publish (&m_Shared.MinFrameClocks, m_UlaClock.MinFrameClocks ());
 		Publish (&m_Shared.MaxFrameClocks, m_UlaClock.MaxFrameClocks ());
+	}
+}
+
+// Core 3: one resampled sample for each output frame, the same on the left
+// and right channel. The HDMI FIFO paces the loop.
+void CSpPieApp::RunAudio (void)
+{
+	if (m_pSound == 0)
+	{
+		return;
+	}
+
+	while (1)
+	{
+		s32 nSample = m_Resampler.Next ();
+		for (unsigned nChannel = 0; nChannel < 2; nChannel++)
+		{
+			while (!m_pSound->IsWritable ())
+			{
+			}
+			m_pSound->WriteSample (nSample);
+		}
 	}
 }
 
@@ -375,12 +405,15 @@ void CSpPieApp::RunRenderer (void)
 		}
 	}
 
-#if SPPIE_OVERLAY
-	// The overlay changes the side areas, so whole rows are copied.
+	// The border extension and the overlay change the side areas, so whole
+	// rows are copied, into both halves of the frame buffer in turn.
 	const unsigned nCopyX = 0, nCopyWidth = DisplayWidth;
 	const unsigned nCopyY = 0, nCopyHeight = DisplayHeight;
+	boolean bExtensionShown = FALSE;
 
+#if SPPIE_OVERLAY
 	COverlay Overlay;
+	boolean bHudShown = FALSE;
 	TFrameReport Report;
 	memset (&Report, 0, sizeof Report);
 	Report.ArmClockMHz = m_nArmClockMHz;
@@ -388,10 +421,6 @@ void CSpPieApp::RunRenderer (void)
 	const u64 nFrequency = TickFrequency ();
 	u64 nPrevEvents = 0, nPrevEmpty = 0, nPrevFrameEvents = 0, nPrevBusy = 0;
 	u64 nPrevFrameEnd = ReadTicks ();
-#else
-	// Only the picture changes.
-	const unsigned nCopyX = PictureLeft, nCopyWidth = PictureWidth;
-	const unsigned nCopyY = PictureTop, nCopyHeight = PictureHeight;
 #endif
 
 	u32 nFrame = 0;
@@ -405,8 +434,31 @@ void CSpPieApp::RunRenderer (void)
 
 		// One complete Spectrum frame, or the last one again.
 		m_Presenter.Present ();
+
+		// The side areas (controlports.h): the border extension, or
+		// black, with the HUD over either.
+		boolean bExtension = m_Presenter.BorderExtended ();
 #if SPPIE_OVERLAY
-		Overlay.Draw (Report, pDraw, DisplayWidth);
+		boolean bHud = m_Presenter.Hud ();
+		boolean bWasDrawn = bExtensionShown || (bHudShown && !bHud);
+#else
+		boolean bWasDrawn = bExtensionShown;
+#endif
+		if (bExtension)
+		{
+			FillBorderExtension (pDraw, DisplayWidth);
+		}
+		else if (bWasDrawn)
+		{
+			ClearSideAreas (pDraw, DisplayWidth);
+		}
+		bExtensionShown = bExtension;
+#if SPPIE_OVERLAY
+		if (bHud)
+		{
+			Overlay.Draw (Report, pDraw, DisplayWidth);
+		}
+		bHudShown = bHud;
 #endif
 
 		// Copy into the hidden half.

@@ -24,6 +24,7 @@ CKernel::CKernel (void)
 	m_Logger (m_Options.GetLogLevel (), &m_Timer),
 	m_pFrameBuffer (0),
 	m_pReader (0),
+	m_pSound (0),
 	m_pApp (0)
 {
 	m_ActLED.Blink (1);	// show that the kernel is running
@@ -60,10 +61,21 @@ boolean CKernel::Initialize (void)
 		Fail (FailReader);
 	}
 
+	// HDMI sound at 48 kHz, in polling mode: core 3 feeds its FIFO, so it
+	// needs no interrupt and no DMA channel. A display without sound, or
+	// a link in DVI mode, makes Start () fail; the kernel then runs
+	// without sound.
+	m_pSound = new CHDMISoundBaseDevice (48000);
+	if (m_pSound != 0 && !m_pSound->Start ())
+	{
+		delete m_pSound;
+		m_pSound = 0;
+	}
+
 	unsigned nArmClockMHz = CMachineInfo::Get ()->GetClockRate (CLOCK_ID_ARM) / 1000000;
 
-	m_pApp = new CSpPieApp (CMemorySystem::Get (), m_pFrameBuffer, m_pReader, nArmClockMHz,
-				MachineChoice ());
+	m_pApp = new CSpPieApp (CMemorySystem::Get (), m_pFrameBuffer, m_pReader, m_pSound,
+				nArmClockMHz, MachineChoice ());
 	if (m_pApp == 0 || !m_pApp->InitializeRenderer ())
 	{
 		Fail (FailFuse);

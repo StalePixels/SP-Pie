@@ -1,6 +1,6 @@
 # SP-Pie video service for the Raspberry Pi Zero 2 W
 
-This is a bare-metal kernel for the Raspberry Pi Zero 2 W on the TK-Pie board. The CPLD on the board sends every Z80 memory write and I/O write to the Pi over SMI (the Pi's Secondary Memory Interface), each with its exact clock count. The Pi feeds every write, at its T-state, into the ULA display model and the memory paging of the [Fuse](https://fuse-emulator.sourceforge.net/) emulator, and shows the frame Fuse draws. Effects that depend on when the Spectrum writes memory or ports work: multicolour (attributes rewritten for each line), border changes inside a line, screen switching in the middle of a frame, pictures that alternate between frames, and ULAplus palette changes. The kernel also measures how much Pi time the work uses.
+This is a bare-metal kernel for the Raspberry Pi Zero 2 W on the TK-Pie board. The CPLD on the board sends every Z80 memory write and I/O write to the Pi over SMI (the Pi's Secondary Memory Interface), each with its exact clock count. The Pi feeds every write, at its T-state, into the ULA display model and the memory paging of the [Fuse](https://fuse-emulator.sourceforge.net/) emulator, and shows the frame Fuse draws. Effects that depend on when the Spectrum writes memory or ports work: multicolour (attributes rewritten for each line), border changes inside a line, screen switching in the middle of a frame, pictures that alternate between frames, and ULAplus palette changes. The same writes drive Fuse's sound generator, so the HDMI output also carries the Spectrum's sound: the AY, a second AY (TurboSound), the beeper and Covox DACs. A program turns these devices, the border extension and the HUD on and off through SP-Pie's control ports ([../docs/control-ports.md](../docs/control-ports.md)). The kernel also measures how much Pi time the work uses.
 
 It is built on [Circle](https://github.com/rsta2/circle) for AArch64 (`RASPPI=3`, `kernel8.img`). The interface to the CPLD is in [../docs/protocol.md](../docs/protocol.md).
 
@@ -10,14 +10,14 @@ None of this has run on hardware yet. See [What is not verified](#what-is-not-ve
 
 ### Cores
 
-The Zero 2 W has four cores. The kernel uses three.
+The Zero 2 W has four cores. The kernel uses all four.
 
-- **Core 0** starts Circle, the frame buffer, the SMI reader and Fuse, then runs the frames. Once per HDMI frame it runs the next complete Spectrum frame through Fuse and shows it. It also takes Circle's interrupts (the system timer).
+- **Core 0** starts Circle, the frame buffer, HDMI sound, the SMI reader and Fuse, then runs the frames. Once per HDMI frame it runs the next complete Spectrum frame through Fuse and shows it. With each Spectrum frame it makes the frame's sound and writes it to the audio ring (see [Sound](#sound)). It also takes Circle's interrupts (the system timer).
 - **Core 1** runs event intake. It polls the DMA position, decodes the new ring words into pairs, rebuilds each event's clock count, and hands counts, read times and events to core 2 through a lock-free queue (`src/ulaqueue.h`). It also restarts or resyncs SMI. It takes no interrupts and never waits for another core.
 - **Core 2** turns the counts into the ULA's T-state count where the clock stops during contention, gives each event its frame and T-state, and writes the events to the event log. It also tells core 1 where the next frame starts, for planning restarts.
-- **Core 3** halts.
+- **Core 3** sends the sound to HDMI. It reads the audio ring through the resampler and writes each sample to the HDMI audio FIFO as soon as the FIFO has room. With no HDMI sound it halts.
 
-The two working cores share the event log (see [Event log](#event-log)) and a block of counters. Core 1 publishes the counters with atomic 64-bit stores, and core 0 reads them once per frame.
+Cores 2 and 0 share the event log (see [Event log](#event-log)), cores 0 and 3 the audio ring, and cores 1, 2 and 0 a block of counters. Core 1 publishes the counters with atomic 64-bit stores, and core 0 reads them once per frame.
 
 ### SMI and the DMA ring
 
@@ -140,7 +140,7 @@ Fuse and libspectrum are submodules of `public/`, pinned to release tags and nev
 
 The kernel is GPL-3.0-or-later and builds them in. `fuseula/fuseula.mk` lists the files used:
 
-- Fuse: the display model (`display.c`, `rectangle.c`), memory and paging (`memory_pages.c`, `machine.c`, `spectrum.c`, and the 48K, 128K, +2, +2A and +3 machine files), the port decode (`periph.c`, `machines/machines_periph.c`) and the ULA port (`peripherals/ula.c`).
+- Fuse: the display model (`display.c`, `rectangle.c`), memory and paging (`memory_pages.c`, `machine.c`, `spectrum.c`, and the 48K, 128K, +2, +2A and +3 machine files), the port decode (`periph.c`, `machines/machines_periph.c`), the ULA port (`peripherals/ula.c`), and the sound generator (`sound.c`) with its Blip_Buffer and filters (`sound/blipbuffer.c`, `sound/speaker_filter.c`, `sound/ula_filter.c`).
 - libspectrum: the timing tables (`timings.c`), machine capabilities, memory allocation, the snapshot accessors and its GLib replacement.
 
 Their own builds use autoconf. Here the headers autoconf and their Perl scripts make (`libspectrum.h`, `settings.h`, `options.h` and `snap_accessors.c`) are generated into `fuseula/gen` with their own scripts, and `fuseula/config.h` stands in for autoconf's `config.h`. The Fuse files are compiled into `fuseula/obj`, so the submodules stay clean. Their compiler warnings are turned off; ours are not.
@@ -148,13 +148,48 @@ Their own builds use autoconf. Here the headers autoconf and their Perl scripts 
 Our layer in `fuseula/` sits between Fuse and the C++ code:
 
 - `fuseula.h` and `fuseula.c`: the C interface. Each write is applied by setting Fuse's T-state counter and calling Fuse's `writebyte_internal` or `writeport_internal`; a reset calls Fuse's `machine_reset`; the end of a frame calls Fuse's `display_frame` with the T-state counter at the start of the next frame, as Fuse's own frame end does. Fuse's FLASH swap inside `display_frame` marks cells through the beam rule, so a counter left at the end of the frame would make it redraw the screen from the memory at the end of the frame. Fuse's drawing calls (`uidisplay_plot8`) land in the picture.
-- `fusestubs.c`: definitions for the parts of Fuse that are not built (the Z80, sound, tape, disk, debugger, menus and other peripherals), each doing nothing or holding Fuse's value for an absent feature. ROMs are all zero; the display reads only RAM, and ROM pages are not writable.
+- `fusesound.h` and `fusesound.c`: the sound. See [Sound](#sound).
+- `fusesound_rename.h` and the `fusesound_*.c` wrappers: Fuse's `sound.c` compiled once for each sound generator.
+- `fusestubs.c`: definitions for the parts of Fuse that are not built (the Z80, tape, disk, debugger, menus and other peripherals), each doing nothing or holding Fuse's value for an absent feature. Fuse's ULA port code reports the ULA's sound output to `sound_ula`, which passes it to `fusesound.c`. ROMs are all zero; the display reads only RAM, and ROM pages are not writable.
 
 Fuse's display covers 320 x 240 pixels: the screen with 32 pixels of border left and right and 24 lines above and below. The layer draws the rest of the 352 x 270 picture's border with Fuse's own beam rule: an 8-pixel chunk that starts at T-state T shows the state of T + 3 (`display.c`, `get_beam_position`). It records each border change Fuse makes with its T-state for this.
 
 Fuse has no ULAplus, so the layer adds it, on every model: the register port 0xBF3B and the data port 0xFF3B, decoded on A15 to A14 = 10 or 11, A7 to A6 = 00, A2 = 0 and A0 = 1 (the TK-Pie board's decode). Data-port writes with register group 0 set palette entries and group 1 sets the mode; groups 2 and 3 are ignored. Mode bit 0 turns ULAplus on. In ULAplus mode, attribute bits 7 to 6 select one of four 16-entry groups, ink is entry group × 16 + INK and paper is group × 16 + 8 + PAPER, FLASH does not swap, and the border is entry 8 + border colour. A palette or mode change applies by the same chunk rule as the border. Fuse only redraws chunks whose pixel byte or attribute changed, so after a palette or mode change the layer has Fuse redraw the rest of that frame and the whole next frame. A reset turns ULAplus off and clears its register; the palette keeps its values.
 
 The ULAplus colour of a GGGRRRBB palette entry: the missing low blue bit is the OR of the two stored blue bits, and the 3-bit levels scale to 0 to 255. Normal mode uses the Spectrum colours, 0xA0 per channel and 0xFF when BRIGHT.
+
+### Sound
+
+`fuseula/fusesound.c` makes the sound from the same events as the picture. The presenter gives it every I/O write and reset at its T-state, the T-state at which Fuse makes the write take effect (see [Frame clock](#frame-clock)), and ends its frame with the display's.
+
+Fuse's sound generator (`sound.c`) keeps its state in globals, so one copy makes one stream. `fusesound_rename.h` gives each compile of the unmodified `sound.c` its own names. These copies run:
+
+| Generator | Makes |
+|---|---|
+| `fusesound_ay0` | AY chip 0 |
+| `fusesound_ay1` | AY chip 1, for TurboSound |
+| `fusesound_ula48` | The ULA's sound output on the 48K, through Fuse's model of the 48K's internal speaker |
+| `fusesound_ula128` | The ULA's sound output on the 128K class, through Fuse's model of the TV speaker, and the Covox DACs |
+
+Fuse picks these speaker models when its speaker type is Automatic, its default (`sound.c`, `sound_get_speaker_type`). Each ULA generator keeps its speaker type from start-up. Fuse clears the ULA buffer when the speaker type changes, and from then on the beeper drops to 0 for one sample every few frames; with a fixed type for each generator this does not happen.
+
+**Time.** The generators count a clock of 3,546,900 Hz, the 128K's Z80 clock and twice the AY clock. On the 128K class a count is a T-state. On the 48K, `fusesound.c` scales each T-state by 3,546,900 / 3,500,000, and a frame of 69,888 T-states is 70,825 or 70,826 counts, so the sum stays exact. Every generator makes 48 kHz samples covering the real length of each Spectrum frame. So the sound is made in Spectrum time on every model, whatever its frame rate. Fuse's Blip_Buffer turns counts into samples with a 16-bit fraction (887 / 65,536 samples per count), so it makes 48,005 samples per second of Spectrum time, 113 ppm more than 48,000; the resampler takes up the difference.
+
+**Devices.** The decode of the AY, TurboSound, beeper and Covox ports is in [../docs/control-ports.md](../docs/control-ports.md).
+
+- AY writes go to Fuse's `sound_ay_write`, as Fuse's own AY port code sends them. Fuse applies them at its AY step of 32 T-states.
+- The beeper comes from Fuse's own ULA port code, so EAR and MIC have Fuse's levels: EAR 50 x 256 and MIC 2 x 256 in Fuse's 16-bit samples.
+- Each Covox DAC is a Blip_Synth of its own in the `fusesound_ula128` generator, with Fuse's Covox level of 128 per step, around the centre value 0x80.
+- A device that is turned off stops at the T-state of the control write: the beeper and the Covox DACs fall to 0 at that time, and an AY chip leaves the mix from the sample that holds it.
+- A reset event writes 0 to every register of both AY chips at its T-state.
+
+**Mix.** The output is mono, as Fuse's default AY stereo separation (None) is. The generators' 16-bit samples are added and multiplied by 128 into signed 24-bit samples, with saturation. The two AY chips and the beeper together stay below full scale. The Covox DACs share the `fusesound_ula128` generator, and Fuse limits its output to 16 bits, so three DACs near full scale clip.
+
+**Audio ring and resampler.** `src/audiostream.h` holds the hand-off to core 3. Core 0 writes each frame's samples, skipped frames included, to a ring of 16,384 samples with one writer and one reader and no lock; a full ring drops the rest of the frame. The samples are in Spectrum time and the HDMI output takes 48,000 per second of the Pi's clock, so the ring would slowly fill or empty. Core 3 reads it through a resampler with a ratio close to 1, with 4-point cubic (Catmull-Rom) interpolation. Every 10 ms the resampler averages the fill level (over about 0.64 s) and sets the ratio to 1 plus 1,000 ppm for each 1,024 samples above the target of 2,048 samples (43 ms), limited to 1,000 ppm either way. A constant clock difference of d ppm leaves the fill about d samples off the target. Each Spectrum frame that the presenter skips or repeats moves 960 samples at once, so the ratio swings by a few hundred ppm around the clock difference and back over the following minute. A ratio of 1,000 ppm changes the pitch by 1.7 cents. When the ring runs empty, the output holds its last value and starts again once the ring holds the target.
+
+**HDMI.** Circle's `CHDMISoundBaseDevice` in polling mode, at 48 kHz: core 3 checks that the HDMI audio FIFO has room and writes each sample twice, for the left and the right channel. It needs no interrupt and no DMA channel. `config.txt` sets `hdmi_drive=2`, HDMI mode with sound; in DVI mode Circle's driver does not start, and the kernel then runs without sound.
+
+**Fuse's AY at a frame start.** Fuse's generator starts each frame as if every AY channel were at 0 (`sound.c`, `sound_ay_overlay`, `last_chan1` to `last_chan3`). A channel that falls to 0 at the first AY step of a frame therefore stays at its old level: a tone half period lasts three half periods, and a channel silenced at T-state 0 keeps its level as a constant offset. This is Fuse's output, unchanged.
 
 ### Event log
 
@@ -168,12 +203,12 @@ A Z80 writing as fast as it can (PUSH) makes about 640,000 writes a second, abou
 
 ### Presentation
 
-The frame buffer is 480 x 270 pixels at 32 bits per pixel, 16:9, which the firmware scales by exactly 4 to the HDMI mode. `config.txt` sets 1920 x 1080 at 50 Hz (CEA mode 31), with HDMI on even when no display is detected at start-up, and `force_turbo=1` keeps the ARM cores at their full 1000 MHz. The Spectrum picture is 352 x 270 pixels in the middle and fills the height: the 256 x 192 screen with 48 pixels of border left and right and 39 lines above and below. The World of Spectrum 48K reference gives the visible border as 48 pixels at each side, 48 lines above the screen and 56 below. The display shows all of the side border and the 39 lines nearest the screen above and below. The areas left and right of the picture are black.
+The frame buffer is 480 x 270 pixels at 32 bits per pixel, 16:9, which the firmware scales by exactly 4 to the HDMI mode. `config.txt` sets 1920 x 1080 at 50 Hz (CEA mode 31), with HDMI on even when no display is detected at start-up, and `force_turbo=1` keeps the ARM cores at their full 1000 MHz. The Spectrum picture is 352 x 270 pixels in the middle and fills the height: the 256 x 192 screen with 48 pixels of border left and right and 39 lines above and below. The World of Spectrum 48K reference gives the visible border as 48 pixels at each side, 48 lines above the screen and 56 below. The display shows all of the side border and the 39 lines nearest the screen above and below. The areas left and right of the picture are black. With the border extension on (control-port feature 2, see [../docs/control-ports.md](../docs/control-ports.md)), each line of those areas takes the colour of the line's leftmost or rightmost picture pixel, and the border fills the screen (`src/borderextension.h`). The HUD, when on, is drawn over them.
 
 `src/presenter.cpp` runs once per HDMI frame on core 0:
 
 1. It runs the oldest complete Spectrum frame through Fuse: it selects the frame's model, applies each event at its T-state, and ends the frame. Fuse draws into a picture in RAM.
-2. Core 0 copies the picture into the hidden half of a 480 x 540 frame buffer.
+2. Core 0 fills the side areas (border extension, black or HUD) and copies the whole display into the hidden half of a 480 x 540 frame buffer.
 3. It moves the display to that half (`SetVirtualOffset`) and waits for vertical sync (`WaitForVerticalSync`).
 
 The Spectrum makes frames a little faster than HDMI shows them: 50.08 Hz on a 48K and 50.02 Hz on the 128K class, against 50.00 Hz. When three or more complete frames are waiting, the presenter runs the oldest through Fuse without showing them until one will be left after the one shown. That skips one whole frame about every 12.5 s on a 48K and every 47 s on the 128K class. Every frame goes through Fuse, so FLASH and the picture stay right across skips. When no frame is complete, the last one is shown again. The screen only ever shows whole Spectrum frames.
@@ -226,7 +261,7 @@ The board has no serial console. When start-up fails, the ACT LED blinks a code 
 
 ## Instrumentation
 
-With `OVERLAY=1` (the default), the counters are shown as text in the black areas left and right of the Spectrum picture. The overlay never draws over the picture or its border. Per-frame values are from the HDMI frame before; the others are since boot.
+With `OVERLAY=1` (the default), the counters are shown as text in the areas left and right of the Spectrum picture: the HUD. The HUD never draws over the picture or its border. A program turns it off and on with control-port feature 0xFF ([../docs/control-ports.md](../docs/control-ports.md)); it is on after start-up and after every reset. Per-frame values are from the HDMI frame before; the others are since boot.
 
 Left side:
 
@@ -241,7 +276,7 @@ Left side:
 | `RST` | Resets since boot, one per burst of reset events (see [Machine model](#machine-model)) |
 | `IN` | Core 1 time spent on ring words, restarts and resyncs, in µs per frame |
 | `IDI` | Core 1 time spent polling with nothing new, in µs per frame |
-| `RN` | Core 0 time to run the frame through Fuse, draw the overlay and copy, in µs |
+| `RN` | Core 0 time to run the frame through Fuse, make its sound, draw the side areas and copy, in µs |
 | `IDR` | Core 0 time to request the flip and wait for vertical sync, in µs. This is the renderer's idle time |
 | `BL` | Largest ring backlog seen, in words (one word is one read) |
 | `RS` | SMI transfer restarts since boot |
@@ -282,7 +317,7 @@ The Pi budget is the idle time per frame (`IDI` for core 1, `IDR` for core 0) un
 
 ## Host tests
 
-The decoder, the intake, the clock count, the frame clock, the event log, the presenter, and Fuse with our layer build and run on the build machine with its own compilers. The Fuse files are generated and compiled into `test/build`.
+The decoder, the intake, the clock count, the frame clock, the event log, the presenter, Fuse with our layer, the sound, the control ports, the border extension and the resampler build and run on the build machine with its own compilers. The Fuse files are generated and compiled into `test/build`. The tests also build one more copy of Fuse's sound generator (`test/fusesound_ref.c`) and drive it directly, as Fuse's own AY port code does, as a reference.
 
 ```sh
 gmake test
@@ -302,15 +337,27 @@ The tests cover:
 - the contention check: the frame start found from +3 contended writes when every acknowledge is 2 T-states late, and when one F event is 2 T-states early, with writes on both sides of each fetch,
 - a reset clearing the +2A/+3 detection, and a bouncing reset: a dozen reset events at the press and thirty at the release with stray writes between them (one to exactly 0x1FFD), then a 128K's OUT to 0x10FD; the 128K stays a 128K, a +3's 0x1FFD write after the burst still makes a +3, and the frame start is not disturbed,
 - end to end through the simulated CPLD, the intake, the clock count, the model stage, the frame clock, the log and Fuse: multicolour per line, border changes inside a line, and a restart gap in each frame, with a different acknowledge delay each frame,
+- the control ports: only the exact 16-bit ports, each feature's bits and defaults, reserved features and bits ignored, the selected feature kept, and a reset restoring every default,
+- the border extension: from a frame run through Fuse with border changes inside lines, each line's side areas match its leftmost and rightmost picture pixel, the picture is not touched, and clearing makes the sides black,
+- sound: AY writes through the port decode and the mix give exactly Fuse's own generator's samples, times 128, over a sequence of tone, noise and envelope writes,
+- the AY tone frequency on the 128K, the 48K and the +3 for periods 256, 252, 126 and 63, against 1,773,450 / (16 x period) and against the 439.8, 879.7 and 1759.3 Hz that MAME 0.289 gives for periods 252, 126 and 63 on a 128K, and the number of samples per frame,
+- the AY envelope: the period of shape 0x0C, and shape 0x00 falling once and staying at 0,
+- the AY decode (A15, A14, A1), TurboSound chip select with 0xFE and 0xFF, each chip's own register select, chip 1 leaving the mix at the sample of the control write, 0xFE and 0xFF as register selects without TurboSound, writes ignored with the AY off, and a reset clearing both chips,
+- each Covox port only with its bit, its 8-bit decode, its levels around 0x80, the DACs adding up and clipping, and a 48K write landing at its time in the 48K's frame,
+- the beeper: Fuse's EAR and MIC levels on the TV speaker, the 48K's high-pass speaker model, a square wave at its frequency on the 128K and the 48K with no sample lost across a change of model, silence with the beeper off, and its level back when it is on again,
+- control-port writes and a reset through the presenter: a device turned off in the middle of a frame, the HUD and the border extension, the defaults after a reset, and the samples reaching the audio ring,
+- the resampler: a straight line through the interpolation, and five minutes of Spectrum frames written once per HDMI frame with the Spectrum's clock 300 ppm fast, 300 ppm slow and exact: no underrun, no drop, the fill within two frames of the target, the ratio averaging to the clock difference and a 440 Hz tone at 440 Hz times the clock ratio; and the ring filling up with a clock difference beyond the limit,
 - end to end on a 48K and a 128K whose Z80 the ULA holds per Fuse's contention table, with the CPLD counting ULA time and setting STL, unseen contended reads, restart gaps with up to 500 ns of start delay, and the Bifrost* demo's write of 0x04 to 0x1FFD: every write at its exact ULA T-state, the multicolour lines right, a steady frame start, frames of 70,908 (69,888) T-states, and the 128K not taken for a +2A/+3; the same with SMI reads 200 ppm slower than assumed. All of it goes through core 2's queue.
 
-At the end the tests print the time core 0 takes to run a frame of 13,000 screen writes through Fuse, and the time core 1's code takes for one frame of words at the worst write rate, on the build machine.
+At the end the tests print, on the build machine, the time core 0 takes to run a frame of 13,000 screen writes through Fuse, the time core 1's code takes for one frame of words at the worst write rate, the time core 0 takes for the sound of a quiet frame and of a busy one, and the time the resampler takes for one frame of output.
 
 ## Cost
 
 On the +3 with Bifrost*, the overlay shows core 0 at about 1.7 to 2.0 ms per frame (`RN`) and core 1 at about 13 ms of 20 (`IN`) with a backlog of about 50 words (`BL`). `IN` counts whole passes of core 1's loop with their fixed costs (see [Instrumentation](#instrumentation)); the backlog shows that core 1 keeps up. On the build machine the tests measure about 0.1 ms for core 0 to run a frame of 13,000 screen writes through Fuse, and about 0.3 ms for core 1's code to decode and place one frame of words (100,000 ring words).
 
 Core 2 takes the frame clock off core 1. On the host core 1's code costs about 6 ns per pair.
+
+On the build machine the sound costs core 0 about 50 µs per quiet frame and about 80 µs per frame with both AY chips playing and thousands of AY, beeper and Covox writes. The resampler takes about 4 µs for one frame of output on core 3. Core 3 has no other work and waits on the HDMI FIFO.
 
 ## What is not verified
 
@@ -331,3 +378,6 @@ No hardware was attached during development. Everything below is untested:
 - That Fuse's write points (memory at the end of the cycle, I/O one T-state after its start) match the relation of /WR to the ULA on the real machines; Fuse is calibrated against the real machines with its own Z80 timing, which is not run here.
 - Whether the firmware scales the 480 x 270 frame buffer to 1080p with sharp pixels or with smoothing.
 - The real restart gaps, backlog and CPU times. They exist only once the kernel runs on the board.
+- HDMI sound: that Circle's HDMI sound device starts in polling mode on the Zero 2 W with `hdmi_drive=2`, that core 3 keeps the HDMI audio FIFO filled, and the sound itself.
+- The cost of the sound on core 0 and of the resampler on core 3 on the Pi. Only the host times above are measured.
+- How far apart the Spectrum's clock and the Pi's HDMI audio clock really are. The resampler follows up to 1,000 ppm, Blip_Buffer's 113 ppm included.

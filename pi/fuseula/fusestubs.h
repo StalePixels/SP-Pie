@@ -1,9 +1,10 @@
 /*
  * fusestubs.h
  *
- * The parts of Fuse that the ULA model calls but that SP-Pie does not
- * build: the Z80, sound, tape, disk, the debugger, the user interface and
- * the other peripherals. fusestubs.c gives each one a definition that does
+ * The parts of Fuse that the ULA model and the sound generator call but
+ * that SP-Pie does not build: the Z80, tape, disk, the debugger, the user
+ * interface and the other peripherals, and the sound entry points of the
+ * display side of Fuse. fusestubs.c gives each one a definition that does
  * nothing, or the value Fuse has with the peripheral absent.
  *
  * Fuse's start-up manager is replaced too: it records each module's init

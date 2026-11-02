@@ -39,7 +39,7 @@ FUSEULA_OBJS = $(addprefix $(FUSEULA_OBJDIR)/,$(notdir $(FUSEULA_SOURCES:.c=.o))
 
 OBJS	= src/main.o src/kernel.o src/sppieapp.o src/smieventreader.o \
 	  src/intake.o src/tstateclock.o src/ulaclock.o src/frameclock.o src/presenter.o \
-	  src/overlay.o $(FUSEULA_OBJS)
+	  src/audiostream.o src/overlay.o $(FUSEULA_OBJS)
 
 DEFINE	+= -DSPPIE_OVERLAY=$(OVERLAY)
 
@@ -49,7 +49,8 @@ include $(CIRCLEHOME)/Rules.mk
 
 INCLUDE := $(CIRCLE_STDLIB_INCLUDES) $(INCLUDE)
 
-LIBS := $(CIRCLE_STDLIB_LIBS)
+# Circle's sound library, for the HDMI sound device.
+LIBS := $(CIRCLEHOME)/lib/sound/libsound.a $(CIRCLE_STDLIB_LIBS)
 
 # Objects depend on the overlay choice, which is not visible in timestamps.
 $(OBJS): .overlay-$(OVERLAY)

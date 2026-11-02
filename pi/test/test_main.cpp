@@ -2,8 +2,9 @@
 // test_main.cpp
 //
 // Host tests for the SP-Pie video service. They build the same intake,
-// clock, frame and presentation code the Pi runs, and the Fuse ULA model
-// with our layer, and check results down to the pixel.
+// clock, frame and presentation code the Pi runs, the Fuse ULA model and
+// sound generator with our layer, the control ports and the audio
+// resampler, and check results down to the pixel and the sample.
 //
 // The timed tests use a simulated CPLD: Z80 writes at known clock counts, a
 // four-entry queue that drops events when full, a two-read delay before
@@ -12,6 +13,9 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
+#include "../src/audiostream.h"
+#include "../src/borderextension.h"
+#include "../src/controlports.h"
 #include "../src/event.h"
 #include "../src/eventlog.h"
 #include "../src/frameclock.h"
@@ -23,11 +27,14 @@
 #include "../src/ulaclock.h"
 #include "../src/ulaqueue.h"
 #include "../fuseula/fuseula.h"
+#include "../fuseula/fusesound.h"
+#include "fusesound_ref.h"
 
 #include <algorithm>
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <math.h>
 #include <memory>
 #include <stdio.h>
 #include <string.h>
@@ -1660,6 +1667,965 @@ static void TestBouncingReset (void)
 	}
 }
 
+// --- control ports --------------------------------------------------------
+
+static void TestControlPorts (void)
+{
+	CControlPorts Ports;
+	CHECK_EQ (Ports.Feature (), 0u);
+	CHECK_EQ (Ports.Devices (), 0x07u);
+	CHECK_EQ (Ports.Border (), 0x00u);
+	CHECK_EQ (Ports.Debug (), 0x01u);
+	CHECK (Ports.Hud ());
+	CHECK (!Ports.BorderExtended ());
+
+	// Only the exact 16-bit ports.
+	const uint16_t NearMisses[] = { 0x043A, 0x143B, 0x003B, 0x053A, 0x153B, 0x453B, 0x00FB };
+	for (uint16_t nPort : NearMisses)
+	{
+		CHECK (!Ports.Write (nPort, 0xFF));
+	}
+	CHECK_EQ (Ports.Feature (), 0u);
+	CHECK (Ports.Write (0x043B, 0xFF));
+	for (uint16_t nPort : NearMisses)
+	{
+		Ports.Write (nPort, 0x00);
+	}
+	CHECK (Ports.Hud ());
+
+	// Feature 0xFF, debug: the HUD; the reserved bits are dropped. The
+	// selected feature stays.
+	CHECK (Ports.Write (0x053B, 0x00));
+	CHECK (!Ports.Hud ());
+	CHECK (Ports.Write (0x053B, 0xFF));
+	CHECK (Ports.Hud ());
+	CHECK_EQ (Ports.Debug (), 0x01u);
+	CHECK_EQ (Ports.Feature (), 0xFFu);
+	CHECK (Ports.Write (0x053B, 0xFE));
+	CHECK (!Ports.Hud ());
+	CHECK_EQ (Ports.Devices (), 0x07u);	// the other features are untouched
+	CHECK_EQ (Ports.Border (), 0x00u);
+
+	// Feature 1: the devices; bits 6 and 7 are dropped.
+	CHECK (Ports.Write (0x043B, 1));
+	CHECK (Ports.Write (0x053B, 0x28));
+	CHECK_EQ (Ports.Devices (), 0x28u);
+	CHECK (Ports.Write (0x053B, 0xFF));
+	CHECK_EQ (Ports.Devices (), 0x3Fu);
+	CHECK_EQ (Ports.Debug (), 0x00u);
+
+	// Feature 2: the border extension; bits 1 to 7 are dropped.
+	CHECK (Ports.Write (0x043B, 2));
+	CHECK (Ports.Write (0x053B, 0xFE));
+	CHECK (!Ports.BorderExtended ());
+	CHECK_EQ (Ports.Border (), 0x00u);
+	CHECK (Ports.Write (0x053B, 0x01));
+	CHECK (Ports.BorderExtended ());
+	CHECK_EQ (Ports.Devices (), 0x3Fu);
+
+	// Feature 0 and the reserved features: the data is ignored.
+	for (unsigned nFeature = 0; nFeature < 0xFF; nFeature++)
+	{
+		if (nFeature >= 1 && nFeature <= 2)
+		{
+			continue;
+		}
+		CHECK (Ports.Write (0x043B, (uint8_t) nFeature));
+		CHECK (Ports.Write (0x053B, 0x00));
+		CHECK (Ports.Write (0x053B, 0xFF));
+	}
+	CHECK_EQ (Ports.Devices (), 0x3Fu);
+	CHECK_EQ (Ports.Border (), 0x01u);
+	CHECK_EQ (Ports.Debug (), 0x00u);
+
+	// A reset restores every default and selects feature 0.
+	Ports.Write (0x043B, 2);
+	Ports.Reset ();
+	CHECK_EQ (Ports.Feature (), 0u);
+	CHECK_EQ (Ports.Devices (), 0x07u);
+	CHECK_EQ (Ports.Border (), 0x00u);
+	CHECK_EQ (Ports.Debug (), 0x01u);
+}
+
+// The border extension: each line's side areas take its leftmost and
+// rightmost picture pixel, from a frame run through Fuse with border
+// changes inside lines, so lines and their two edges differ. Clearing
+// makes them black again. The picture itself is not touched.
+static void TestBorderExtension (void)
+{
+	std::vector<uint32_t> Display (DisplayWidth * DisplayHeight, 0xFF000000u);
+	CHECK_EQ (fuseula_init (Display.data () + PictureTop * DisplayWidth + PictureLeft,
+				DisplayWidth), 0);
+	fuseula_select (FUSEULA_128K);
+	ClearScreen (0x38, 1);
+	const uint32_t nLine = fuseula_line_tstates ();
+	const uint32_t nLT0 = fuseula_top_left_border_tstate ();
+	// From line 100 of the picture: red from the middle of each line,
+	// then from line 101 on green at the start of each line. Line 102 has
+	// yellow in its last 8-pixel chunk only, line 104 white in its first
+	// chunk only.
+	for (unsigned q = 100; q < 104; q++)
+	{
+		uint32_t nStart = nLT0 + (q - 15) * nLine - 8;	// picture chunk 0
+		fuseula_io_write (nStart + 22 * 4 - 3, 0x00FE, 2);
+		if (q == 102)
+		{
+			fuseula_io_write (nStart + 43 * 4 + 1, 0x00FE, 6);
+		}
+		fuseula_io_write (nStart + nLine - 3, 0x00FE, q == 103 ? 7 : 4);
+	}
+	fuseula_io_write (nLT0 + (104 - 15) * nLine - 8 + 4 + 1, 0x00FE, 4);
+	fuseula_end_frame ();
+
+	std::vector<uint32_t> Picture (Display);
+	FillBorderExtension (Display.data (), DisplayWidth);
+
+	unsigned nWrong = 0, nPictureChanged = 0;
+	bool bEdgesDiffer = false;
+	for (unsigned y = 0; y < DisplayHeight; y++)
+	{
+		const uint32_t *pRow = Display.data () + y * DisplayWidth;
+		uint32_t nLeft = pRow[PictureLeft], nRight = pRow[PictureLeft + PictureWidth - 1];
+		bEdgesDiffer |= nLeft != nRight;
+		for (unsigned x = 0; x < DisplayWidth; x++)
+		{
+			if (x < PictureLeft)
+			{
+				nWrong += pRow[x] != nLeft;
+			}
+			else if (x >= PictureLeft + PictureWidth)
+			{
+				nWrong += pRow[x] != nRight;
+			}
+			else
+			{
+				nPictureChanged += pRow[x] != Picture[y * DisplayWidth + x];
+			}
+		}
+	}
+	CHECK_EQ (nWrong, 0u);
+	CHECK_EQ (nPictureChanged, 0u);
+	CHECK (bEdgesDiffer);
+	CHECK_EQ (Display[100 * DisplayWidth + 0], Blue);
+	CHECK_EQ (Display[100 * DisplayWidth + DisplayWidth - 1], Red);
+	CHECK_EQ (Display[101 * DisplayWidth + 0], Green);
+	CHECK_EQ (Display[99 * DisplayWidth + DisplayWidth - 1], Blue);
+	CHECK_EQ (Display[102 * DisplayWidth + DisplayWidth - 1], Yellow);
+	CHECK_EQ (Display[102 * DisplayWidth + PictureLeft + PictureWidth - 9], Red);
+	CHECK_EQ (Display[104 * DisplayWidth + 0], White);
+	CHECK_EQ (Display[104 * DisplayWidth + PictureLeft + 8], Green);
+
+	ClearSideAreas (Display.data (), DisplayWidth);
+	nWrong = 0;
+	for (unsigned y = 0; y < DisplayHeight; y++)
+	{
+		for (unsigned x = 0; x < DisplayWidth; x++)
+		{
+			bool bSide = x < PictureLeft || x >= PictureLeft + PictureWidth;
+			nWrong += Display[y * DisplayWidth + x]
+				  != (bSide ? 0xFF000000u : Picture[y * DisplayWidth + x]);
+		}
+	}
+	CHECK_EQ (nWrong, 0u);
+}
+
+// --- sound ----------------------------------------------------------------
+
+static void AyWrite (uint32_t nTState, uint8_t nRegister, uint8_t nValue)
+{
+	fusesound_io_write (nTState, 0xFFFD, nRegister);
+	fusesound_io_write (nTState, 0xBFFD, nValue);
+}
+
+// Runs nFrames frames of model Machine; Writes (n) makes frame n's writes.
+static std::vector<int32_t> SoundFrames (fuseula_machine Machine, unsigned nFrames,
+					 std::function<void (unsigned)> Writes = nullptr,
+					 std::vector<unsigned> *pCounts = nullptr)
+{
+	std::vector<int32_t> Out;
+	for (unsigned n = 0; n < nFrames; n++)
+	{
+		fusesound_begin_frame (Machine);
+		if (Writes)
+		{
+			Writes (n);
+		}
+		const int32_t *pSamples;
+		unsigned nCount = fusesound_end_frame (&pSamples);
+		Out.insert (Out.end (), pSamples, pSamples + nCount);
+		if (pCounts != nullptr)
+		{
+			pCounts->push_back (nCount);
+		}
+	}
+	return Out;
+}
+
+// Default devices, both AY chips reset, beeper and Covox at rest, and a
+// few frames for the band-limited steps to settle. The reset is not at
+// T-state 0: Fuse's generator starts each frame as if every channel were
+// at 0 (sound.c, sound_ay_overlay, last_chan1 to last_chan3), so a
+// channel that falls to 0 at the first AY step of a frame stays at its
+// old level.
+static void SoundQuiet (void)
+{
+	fusesound_begin_frame (FUSEULA_128K);
+	fusesound_devices (0, FUSESOUND_DEFAULT);
+	fusesound_reset (1000);
+	fusesound_ula (1000, 0, 0);
+	const int32_t *pSamples;
+	fusesound_end_frame (&pSamples);
+	SoundFrames (FUSEULA_128K, 3);
+}
+
+// Within a few units of Fuse's 16-bit output of 0: the Blip_Buffer leaves
+// a small remainder after a step.
+static const int32_t Residue = 8 * 128;
+
+static bool NearZero (const std::vector<int32_t> &rSamples, size_t nFrom, size_t nTo)
+{
+	for (size_t i = nFrom; i < nTo && i < rSamples.size (); i++)
+	{
+		if (rSamples[i] > Residue || rSamples[i] < -Residue)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static int64_t Energy (const std::vector<int32_t> &rSamples, size_t nFrom, size_t nTo)
+{
+	int64_t nSum = 0;
+	for (size_t i = nFrom; i < nTo && i < rSamples.size (); i++)
+	{
+		nSum += rSamples[i] < 0 ? -(int64_t) rSamples[i] : rSamples[i];
+	}
+	return nSum;
+}
+
+// Frequency of a square-ish wave from its rising crossings of a level
+// (fLevel of the way from the lowest sample to the highest), in Hz; 0 when there are too few. Only intervals within half and
+// one and a half times the median count: ringing at a step can cross the
+// middle twice, and Fuse's generator now and then holds a tone channel
+// high for two extra half periods (see SoundQuiet).
+static double MeasureFrequency (const std::vector<int32_t> &rSamples, size_t nFrom,
+				double fLevel = 0.5)
+{
+	int32_t nMin = INT32_MAX, nMax = INT32_MIN;
+	for (size_t i = nFrom; i < rSamples.size (); i++)
+	{
+		nMin = std::min (nMin, rSamples[i]);
+		nMax = std::max (nMax, rSamples[i]);
+	}
+	double fMiddle = nMin + ((double) nMax - nMin) * fLevel;
+	std::vector<double> Crossings;
+	for (size_t i = nFrom + 1; i < rSamples.size (); i++)
+	{
+		double a = rSamples[i - 1], b = rSamples[i];
+		if (a < fMiddle && b >= fMiddle)
+		{
+			Crossings.push_back ((double) (i - 1) + (fMiddle - a) / (b - a));
+		}
+	}
+	if (Crossings.size () < 3)
+	{
+		return 0;
+	}
+	std::vector<double> Intervals;
+	for (size_t i = 1; i < Crossings.size (); i++)
+	{
+		Intervals.push_back (Crossings[i] - Crossings[i - 1]);
+	}
+	std::vector<double> Sorted = Intervals;
+	std::sort (Sorted.begin (), Sorted.end ());
+	double fMedian = Sorted[Sorted.size () / 2];
+	double fSum = 0;
+	unsigned nCount = 0;
+	for (double f : Intervals)
+	{
+		if (f > 0.5 * fMedian && f < 1.5 * fMedian)
+		{
+			fSum += f;
+			nCount++;
+		}
+	}
+	return (double) FUSESOUND_RATE * nCount / fSum;
+}
+
+// Samples far below both neighbours while both are high: one sample of
+// the mix that lacks a stream.
+static unsigned SingleSampleDrops (const std::vector<int32_t> &rSamples)
+{
+	int32_t nMax = *std::max_element (rSamples.begin (), rSamples.end ());
+	unsigned nDrops = 0;
+	for (size_t i = 1; i + 1 < rSamples.size (); i++)
+	{
+		if (   rSamples[i - 1] > nMax / 2 && rSamples[i + 1] > nMax / 2
+		    && rSamples[i] < nMax / 4)
+		{
+			nDrops++;
+		}
+	}
+	return nDrops;
+}
+
+static bool Near (double a, double b, double fRelative)
+{
+	return a > b * (1 - fRelative) && a < b * (1 + fRelative);
+}
+
+// AY writes through SP-Pie's port decode and mix give exactly the samples
+// of Fuse's own generator, driven as Fuse's AY port code drives it, times
+// the mix scale. Runs first of the sound tests: both generators start
+// from the same state.
+static void TestSoundMatchesFuse (void)
+{
+	CHECK_EQ (fusesound_init (), 0);
+	CHECK_EQ (fusesound_ref_start (), 0);
+
+	struct TWrite { unsigned nFrame; uint32_t nTState; uint8_t nRegister, nValue; };
+	const TWrite Writes[] =
+	{
+		{ 0, 100, 0, 0xFE }, { 0, 100, 1, 0x00 }, { 0, 100, 7, 0x3E }, { 0, 100, 8, 0x0F },
+		{ 0, 35000, 2, 0x55 }, { 0, 35000, 3, 0x01 }, { 0, 35004, 9, 0x10 },
+		{ 0, 35008, 11, 0x80 }, { 0, 35008, 12, 0x00 }, { 0, 35012, 13, 0x0E },
+		{ 0, 35016, 7, 0x3C },
+		{ 3, 12345, 6, 0x07 }, { 3, 12349, 7, 0x1C }, { 3, 12353, 10, 0x0C },
+		{ 5, 70000, 0, 0x10 },
+		{ 7, 1, 13, 0x08 },
+		{ 9, 50000, 8, 0x00 }, { 9, 50033, 4, 0x20 }, { 9, 50066, 10, 0x0F },
+	};
+	const unsigned nFrames = 12;
+
+	unsigned nMismatches = 0, nTotal = 0;
+	int64_t nEnergy = 0;
+	for (unsigned n = 0; n < nFrames; n++)
+	{
+		fusesound_begin_frame (FUSEULA_128K);
+		for (const TWrite &w : Writes)
+		{
+			if (w.nFrame == n)
+			{
+				AyWrite (w.nTState, w.nRegister, w.nValue);
+				fusesound_ref_ay_write (w.nRegister, w.nValue, w.nTState);
+			}
+		}
+		const int32_t *pOurs;
+		const int16_t *pFuse;
+		unsigned nOurs = fusesound_end_frame (&pOurs);
+		int nFuse = fusesound_ref_frame (&pFuse);
+		CHECK_EQ (nOurs, (unsigned) nFuse);
+		CHECK (nOurs == 959 || nOurs == 960);
+		for (unsigned i = 0; i < nOurs && (int) i < nFuse; i++)
+		{
+			nMismatches += pOurs[i] != 128 * (int32_t) pFuse[i];
+			nEnergy += pFuse[i] < 0 ? -pFuse[i] : pFuse[i];
+		}
+		nTotal += nOurs;
+	}
+	CHECK_EQ (nMismatches, 0u);
+	CHECK (nEnergy > (int64_t) nTotal * 1000);	// the sequence makes sound
+	CHECK_EQ (fusesound_ay_selected_register (0), 10u);
+}
+
+// The AY clock is 1,773,450 Hz on the 128K class and on the 48K: tone
+// period P gives 1,773,450 / (16 P) Hz. The 128K-class frames give 48,000
+// samples per second of Spectrum time, the 48K's too. MAME 0.289 (a
+// spec128 with an ay_turbosound slot) gives 439.8, 879.7 and 1759.3 Hz
+// for periods 252, 126 and 63.
+static void TestAyTone (void)
+{
+	const uint16_t Periods[] = { 256, 252, 126, 63 };
+	const double Mame[] = { 0, 439.8, 879.7, 1759.3 };
+	const fuseula_machine Machines[] = { FUSEULA_128K, FUSEULA_48K, FUSEULA_PLUS3 };
+
+	for (fuseula_machine Machine : Machines)
+	{
+		for (unsigned p = 0; p < 4; p++)
+		{
+			SoundQuiet ();
+			std::vector<unsigned> Counts;
+			auto Samples = SoundFrames (Machine, 50, [&] (unsigned n) {
+				if (n == 0)
+				{
+					AyWrite (10, 0, (uint8_t) Periods[p]);
+					AyWrite (10, 1, (uint8_t) (Periods[p] >> 8));
+					AyWrite (10, 7, 0x3E);
+					AyWrite (10, 8, 0x0F);
+				}
+			}, &Counts);
+
+			double fExpected = 1773450.0 / (16.0 * Periods[p]);
+			double fMeasured = MeasureFrequency (Samples, 2000);
+			CHECK (Near (fMeasured, fExpected, 0.001));
+			if (Mame[p] != 0)
+			{
+				CHECK (Near (fMeasured, Mame[p], 0.001));
+			}
+			if (!Near (fMeasured, fExpected, 0.001))
+			{
+				printf ("    machine %d period %u: %.2f Hz, expected %.2f\n",
+					(int) Machine, Periods[p], fMeasured, fExpected);
+			}
+
+			// 50 frames of samples cover 50 frames of Spectrum time, at
+			// the rate of Fuse's Blip_Buffer: its ratio of samples to
+			// clocks is a 16-bit fraction, (48,000 << 16) / 3,546,900
+			// rounded to 887, so it makes 48,005 samples a second.
+			double fSeconds = Machine == FUSEULA_48K ? 50 * 69888 / 3500000.0
+								 : 50 * 70908 / 3546900.0;
+			double fRate = 887.0 * 3546900 / 65536;
+			CHECK (fabs ((double) Samples.size () - fSeconds * fRate) <= 1.0);
+		}
+	}
+}
+
+// Envelope shape 0x0C (repeating rise) with period E: one rise every
+// 256 E AY clocks. Shape 0x00 falls once and stays at 0.
+static void TestAyEnvelope (void)
+{
+	SoundQuiet ();
+	auto Samples = SoundFrames (FUSEULA_128K, 60, [] (unsigned n) {
+		if (n == 0)
+		{
+			AyWrite (10, 7, 0x3F);		// no tone, no noise: the level itself
+			AyWrite (10, 11, 0x00);
+			AyWrite (10, 12, 0x01);		// E = 256
+			AyWrite (10, 8, 0x10);
+			AyWrite (10, 13, 0x0C);
+		}
+	});
+	int32_t nMax = *std::max_element (Samples.begin (), Samples.end ());
+	CHECK (nMax > 700000);		// 15 is 6,144 in Fuse's 16 bits
+	std::vector<size_t> Drops;
+	for (size_t i = 1; i < Samples.size (); i++)
+	{
+		if (Samples[i - 1] - Samples[i] > nMax / 2)
+		{
+			Drops.push_back (i);
+		}
+	}
+	CHECK (Drops.size () > 10);
+	if (Drops.size () > 10)
+	{
+		double fPeriod = (double) (Drops.back () - Drops[1]) / (Drops.size () - 2);
+		double fExpected = 256.0 * 256 / 1773450.0 * FUSESOUND_RATE;	// 1,773.9 samples
+		CHECK (Near (fPeriod, fExpected, 0.002));
+	}
+
+	SoundQuiet ();
+	Samples = SoundFrames (FUSEULA_128K, 10, [] (unsigned n) {
+		if (n == 0)
+		{
+			AyWrite (10, 7, 0x3F);
+			AyWrite (10, 11, 0x00);
+			AyWrite (10, 12, 0x01);
+			AyWrite (10, 8, 0x10);
+			AyWrite (10, 13, 0x00);
+		}
+	});
+	CHECK (Energy (Samples, 0, 900) > 900 * 100000);	// falling during the first period
+	CHECK (NearZero (Samples, 4 * 960, Samples.size ()));	// then 0 for good
+}
+
+// TurboSound: 0xFE to the register port selects chip 0, 0xFF chip 1, each
+// chip keeps its own selected register, chip 1 sounds only with the AY
+// and TurboSound bits, and its output stops at the sample of the control
+// write. Without TurboSound 0xFE and 0xFF are register selects.
+static void TestTurboSound (void)
+{
+	SoundQuiet ();
+	CHECK_EQ (fusesound_ay_selected_chip (), 0u);
+
+	// The decode: A15 = 1, A1 = 0, A14 picks the port. Ports with A1 = 1
+	// or A15 = 0 are not the AY; the other address bits do not matter.
+	fusesound_begin_frame (FUSEULA_128K);
+	fusesound_io_write (10, 0xFFFF, 0x05);
+	fusesound_io_write (10, 0x7FFD, 0x05);
+	fusesound_io_write (10, 0x3FFD, 0x05);
+	CHECK_EQ (fusesound_ay_selected_register (0), 0u);
+	fusesound_io_write (10, 0xC000, 0x05);
+	CHECK_EQ (fusesound_ay_selected_register (0), 5u);
+	fusesound_io_write (10, 0xFFFD, 0x00);
+	const int32_t *pSamples;
+	fusesound_end_frame (&pSamples);
+
+	fusesound_begin_frame (FUSEULA_128K);
+	fusesound_io_write (10, 0xFFFD, 0xFF);
+	CHECK_EQ (fusesound_ay_selected_chip (), 1u);
+	AyWrite (20, 0, 0x00);
+	AyWrite (20, 1, 0x01);
+	AyWrite (20, 7, 0x3E);
+	AyWrite (20, 8, 0x0F);
+	CHECK_EQ (fusesound_ay_selected_register (1), 8u);
+	CHECK_EQ (fusesound_ay_selected_register (0), 0u);
+	fusesound_io_write (30, 0xFFFD, 0xFE);
+	CHECK_EQ (fusesound_ay_selected_chip (), 0u);
+	fusesound_io_write (30, 0xFFFD, 0x07);
+	CHECK_EQ (fusesound_ay_selected_register (0), 7u);
+	CHECK_EQ (fusesound_ay_selected_register (1), 8u);
+	fusesound_end_frame (&pSamples);
+
+	// Chip 1 plays the tone; chip 0 has volume 0. Writes of 0 to its
+	// volume through ports that are not the data port change nothing.
+	auto Samples = SoundFrames (FUSEULA_128K, 20, [] (unsigned n) {
+		if (n == 0)
+		{
+			fusesound_io_write (10, 0xFFFD, 0xFF);
+			fusesound_io_write (10, 0xFFFD, 8);
+			fusesound_io_write (20, 0xBFFF, 0);
+			fusesound_io_write (20, 0x3FFD, 0);
+			fusesound_io_write (20, 0xFFFD, 0xFE);
+			fusesound_io_write (20, 0xFFFD, 7);
+		}
+	});
+	CHECK (Near (MeasureFrequency (Samples, 0), 1773450.0 / 4096, 0.001));
+
+	// TurboSound off at T-state 35,454: chip 1's sound ends at that sample.
+	const uint32_t nOff = 35454;
+	Samples = SoundFrames (FUSEULA_128K, 1, [&] (unsigned) {
+		fusesound_devices (nOff, FUSESOUND_AY | FUSESOUND_BEEPER);
+	});
+	size_t nAt = (size_t) ((double) nOff * Samples.size () / 70908);
+	CHECK (Energy (Samples, nAt - 200, nAt - 1) > 0);
+	CHECK (NearZero (Samples, nAt + 1, Samples.size ()));
+	CHECK_EQ (fusesound_ay_selected_chip (), 0u);
+
+	// Without TurboSound, 0xFF and 0xFE are register selects of chip 0, and
+	// data goes to chip 0.
+	fusesound_begin_frame (FUSEULA_128K);
+	fusesound_io_write (10, 0xFFFD, 0xFF);
+	CHECK_EQ (fusesound_ay_selected_chip (), 0u);
+	CHECK_EQ (fusesound_ay_selected_register (0), 0x0Fu);
+	fusesound_io_write (10, 0xFFFD, 0xFE);
+	CHECK_EQ (fusesound_ay_selected_register (0), 0x0Eu);
+	fusesound_end_frame (&pSamples);
+	Samples = SoundFrames (FUSEULA_128K, 3);
+	CHECK (NearZero (Samples, 0, Samples.size ()));
+
+	// TurboSound on again: chip 1 still has its tone.
+	Samples = SoundFrames (FUSEULA_128K, 20, [] (unsigned n) {
+		if (n == 0)
+		{
+			fusesound_devices (0, FUSESOUND_DEFAULT);
+		}
+	});
+	CHECK (Near (MeasureFrequency (Samples, 0), 1773450.0 / 4096, 0.001));
+
+	// AY off: no sound, and writes to the AY ports are ignored.
+	Samples = SoundFrames (FUSEULA_128K, 5, [] (unsigned n) {
+		if (n == 0)
+		{
+			fusesound_devices (0, FUSESOUND_BEEPER | FUSESOUND_TURBOSOUND);
+			fusesound_io_write (10, 0xFFFD, 0xFE);
+			AyWrite (20, 8, 0x0F);
+		}
+	});
+	CHECK (NearZero (Samples, 0, Samples.size ()));
+	CHECK_EQ (fusesound_ay_selected_register (0), 0x0Eu);
+	CHECK_EQ (fusesound_ay_selected_chip (), 0u);
+
+	// A reset clears both chips: no sound with the AY back on.
+	fusesound_devices (0, FUSESOUND_DEFAULT);
+	fusesound_begin_frame (FUSEULA_128K);
+	fusesound_reset (100);
+	fusesound_end_frame (&pSamples);
+	Samples = SoundFrames (FUSEULA_128K, 3);
+	CHECK (NearZero (Samples, 0, Samples.size ()));
+	CHECK_EQ (fusesound_ay_selected_register (0), 0u);
+	CHECK_EQ (fusesound_ay_selected_register (1), 0u);
+}
+
+// The last sample of a frame, after a write at its start has settled.
+static int32_t Settled (std::function<void (void)> Writes)
+{
+	auto Samples = SoundFrames (FUSEULA_128K, 2, [&] (unsigned n) {
+		if (n == 0)
+		{
+			Writes ();
+		}
+	});
+	return Samples.back ();
+}
+
+// Covox: one DAC per port, decoded on the low 8 address bits, each only
+// while its bit is set, 0x80 the centre, Fuse's 128 per step.
+static void TestCovox (void)
+{
+	SoundQuiet ();
+	const uint16_t Ports[3] = { 0x00FB, 0x00DD, 0x00DF };
+	const unsigned Bits[3] = { FUSESOUND_COVOX_FB, FUSESOUND_COVOX_DD, FUSESOUND_COVOX_DF };
+	const int32_t nStep = 128 * 128;	// one DAC step in the mix
+
+	for (unsigned i = 0; i < 3; i++)
+	{
+		// Off: writes are ignored.
+		CHECK (abs (Settled ([&] { fusesound_io_write (0, Ports[i], 0xFF); })) <= Residue);
+		CHECK_EQ (fusesound_covox_value (i), 0x80u);
+
+		fusesound_devices (0, FUSESOUND_DEFAULT | Bits[i]);
+		int32_t nHigh = Settled ([&] { fusesound_io_write (0, Ports[i], 0xFF); });
+		CHECK (Near (nHigh, 127.0 * nStep, 0.01));
+		CHECK_EQ (fusesound_covox_value (i), 0xFFu);
+		int32_t nLow = Settled ([&] { fusesound_io_write (0, (uint16_t) (Ports[i] | 0x1200), 0x00); });
+		CHECK (Near (-nLow, 128.0 * nStep, 0.01));
+		CHECK (abs (Settled ([&] { fusesound_io_write (0, Ports[i], 0x80); })) <= Residue);
+
+		// The other ports and near misses leave this DAC alone.
+		fusesound_io_write (0, Ports[i], 0x90);
+		for (unsigned j = 0; j < 3; j++)
+		{
+			if (j != i)
+			{
+				fusesound_io_write (0, Ports[j], 0x10);
+				CHECK_EQ (fusesound_covox_value (j), 0x80u);
+			}
+		}
+		fusesound_io_write (0, (uint16_t) (Ports[i] ^ 0x01), 0x10);
+		fusesound_io_write (0, (uint16_t) (Ports[i] ^ 0x20), 0x10);
+		CHECK_EQ (fusesound_covox_value (i), 0x90u);
+		CHECK (Near (Settled ([] {}), 16.0 * nStep, 0.01));
+
+		// Off again: back to the centre.
+		fusesound_devices (0, FUSESOUND_DEFAULT);
+		CHECK_EQ (fusesound_covox_value (i), 0x80u);
+		CHECK (abs (Settled ([] {})) <= Residue);
+	}
+
+	// On the 48K a write lands at its time in the 48K's frame: T-state
+	// 60,000 is sample 822.9 of the frame at 3.5 MHz, and sample 812.0 at
+	// the 128K's 3.5469 MHz. The Blip_Buffer puts every step 8 samples
+	// late, on every stream alike, so the test compares the two.
+	auto StepAt = [&] (fuseula_machine Machine) {
+		fusesound_devices (0, FUSESOUND_DEFAULT | FUSESOUND_COVOX_FB);
+		SoundFrames (Machine, 2);
+		auto Step = SoundFrames (Machine, 1, [] (unsigned) {
+			fusesound_io_write (60000, 0x00FB, 0xFF);
+		});
+		size_t nAt = 0;
+		while (nAt < Step.size () && Step[nAt] < 127 * nStep / 2)
+		{
+			nAt++;
+		}
+		fusesound_devices (0, FUSESOUND_DEFAULT);
+		SoundFrames (Machine, 2);
+		return nAt;
+	};
+	size_t nAt48 = StepAt (FUSEULA_48K), nAt128 = StepAt (FUSEULA_128K);
+	CHECK (nAt128 >= 812 && nAt128 <= 822);
+	CHECK (nAt48 >= nAt128 + 10 && nAt48 <= nAt128 + 12);
+
+	// All three at once add up. Fuse's generator limits its output to 16
+	// bits (sound.c, sound_mix_ula_speaker), so three DACs near full
+	// scale clip there.
+	fusesound_devices (0, FUSESOUND_DEFAULT | FUSESOUND_COVOX_FB | FUSESOUND_COVOX_DD
+				 | FUSESOUND_COVOX_DF);
+	int32_t nSum = Settled ([&] {
+		fusesound_io_write (0, Ports[0], 0x90);
+		fusesound_io_write (0, Ports[1], 0x90);
+		fusesound_io_write (0, Ports[2], 0x70);
+	});
+	CHECK (Near (nSum, 16.0 * nStep, 0.01));
+	nSum = Settled ([&] {
+		for (unsigned i = 0; i < 3; i++)
+		{
+			fusesound_io_write (0, Ports[i], 0xFF);
+		}
+	});
+	CHECK (nSum >= 0x7FFF * 128 && nSum <= 0x7FFF * 128 + Residue);
+	fusesound_devices (0, FUSESOUND_DEFAULT);
+	CHECK (abs (Settled ([] {})) <= Residue);
+}
+
+// The beeper through Fuse's own ULA port code: port 0xFE bit 4 (EAR) and
+// bit 3 (MIC, which adds Fuse's tape level while it is 0), on the 128K's
+// TV speaker path, and silence with the beeper bit off.
+static void TestBeeper (void)
+{
+	auto pPicture = NewPicture ();
+	fuseula_select (FUSEULA_128K);
+	SoundQuiet ();
+
+	auto Level = [&] (uint8_t nPort) {
+		auto Samples = SoundFrames (FUSEULA_128K, 2, [&] (unsigned n) {
+			if (n == 0)
+			{
+				fuseula_io_write (0, 0x00FE, nPort);
+			}
+			fuseula_end_frame ();
+		});
+		return Samples.back ();
+	};
+	CHECK (abs (Level (0x08)) <= Residue);			// EAR 0, MIC 1
+	CHECK (Near (Level (0x00), 2.0 * 256 * 128, 0.01));	// MIC 0: tape level
+	CHECK (Near (Level (0x18), 50.0 * 256 * 128, 0.01));	// EAR 1
+	CHECK (Near (Level (0x10), 52.0 * 256 * 128, 0.01));	// both
+
+	// On the 48K Fuse models the internal speaker, a 750 Hz high-pass
+	// (sound/speaker_filter.h): a steady EAR level dies away. The TV
+	// speaker of the 128K class keeps it.
+	fuseula_select (FUSEULA_48K);
+	auto Level48 = [&] (uint8_t nPort) {
+		auto Samples = SoundFrames (FUSEULA_48K, 2, [&] (unsigned n) {
+			if (n == 0)
+			{
+				fuseula_io_write (0, 0x00FE, nPort);
+			}
+			fuseula_end_frame ();
+		});
+		return Samples.back ();
+	};
+	Level48 (0x08);
+	CHECK (abs (Level48 (0x18)) <= Residue);
+	fuseula_select (FUSEULA_128K);
+	CHECK (Near (Level (0x18), 50.0 * 256 * 128, 0.01));
+	Level (0x08);
+
+	// A square wave: EAR toggled every 4,000 T-states.
+	uint64_t nNext = 0;
+	bool bHigh = false;
+	auto Square = [&] (unsigned n) {
+		uint64_t nStart = (uint64_t) n * 70908;
+		for (; nNext < nStart + 70908; nNext += 4000)
+		{
+			bHigh = !bHigh;
+			fuseula_io_write ((uint32_t) (nNext - nStart), 0x00FE, bHigh ? 0x18 : 0x08);
+		}
+		fuseula_end_frame ();
+	};
+	auto Samples = SoundFrames (FUSEULA_128K, 25, Square);
+	CHECK (Near (MeasureFrequency (Samples, 1000), 3546900.0 / 8000, 0.001));
+	CHECK_EQ (SingleSampleDrops (Samples), 0u);
+
+	// The same on the 48K (3.5 MHz), and back: the beeper moves between
+	// Fuse's 48K and 128K speaker models with no sample lost.
+	fuseula_select (FUSEULA_48K);
+	nNext = 0;
+	Samples = SoundFrames (FUSEULA_48K, 25, [&] (unsigned n) {
+		uint64_t nStart = (uint64_t) n * 69888;
+		for (; nNext < nStart + 69888; nNext += 4000)
+		{
+			bHigh = !bHigh;
+			fuseula_io_write ((uint32_t) (nNext - nStart), 0x00FE, bHigh ? 0x18 : 0x08);
+		}
+		fuseula_end_frame ();
+	});
+	// Fuse's 48K speaker model is a 750 Hz high-pass (sound/speaker_filter.h),
+	// so each rising edge is a peak: count the peaks.
+	CHECK (Near (MeasureFrequency (Samples, 1000, 0.85), 3500000.0 / 8000, 0.001));
+	fuseula_select (FUSEULA_128K);
+	nNext = 0;
+	Samples = SoundFrames (FUSEULA_128K, 25, Square);
+	CHECK (Near (MeasureFrequency (Samples, 1000), 3546900.0 / 8000, 0.001));
+	CHECK_EQ (SingleSampleDrops (Samples), 0u);
+
+	// Beeper off at the start of a frame: the output falls to 0 and stays
+	// there while the program keeps toggling.
+	fusesound_devices (0, FUSESOUND_AY | FUSESOUND_TURBOSOUND);
+	Samples = SoundFrames (FUSEULA_128K, 5, [&] (unsigned n) { Square (n + 25); });
+	CHECK (NearZero (Samples, 960, Samples.size ()));
+
+	// A write while the beeper is off is kept, and its level comes back
+	// when the beeper is turned on.
+	Samples = SoundFrames (FUSEULA_128K, 2, [&] (unsigned n) {
+		if (n == 0)
+		{
+			fuseula_io_write (0, 0x00FE, 0x18);
+		}
+		fuseula_end_frame ();
+	});
+	CHECK (NearZero (Samples, 0, Samples.size ()));
+	CHECK (Near (Settled ([] { fusesound_devices (0, FUSESOUND_DEFAULT); }),
+		     50.0 * 256 * 128, 0.01));
+	Level (0x08);
+}
+
+// Through the presenter: control-port writes at their place in the frame,
+// the HUD and border extension bits, and a reset restoring the defaults
+// and clearing the AY.
+static void TestSoundThroughPresenter (void)
+{
+	auto pPicture = NewPicture ();
+	std::unique_ptr<CEventLog> pLog (new CEventLog);
+	std::unique_ptr<CAudioFifo> pAudio (new CAudioFifo);
+	CFramePresenter Presenter (pLog.get (), pAudio.get ());
+	CHECK (Presenter.Initialize (pPicture->Pixels, PictureWidth));
+	SoundQuiet ();
+
+	auto Push = [&] (uint32_t nFrame, uint32_t nTState, uint8_t nKind, uint16_t nAddress,
+			 uint8_t nData) {
+		TTimedEvent Event = { nFrame, nTState, nAddress, nKind, nData };
+		CHECK (pLog->Push (Event));
+	};
+	auto Take = [&] () {
+		std::vector<int32_t> Samples;
+		while (pAudio->Available () != 0)
+		{
+			Samples.push_back (pAudio->Pop ());
+		}
+		return Samples;
+	};
+
+	// Frame 0: a tone, then the AY turned off at T-state 35,454.
+	Push (0, 100, KindIo, 0xFFFD, 0);	Push (0, 100, KindIo, 0xBFFD, 0x00);
+	Push (0, 104, KindIo, 0xFFFD, 1);	Push (0, 104, KindIo, 0xBFFD, 0x01);
+	Push (0, 108, KindIo, 0xFFFD, 7);	Push (0, 108, KindIo, 0xBFFD, 0x3E);
+	Push (0, 112, KindIo, 0xFFFD, 8);	Push (0, 112, KindIo, 0xBFFD, 0x0F);
+	Push (0, 1000, KindIo, 0x043B, 1);
+	Push (0, 35454, KindIo, 0x053B, 0x04);
+	pLog->Complete (1, Machine128K, true);
+	CHECK (Presenter.Present ());
+	auto Samples = Take ();
+	CHECK (Samples.size () == 959 || Samples.size () == 960);
+	size_t nAt = (size_t) (35454.0 * Samples.size () / 70908);
+	CHECK (Energy (Samples, 0, nAt - 1) > 0);
+	CHECK (NearZero (Samples, nAt + 1, Samples.size ()));
+	CHECK_EQ (fusesound_current_devices (), 0x04u);
+
+	// Frame 1: HUD off, border extension on.
+	Push (1, 200, KindIo, 0x043B, 0xFF);
+	Push (1, 300, KindIo, 0x053B, 0);
+	Push (1, 400, KindIo, 0x043B, 2);
+	Push (1, 500, KindIo, 0x053B, 1);
+	pLog->Complete (2, Machine128K, true);
+	CHECK (Presenter.Present ());
+	CHECK (!Presenter.Hud ());
+	CHECK (Presenter.BorderExtended ());
+	CHECK (NearZero (Take (), 0, 2000));
+
+	// Frame 2: a reset: the defaults again, and the AY registers are 0, so
+	// no tone with the AY back on.
+	Push (2, 500, KindReset, 0, 0);
+	pLog->Complete (3, Machine128K, true);
+	CHECK (Presenter.Present ());
+	CHECK (Presenter.Hud ());
+	CHECK (!Presenter.BorderExtended ());
+	CHECK_EQ (Presenter.Control ().Feature (), 0u);
+	CHECK_EQ (fusesound_current_devices (), (unsigned) FUSESOUND_DEFAULT);
+	pLog->Complete (5, Machine128K, true);
+	CHECK (Presenter.Present ());
+	CHECK (Presenter.Present ());
+	Samples = Take ();
+	CHECK_EQ (Samples.size () > 1900, true);
+	CHECK (NearZero (Samples, 0, Samples.size ()));
+	CHECK_EQ (pAudio->Dropped (), 0u);
+}
+
+// The resampler's interpolation (Catmull-Rom) follows a straight line
+// exactly, wherever between two input samples the output falls.
+static void TestResamplerLine (void)
+{
+	std::unique_ptr<CAudioFifo> pFifo (new CAudioFifo);
+	CAudioResampler Resampler (pFifo.get ());
+	int32_t nNext = -5000000;
+	std::vector<int32_t> Out;
+	for (unsigned t = 0; t < 90000; t++)
+	{
+		while (pFifo->Available () < CAudioResampler::TargetFill + 100)
+		{
+			pFifo->Write (&nNext, 1);
+			nNext += 100;
+		}
+		Out.push_back (Resampler.Next ());
+	}
+	CHECK (Resampler.Playing ());
+	unsigned nBent = 0;
+	for (size_t i = 10; i + 1 < Out.size (); i++)
+	{
+		int32_t nCurve = Out[i + 1] - 2 * Out[i] + Out[i - 1];
+		nBent += nCurve > 2 || nCurve < -2;
+	}
+	CHECK_EQ (nBent, 0u);
+	CHECK (Out.back () - Out[10] > 100 * 80000);
+}
+
+// The resampler against clocks that differ: Spectrum frames of samples,
+// written once per HDMI frame (960 output samples) as the presenter
+// writes them, with the Spectrum's clock off by up to 300 ppm. The ring
+// never runs empty or full, and the fill stays within two frames of the
+// target. Each Spectrum frame skipped or repeated by the presenter
+// moves 960 samples at once, so the ratio swings by a few hundred ppm
+// around the clock difference; over four minutes it averages to the
+// difference, and a 440 Hz tone comes out at 440 Hz times the clock
+// ratio. Beyond MaxAdjust the ring fills up, so the limit is real.
+static void TestResampler (void)
+{
+	const double Offsets[] = { 300e-6, -300e-6, 0, 3000e-6 };
+	for (double fOffset : Offsets)
+	{
+		std::unique_ptr<CAudioFifo> pFifo (new CAudioFifo);
+		CAudioResampler Resampler (pFifo.get ());
+
+		// Input samples per Spectrum frame (128K class), and the length
+		// of a Spectrum frame in output samples.
+		const double fFrameSamples = 70908.0 * 48000 / 3546900;
+		const double fFrameOutput = fFrameSamples / (1 + fOffset);
+		const uint64_t nOutputs = 48000ull * 300;
+		const uint64_t nSettled = 48000ull * 60;
+
+		double fProduced = 0;		// input samples made so far
+		uint64_t nInput = 0;		// input samples written so far
+		double fNextFrameEnd = fFrameOutput;
+		uint32_t nMinFill = UINT32_MAX, nMaxFill = 0;
+		double fAdjustSum = 0;
+		double fAdjustMin = 1, fAdjustMax = -1;
+		std::vector<int32_t> Tail;
+		Tail.reserve (nOutputs - nSettled);
+		std::vector<int32_t> Frame;
+
+		for (uint64_t t = 0; t < nOutputs; t++)
+		{
+			// Each HDMI frame, the complete Spectrum frames go to the ring.
+			if (t % 960 == 0)
+			{
+				while (fNextFrameEnd <= (double) t)
+				{
+					fProduced += fFrameSamples;
+					Frame.clear ();
+					for (; nInput < (uint64_t) fProduced; nInput++)
+					{
+						Frame.push_back ((int32_t) (1000000.0
+							* sin (2 * M_PI * 440.0 * nInput / 48000)));
+					}
+					pFifo->Write (Frame.data (), (uint32_t) Frame.size ());
+					fNextFrameEnd += fFrameOutput;
+				}
+			}
+			int32_t nOut = Resampler.Next ();
+			if (t >= nSettled)
+			{
+				nMinFill = std::min (nMinFill, pFifo->Available ());
+				nMaxFill = std::max (nMaxFill, pFifo->Available ());
+				fAdjustSum += Resampler.Adjust ();
+				fAdjustMin = std::min (fAdjustMin, Resampler.Adjust ());
+				fAdjustMax = std::max (fAdjustMax, Resampler.Adjust ());
+				Tail.push_back (nOut);
+			}
+		}
+		double fAdjustMean = fAdjustSum / (double) (nOutputs - nSettled);
+
+		if (fOffset < 2e-3)
+		{
+			CHECK_EQ (Resampler.Underruns (), 0u);
+			CHECK_EQ (pFifo->Dropped (), 0u);
+			CHECK (nMinFill + 1920 > CAudioResampler::TargetFill);
+			CHECK (nMaxFill < CAudioResampler::TargetFill + 1920);
+			CHECK (fabs (fAdjustMean - fOffset) < 50e-6);
+			CHECK (Near (MeasureFrequency (Tail, 0), 440.0 * (1 + fOffset), 50e-6));
+			CHECK (fAdjustMax - fAdjustMin < 1e-3);
+		}
+		else
+		{
+			CHECK (pFifo->Dropped () > 0);
+			CHECK (fabs (Resampler.Adjust () - CAudioResampler::MaxAdjust) < 1e-9);
+		}
+		printf ("    clocks %+.0f ppm: tone %.4f Hz, fill %u to %u, ratio %+.0f to %+.0f ppm, mean %+.1f ppm\n", fOffset * 1e6, MeasureFrequency (Tail, 0),
+			nMinFill, nMaxFill, fAdjustMin * 1e6, fAdjustMax * 1e6,
+			fAdjustMean * 1e6);
+	}
+}
+
 // --- cost -----------------------------------------------------------------
 
 static void ReportCost (void)
@@ -1704,6 +2670,59 @@ static void ReportCost (void)
 		"core 1 %.0f us per frame of %zu words with %llu events\n",
 		nFrameUs, nWrites, nIntakeUs, Sim.Words.size (),
 		(unsigned long long) Counters.Events);
+
+	// Core 0's sound: a quiet frame, and a busy one with both AY chips
+	// playing tone, noise and envelope, 2,000 AY writes, 2,000 beeper
+	// writes and 3,000 Covox writes.
+	fusesound_devices (0, FUSESOUND_DEVICES);
+	auto t4 = std::chrono::steady_clock::now ();
+	for (unsigned f = 0; f < nFramesRun; f++)
+	{
+		SoundFrames (FUSEULA_128K, 1);
+	}
+	auto t5 = std::chrono::steady_clock::now ();
+	for (unsigned f = 0; f < nFramesRun; f++)
+	{
+		SoundFrames (FUSEULA_128K, 1, [] (unsigned) {
+			for (unsigned i = 0; i < 1000; i++)
+			{
+				uint32_t t = 10 + i * 70;
+				fusesound_io_write (t, 0xFFFD, (i & 1) ? 0xFE : 0xFF);
+				AyWrite (t, (uint8_t) (i % 14), (uint8_t) (i * 37));
+				fusesound_ula (t, (int) (i & 1), (int) ((i >> 1) & 1));
+				fusesound_ula (t + 35, (int) (i & 1), (int) ((i >> 2) & 1));
+				fusesound_io_write (t, 0x00FB, (uint8_t) i);
+				fusesound_io_write (t + 20, 0x00DD, (uint8_t) (i * 3));
+				fusesound_io_write (t + 40, 0x00DF, (uint8_t) (i * 5));
+			}
+		});
+	}
+	auto t6 = std::chrono::steady_clock::now ();
+	fusesound_devices (0, FUSESOUND_DEFAULT);
+	SoundQuiet ();
+
+	// Core 3: one frame of output, 960 samples, through the resampler.
+	std::unique_ptr<CAudioFifo> pFifo (new CAudioFifo);
+	CAudioResampler Resampler (pFifo.get ());
+	std::vector<int32_t> Block (960, 1000);
+	int64_t nSink = 0;
+	auto t7 = std::chrono::steady_clock::now ();
+	for (unsigned f = 0; f < 1000; f++)
+	{
+		pFifo->Write (Block.data (), 960);
+		for (unsigned i = 0; i < 960; i++)
+		{
+			nSink += Resampler.Next ();
+		}
+	}
+	auto t8 = std::chrono::steady_clock::now ();
+
+	printf ("cost (host): sound on core 0 %.0f us per quiet frame, %.0f us per busy frame; "
+		"resampler on core 3 %.1f us per frame of output (%lld)\n",
+		std::chrono::duration<double, std::micro> (t5 - t4).count () / nFramesRun,
+		std::chrono::duration<double, std::micro> (t6 - t5).count () / nFramesRun,
+		std::chrono::duration<double, std::micro> (t8 - t7).count () / 1000,
+		(long long) (nSink & 1));
 }
 
 int main (void)
@@ -1731,6 +2750,17 @@ int main (void)
 	Run ("48K and 128K: Z80 clock held, CPLD counts ULA time, multicolour", TestStoppedClockMulticolour);
 	Run ("frame clock: a reset clears the +2A/+3 detection", TestResetClearsPlus3);
 	Run ("frame clock: a bouncing reset", TestBouncingReset);
+	Run ("sound: AY output matches Fuse's own generator", TestSoundMatchesFuse);
+	Run ("control ports: decode, defaults, reserved, reset", TestControlPorts);
+	Run ("border extension: side areas from each line's edge pixels", TestBorderExtension);
+	Run ("sound: AY tone at 1.7734 MHz on 128K, 48K, +3", TestAyTone);
+	Run ("sound: AY envelope period and single fall", TestAyEnvelope);
+	Run ("sound: TurboSound chip select and enable", TestTurboSound);
+	Run ("sound: Covox per port and enable bits", TestCovox);
+	Run ("sound: beeper EAR and MIC levels, tone, enable", TestBeeper);
+	Run ("sound: control ports and reset through the presenter", TestSoundThroughPresenter);
+	Run ("audio: resampler interpolation", TestResamplerLine);
+	Run ("audio: resampler against clock differences", TestResampler);
 
 	ReportCost ();
 

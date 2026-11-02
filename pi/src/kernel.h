@@ -2,7 +2,8 @@
 // kernel.h
 //
 // Circle kernel: brings up the system on core 0, then hands over to
-// CSpPieApp, which runs the renderer on core 0 and event intake on core 1.
+// CSpPieApp, which runs the renderer on core 0, event intake on core 1, the
+// ULA clock on core 2 and audio output on core 3.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
@@ -19,6 +20,7 @@
 #include <circle/koptions.h>
 #include <circle/logger.h>
 #include <circle/nulldevice.h>
+#include <circle/sound/hdmisoundbasedevice.h>
 #include <circle/timer.h>
 #include <circle/types.h>
 
@@ -59,6 +61,7 @@ private:
 
 	CBcmFrameBuffer		*m_pFrameBuffer;
 	sppie::CSmiEventReader	*m_pReader;
+	CHDMISoundBaseDevice	*m_pSound;	// 0 when HDMI sound did not start
 	sppie::CSpPieApp	*m_pApp;
 };
 

@@ -4,8 +4,10 @@
  * Definitions for the parts of Fuse and libspectrum that the files SP-Pie
  * builds refer to but that are not built. See fusestubs.h.
  *
- * SP-Pie runs no Z80 and has no sound, tape, disk, debugger, menus or other
- * peripherals. Each function here does nothing and returns success, and
+ * SP-Pie runs no Z80 and has no tape, disk, debugger, menus or other
+ * peripherals. Its sound is Fuse's sound generator, built separately
+ * (fusesound.c); the sound functions here are the ones the display side
+ * of Fuse calls. Each function here does nothing and returns success, and
  * each variable has the value Fuse gives it when the feature is absent or
  * off. The few that do work are marked.
  *
@@ -46,6 +48,7 @@
 #include "peripherals/printer.h"
 #include "peripherals/scld.h"
 #include "peripherals/sound/ay.h"
+#include "peripherals/sound/sp0256.h"
 #include "peripherals/sound/uspeech.h"
 #include "peripherals/spectranet.h"
 #include "peripherals/ttx2000s.h"
@@ -65,6 +68,7 @@
 #include "z80/z80.h"
 
 #include "fusestubs.h"
+#include "fusesound.h"
 
 /* --- start-up manager (works) ------------------------------------------ */
 
@@ -361,11 +365,31 @@ void sound_end( void ) { }
 void sound_frame( void ) { }
 void sound_ay_reset( void ) { }
 
+/* Works: Fuse's ULA port code (peripherals/ula.c) reports the ULA's
+   sound output here, and SP-Pie's sound layer takes it. */
 void
-sound_ula( libspectrum_dword at_tstates GCC_UNUSED, int mic_on GCC_UNUSED,
-           int beeper_on GCC_UNUSED )
+sound_ula( libspectrum_dword at_tstates, int mic_on, int beeper_on )
+{
+  fusesound_ula( at_tstates, mic_on, beeper_on );
+}
+
+/* What Fuse's sound generator (sound.c, built by fusesound.c) asks of the
+   parts that are not built: the options at their defaults, None (mono)
+   for the AY stereo separation and Automatic for the speaker type
+   (ui/options.dat), no movie, no tape, no fast loading, no uSpeech. */
+int option_enumerate_sound_stereo_ay( void ) { return 0; }
+int option_enumerate_sound_speaker_type( void ) { return 0; }
+
+void movie_init_sound( int f GCC_UNUSED, int s GCC_UNUSED ) { }
+
+void
+movie_add_sound( libspectrum_signed_word *buf GCC_UNUSED, int len GCC_UNUSED )
 {
 }
+
+int tape_is_playing( void ) { return 0; }
+int timer_fastloading_active( void ) { return 0; }
+void sp0256_do_frame( void ) { }
 
 void
 ay_registerport_write( libspectrum_word port GCC_UNUSED,

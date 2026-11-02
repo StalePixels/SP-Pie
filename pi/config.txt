@@ -19,3 +19,6 @@ force_turbo=1
 hdmi_force_hotplug=1
 hdmi_group=1
 hdmi_mode=31
+
+# HDMI mode, not DVI, so the link carries the Spectrum's sound.
+hdmi_drive=2

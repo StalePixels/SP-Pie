@@ -31,7 +31,8 @@ HOSTCC ?= cc
 PERL   ?= perl
 
 # Fuse: the ULA display model, memory and paging, the machine definitions of
-# the 48K, 128K, +2, +2A and +3, the peripheral port decode and the ULA port.
+# the 48K, 128K, +2, +2A and +3, the peripheral port decode, the ULA port,
+# and the sound generator with its Blip_Buffer and filters.
 FUSEULA_FUSE_SOURCES = \
 	$(FUSE_DIR)/display.c \
 	$(FUSE_DIR)/rectangle.c \
@@ -45,7 +46,20 @@ FUSEULA_FUSE_SOURCES = \
 	$(FUSE_DIR)/machines/spec128.c \
 	$(FUSE_DIR)/machines/specplus2.c \
 	$(FUSE_DIR)/machines/specplus2a.c \
-	$(FUSE_DIR)/machines/specplus3.c
+	$(FUSE_DIR)/machines/specplus3.c \
+	$(FUSE_DIR)/sound/blipbuffer.c \
+	$(FUSE_DIR)/sound/speaker_filter.c \
+	$(FUSE_DIR)/sound/ula_filter.c \
+	$(FUSEULA_SOUND_GENERATORS)
+
+# Fuse's sound generator, sound.c, compiled once for each generator with
+# its names prefixed (fusesound_rename.h). The wrappers hold Fuse's code
+# only, so they build with Fuse's flags.
+FUSEULA_SOUND_GENERATORS = \
+	$(FUSEULA_DIR)/fusesound_ay0.c \
+	$(FUSEULA_DIR)/fusesound_ay1.c \
+	$(FUSEULA_DIR)/fusesound_ula48.c \
+	$(FUSEULA_DIR)/fusesound_ula128.c
 
 # libspectrum: the machine timing tables, machine capabilities, memory
 # allocation, the snapshot accessors (generated) that Fuse's snapshot hooks
@@ -61,10 +75,11 @@ FUSEULA_LIBSPECTRUM_SOURCES = \
 	$(FUSEULA_GEN)/snap_accessors.c
 
 # Our layer: the C interface to the C++ code, the display output, ULAplus,
-# the border outside Fuse's display area, and stand-ins for the parts of
-# Fuse that are not built.
+# the border outside Fuse's display area, the sound port decode and mix,
+# and stand-ins for the parts of Fuse that are not built.
 FUSEULA_OWN_SOURCES = \
 	$(FUSEULA_DIR)/fuseula.c \
+	$(FUSEULA_DIR)/fusesound.c \
 	$(FUSEULA_DIR)/fusestubs.c
 
 FUSEULA_SOURCES = $(FUSEULA_FUSE_SOURCES) $(FUSEULA_LIBSPECTRUM_SOURCES) $(FUSEULA_OWN_SOURCES)
