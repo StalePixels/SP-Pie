@@ -1,0 +1,82 @@
+# Quartus project settings for the SP-Pie CPLD logic on the TK-Pie board.
+# Pin numbers are the upstream TK-Pie pin assignments (CPLD/EPM240/CPLD_TK-Pie.qsf).
+# Upstream signals GPIO[n] and GPIO_n are Raspberry Pi GPIO n.
+# Pins 17 and 21 have no PCB track and are not assigned.
+
+set_global_assignment -name FAMILY "MAX II"
+set_global_assignment -name DEVICE EPM240T100C5
+set_global_assignment -name TOP_LEVEL_ENTITY sp_pie_cpld
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION "13.0 SP1"
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+set_global_assignment -name VHDL_INPUT_VERSION VHDL_1993
+set_global_assignment -name VHDL_FILE sp_pie_cpld.vhd
+set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
+set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85
+
+set_location_assignment PIN_87 -to BUS_A[0]
+set_location_assignment PIN_89 -to BUS_A[1]
+set_location_assignment PIN_91 -to BUS_A[2]
+set_location_assignment PIN_95 -to BUS_A[3]
+set_location_assignment PIN_5 -to BUS_A[4]
+set_location_assignment PIN_4 -to BUS_A[5]
+set_location_assignment PIN_3 -to BUS_A[6]
+set_location_assignment PIN_2 -to BUS_A[7]
+set_location_assignment PIN_7 -to BUS_A[8]
+set_location_assignment PIN_8 -to BUS_A[9]
+set_location_assignment PIN_15 -to BUS_A[10]
+set_location_assignment PIN_16 -to BUS_A[11]
+set_location_assignment PIN_81 -to BUS_A[12]
+set_location_assignment PIN_82 -to BUS_A[13]
+set_location_assignment PIN_77 -to BUS_A[14]
+set_location_assignment PIN_78 -to BUS_A[15]
+set_location_assignment PIN_84 -to BUS_D[0]
+set_location_assignment PIN_85 -to BUS_D[1]
+set_location_assignment PIN_86 -to BUS_D[2]
+set_location_assignment PIN_92 -to BUS_D[3]
+set_location_assignment PIN_96 -to BUS_D[4]
+set_location_assignment PIN_90 -to BUS_D[5]
+set_location_assignment PIN_88 -to BUS_D[6]
+set_location_assignment PIN_83 -to BUS_D[7]
+set_location_assignment PIN_97 -to BUS_MRQ
+set_location_assignment PIN_98 -to BUS_IORQ_i
+set_location_assignment PIN_76 -to BUS_IORQ_COPY_i
+set_location_assignment PIN_99 -to BUS_RD
+set_location_assignment PIN_100 -to BUS_WR
+set_location_assignment PIN_1 -to BUS_RESET
+set_location_assignment PIN_6 -to BUS_ROMCS
+set_location_assignment PIN_18 -to M1
+set_location_assignment PIN_62 -to CLK
+set_location_assignment PIN_49 -to PI_SA[0]
+set_location_assignment PIN_72 -to PI_SA[1]
+set_location_assignment PIN_74 -to PI_SA[2]
+set_location_assignment PIN_75 -to PI_SA[3]
+set_location_assignment PIN_51 -to PI_SA[4]
+set_location_assignment PIN_50 -to PI_SA[5]
+set_location_assignment PIN_47 -to PI_SOE
+set_location_assignment PIN_52 -to PI_SWE
+set_location_assignment PIN_54 -to PI_SD[0]
+set_location_assignment PIN_55 -to PI_SD[1]
+set_location_assignment PIN_57 -to PI_SD[2]
+set_location_assignment PIN_53 -to PI_SD[3]
+set_location_assignment PIN_48 -to PI_SD[4]
+set_location_assignment PIN_44 -to PI_SD[5]
+set_location_assignment PIN_73 -to PI_SD[6]
+set_location_assignment PIN_71 -to PI_SD[7]
+set_location_assignment PIN_43 -to PI_SD[8]
+set_location_assignment PIN_69 -to PI_SD[9]
+set_location_assignment PIN_70 -to PI_SD[10]
+set_location_assignment PIN_42 -to PI_SD[11]
+set_location_assignment PIN_41 -to PI_SD[12]
+set_location_assignment PIN_39 -to PI_SD[13]
+set_location_assignment PIN_66 -to PI_SD[14]
+set_location_assignment PIN_67 -to PI_SD[15]
+set_location_assignment PIN_58 -to PI_SD16
+set_location_assignment PIN_56 -to PI_SD17
+set_location_assignment PIN_40 -to PI_SYNC
+set_location_assignment PIN_68 -to PI_NOT_EMPTY
+
+# Weak pull-ups on the two /IORQ pins, as upstream.
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to BUS_IORQ_i
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to BUS_IORQ_COPY_i

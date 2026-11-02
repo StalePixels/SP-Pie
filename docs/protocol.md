@@ -9,10 +9,12 @@ This is the interface between the CPLD on the TK-Pie board and the Raspberry Pi 
 | 0 to 5 | SA5 to SA0 | Pi to CPLD | Reserved. The CPLD ignores them. |
 | 6 | SOE (read strobe, active low) | Pi to CPLD | Each low pulse is one SMI read. |
 | 7 | SWE (write strobe, active low) | Pi to CPLD | Reserved. The CPLD ignores it. |
-| 8 to 23 | SD0 to SD15 | CPLD to Pi | Read data, one 16-bit half-word per read. |
+| 8 to 23 | SD0 to SD15 | CPLD to Pi | Read data, one 16-bit half-word per read. The CPLD drives these lines all the time. |
 | 24, 25 | SD16, SD17 | CPLD to Pi | Driven low. The Pi uses 16-bit SMI. |
 | 26 | none | Pi to CPLD | SYNC. High resets the CPLD queue and half-word pointer. |
 | 27 | none | CPLD to Pi | NOT_EMPTY. High when the queue holds at least one event. Information only. |
+
+The Pi must never drive GPIO 8 to 25 and must not do SMI writes.
 
 The CPLD pin for each GPIO is in the upstream TK-Pie pin assignments (`CPLD/EPM240/CPLD_TK-Pie.qsf`, signals `GPIO[0]` to `GPIO[23]` and `GPIO_24` to `GPIO_27`).
 
@@ -21,7 +23,8 @@ The CPLD pin for each GPIO is in the upstream TK-Pie pin assignments (`CPLD/EPM2
 - The CPLD changes SD0 to SD15 only on the rising edge of SOE, at the end of a read. The next read sees data that has been stable since the previous read ended.
 - An event is two reads. The first read returns half-word 0 and the second returns half-word 1.
 - The CPLD copies the oldest event into its output register before half-word 0 is presented, and removes the event from the queue after half-word 1 has been read. Both halves of a pair always belong to the same event.
-- When the queue is empty, the pair is an empty event (V = 0). The Pi can read continuously.
+- When the queue is empty, the pair is an empty event: half-word 0 is 0x0000 and half-word 1 is 0x8000. The Pi can read continuously.
+- The read side sees new events two reads late. Empty pairs can therefore arrive while NOT_EMPTY is high, and the first pair after power-up or SYNC is always empty.
 - In 16-bit SMI mode with DMA, the Pi receives one pair as one 32-bit word: half-word 0 in bits 15 to 0, half-word 1 in bits 31 to 16.
 
 ## Event format
@@ -40,7 +43,7 @@ Half-word 1:
 
 - **H** marks the half. A half-word 0 with H = 1, or a half-word 1 with H = 0, means the Pi and the CPLD disagree about which half comes next. The Pi then pulses SYNC.
 - **V** is 1 for an event and 0 for an empty pair.
-- **OVF** is 1 when the queue was full and at least one event was dropped before this one. The CPLD clears its overflow flag when it sends an event with OVF = 1.
+- **OVF** is 1 on the first event queued after one or more events were dropped because the queue was full. Events between the last event sent and this one are lost.
 - **TYPE** is the event kind, below.
 - **DATA** is the byte the Z80 wrote.
 - **OFFSET** is the offset inside the screen bank, 0x0000 to 0x1AFF, for TYPE 1 and 2. It is 0 for other types.
@@ -56,7 +59,7 @@ Half-word 1:
 | 6 | Write to port 0x7FFD, accepted | I/O write, A15..A14 = 01, A1..A0 = 01, paging not locked |
 | 7 | Write to port 0x1FFD, accepted | I/O write, A15..A13 = 000, A12 = 1, A1 = 0, paging not locked |
 
-One I/O write can match more than one decode, as on the real machines. The CPLD then queues one event for each match, in TYPE order.
+One I/O write can match both the 0xFE and the 0x1FFD decodes, as on the +2A/+3. The CPLD keeps this as one queue entry and sends it as two events, TYPE 3 and then TYPE 7. When the queue is full, both events are dropped together. No other pair of decodes can match the same write.
 
 ## Paging state in the CPLD
 
@@ -74,7 +77,7 @@ The CPLD keeps copies of port 0x7FFD and port 0x1FFD to know which bank a memory
 | 1, 0 | 4 | 5 | 6 | 3 |
 | 1, 1 | 4 | 7 | 6 | 3 |
 
-On a 48K machine the paging registers stay at 0 unless software writes to an address that matches the 0x7FFD or 0x1FFD decode.
+The CPLD does not know which Spectrum model it is on. On a 48K machine the paging registers stay at 0 unless software writes to an address that matches the 0x7FFD or 0x1FFD decode. The real 128K and +2 decode 0x7FFD on A15 = 0 and A1 = 0 only, so on those machines a write to 0x1FFD also pages 0x7FFD; the CPLD treats it as a 0x1FFD write.
 
 ## Write capture
 
@@ -82,4 +85,4 @@ The CPLD captures A0 to A15 and D0 to D7 for a write while /WR is low, with valu
 
 ## SYNC
 
-While SYNC is high the CPLD empties the queue, clears the overflow flag and sets the half-word pointer to half-word 0. The paging state is not changed. The Pi holds SYNC high for at least 1 µs, with no SMI reads during that time.
+While SYNC is high the CPLD empties the queue, clears the overflow flag and sets the half-word pointer to half-word 0. The paging state is not changed. The Pi holds SYNC high for at least 1 µs, with no SMI reads during that time, and waits at least 1 µs after SYNC goes low before the next read.
