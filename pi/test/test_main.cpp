@@ -976,9 +976,28 @@ static void CheckLock (TMachine Hw, TMachineChoice Choice, TMachine Expect, uint
 static void TestFrameLockMachines (void)
 {
 	CheckLock (Machine48K, ChooseAuto, Machine48K, FramePeriodNs48K);
-	CheckLock (Machine128K, ChooseAuto, MachinePlus3, FramePeriodNs128K);
+	CheckLock (Machine128K, ChooseAuto, Machine128K, FramePeriodNs128K);
 	CheckLock (Machine128K, ChooseAuto128, Machine128K, FramePeriodNs128K);
 	CheckLock (Machine48K, Choose128K, Machine128K, FramePeriodNs48K);
+}
+
+// With ChooseAuto, a 128K-class machine is the 128K/+2 until the first write
+// to port 0x1FFD, and the +2A/+3 from then on. A write to 0x7FFD does not
+// change it.
+static void TestPlus3Detection (void)
+{
+	CSim Sim128 (Machine128K, ChooseAuto);
+	Sim128.FrameEvents (0, 600);
+	Sim128.Write (300, 1000, Io (0x7FFD, 0x10));
+	Sim128.Run (600, nullptr);
+	CHECK (Sim128.Timeline ().Lock ().Machine () == Machine128K);
+
+	CSim SimPlus3 (Machine128K, ChooseAuto);
+	SimPlus3.FrameEvents (0, 600);
+	SimPlus3.Write (300, 1000, Io (0x7FFD, 0x10));
+	SimPlus3.Write (450, 1000, Io (0x1FFD, 0x04));
+	SimPlus3.Run (600, nullptr);
+	CHECK (SimPlus3.Timeline ().Lock ().Machine () == MachinePlus3);
 }
 
 // The lock's position for an ordinary write, against the T-state it was
@@ -1187,7 +1206,7 @@ static void TestMidFrameScreenSwitch (void)
 			return;
 		}
 		nShown++;
-		CHECK (rPresenter.LastRecord ().Machine == MachinePlus3);
+		CHECK (rPresenter.LastRecord ().Machine == Machine128K);
 		for (unsigned y : { 0u, 50u, nSplit - 1 })
 		{
 			CHECK_EQ_HEX (ScreenPixel (rPicture, 0, y), White);
@@ -1302,6 +1321,7 @@ int main (void)
 	Run ("intake: OVF and F counted, event still applied", TestIntakeOverflow);
 	Run ("intake: H mismatch stops the run", TestIntakeMismatch);
 	Run ("state: 48K memory map, no paging", TestMemoryMap48K);
+	Run ("lock: +2A/+3 detected from the first 0x1FFD write", TestPlus3Detection);
 	Run ("state: 128K/+2 paging decode and lock", TestPagingDecode128K);
 	Run ("state: +2A/+3 paging decode, special paging and lock", TestPagingDecodePlus3);
 	Run ("renderer: attribute and pixel pattern", TestAttributePixelPattern);

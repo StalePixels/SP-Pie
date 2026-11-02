@@ -54,16 +54,20 @@ enum TMachine : uint8_t
 
 enum TMachineChoice : uint8_t
 {
-	ChooseAuto,		// period: 48K, or +2A/+3 for the 128K class
+	ChooseAuto,		// period: 48K, or for the 128K class 128K/+2 until
+				// the first write to port 0x1FFD, then +2A/+3
 	ChooseAuto128,		// period: 48K, or 128K/+2 for the 128K class
 	Choose48K,		// always 48K
 	Choose128K,		// always 128K/+2
 	ChoosePlus3		// always +2A/+3
 };
 
-// The model for a frame-period class (Machine48K or Machine128K, as measured)
-// and a choice.
-static inline TMachine ResolveMachine (TMachine Measured, TMachineChoice Choice)
+// The model for a frame-period class (Machine48K or Machine128K, as measured),
+// a choice, and whether a write to port 0x1FFD has been seen. Only the +2A/+3
+// has port 0x1FFD; its ROM writes it at start-up and at every ROM change,
+// and the 128K and +2 ROMs never write it.
+static inline TMachine ResolveMachine (TMachine Measured, TMachineChoice Choice,
+				       bool bPort1FFDSeen)
 {
 	switch (Choice)
 	{
@@ -72,7 +76,12 @@ static inline TMachine ResolveMachine (TMachine Measured, TMachineChoice Choice)
 	case ChoosePlus3:	return MachinePlus3;
 	case ChooseAuto128:	return Measured == Machine48K ? Machine48K : Machine128K;
 	case ChooseAuto:
-	default:		return Measured == Machine48K ? Machine48K : MachinePlus3;
+	default:
+		if (Measured == Machine48K)
+		{
+			return Machine48K;
+		}
+		return bPort1FFDSeen ? MachinePlus3 : Machine128K;
 	}
 }
 

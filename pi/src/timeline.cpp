@@ -57,6 +57,11 @@ void CTimeline::BeginBatch (uint64_t nStamp)
 
 void CTimeline::Event (const TEvent &rEvent)
 {
+	if (rEvent.Kind == KindIo && (rEvent.Address & 0xF002) == 0x1000)
+	{
+		m_Lock.Port1FFDWrite ();
+	}
+
 	if (rEvent.Frame)
 	{
 		m_Lock.FrameEvent (m_nStamp);

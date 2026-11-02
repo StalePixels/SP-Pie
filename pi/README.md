@@ -96,13 +96,13 @@ The measured period selects the timing. The constants are in `src/machinetiming.
 | Frame period | 19.968 ms | 19.9915 ms |
 | First screen pixel | T-state 14,336 (line 64) | T-state 14,364 (line 63) |
 
-A period below the midpoint is the 48K class. The period cannot tell a 128K or +2 from a +2A or +3: they share the timing but decode the paging ports differently. By default the kernel uses the +2A/+3 decode for the 128K class. On a +3, the 128K decode would take every write to port 0x1FFD as a write to 0x7FFD, and 0x1FFD holds the ROM selection and the disk motor bit, so +3 software writes it often. On a 128K, the +2A/+3 decode misses only writes that page through an address other than 0x7FFD with A14 = 0, which software rarely uses.
+A period below the midpoint is the 48K class. The period cannot tell a 128K or +2 from a +2A or +3: they share the timing but decode the paging ports differently. Only the +2A/+3 has port 0x1FFD. Its ROM writes that port at start-up and each time it changes ROM, and the 128K and +2 ROMs never write it. So by default the kernel uses the 128K/+2 decode for the 128K class until it sees the first I/O write that matches the 0x1FFD decode (A15..A12 = 0001, A1 = 0). From then on, until the kernel restarts, it uses the +2A/+3 decode. The model applies per Spectrum frame, so the frame that holds that first write is already decoded as a +2A/+3. A 128K program that writes to 0x1FFD selects the +2A/+3 decode by mistake; `auto128` prevents that.
 
 The `machine` option in `cmdline.txt` on the SD card changes the choice:
 
 | Value | Model |
 |---|---|
-| `auto` (default) | 48K, or +2A/+3 for the 128K class |
+| `auto` (default) | 48K; for the 128K class, 128K/+2 until the first 0x1FFD write, then +2A/+3 |
 | `auto128` | 48K, or 128K/+2 for the 128K class |
 | `48` | always 48K |
 | `128` | always 128K/+2 |

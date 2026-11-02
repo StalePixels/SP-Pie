@@ -82,6 +82,11 @@ public:
 	// arithmetic stays small during a long flywheel. The line is unchanged.
 	void Rebase (uint64_t nTicks);
 
+	// Called for every I/O write that matches the +2A/+3 0x1FFD decode
+	// (A15..A12 = 0001, A1 = 0). With ChooseAuto it selects the +2A/+3 for
+	// the 128K class from then on. It stays set until the kernel restarts.
+	void Port1FFDWrite (void);
+
 	bool Locked (void) const		{ return m_bLocked; }
 	TMachine Machine (void) const		{ return m_Machine; }	// the model in use
 	const TMachineTiming &Timing (void) const { return MachineTiming (m_Machine); }
@@ -103,6 +108,7 @@ private:
 private:
 	uint64_t	m_nFrequency;
 	TMachineChoice	m_Choice;
+	bool		m_bPort1FFDSeen;
 
 	// The earliest-arrival line: E(m_nBaseFrame) = m_nBaseTicks +
 	// m_nBaseFrac / 65536, slope m_nPeriodQ / 65536 ticks per frame.

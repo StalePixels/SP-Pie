@@ -31,9 +31,19 @@ static inline int64_t Abs (int64_t a)
 
 CFrameLock::CFrameLock (uint64_t nTickFrequency, TMachineChoice Choice)
 :	m_nFrequency (nTickFrequency),
-	m_Choice (Choice)
+	m_Choice (Choice),
+	m_bPort1FFDSeen (false)
 {
 	Start (0);
+}
+
+void CFrameLock::Port1FFDWrite (void)
+{
+	if (!m_bPort1FFDSeen)
+	{
+		m_bPort1FFDSeen = true;
+		UpdateMachine ();
+	}
 }
 
 int64_t CFrameLock::NsToQ (uint64_t nNs) const
@@ -96,7 +106,7 @@ void CFrameLock::SetBase (uint32_t nFrame, uint64_t nTicks, int64_t nOffsetQ)
 void CFrameLock::UpdateMachine (void)
 {
 	m_Machine = ResolveMachine (PeriodNs () < MachineThresholdNs ? Machine48K : Machine128K,
-				    m_Choice);
+				    m_Choice, m_bPort1FFDSeen);
 
 	// FrameEventTStates in ticks, minus the transport calibration.
 	m_nStartOffsetQ =   (int64_t) FrameEventTStates * m_nPeriodQ
