@@ -92,6 +92,7 @@ set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_M
 set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_IORQ_i
 set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_IORQ_COPY_i
 set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_RD
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to M1
 set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_A[*]
 set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to PI_SOE
 set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to PI_SYNC

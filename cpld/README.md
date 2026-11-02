@@ -1,8 +1,8 @@
 # SP-Pie CPLD logic
 
 VHDL for the Altera EPM240T100C5 (MAX II) CPLD on the TK-Pie board. The CPLD
-watches the ZX Spectrum bus, turns screen writes and port writes into events,
-and queues them. The Raspberry Pi Zero 2 W reads the queue through its SMI
+watches the ZX Spectrum bus, stores every Z80 memory write and I/O write as
+an event, and queues the events. The Raspberry Pi Zero 2 W reads the queue through its SMI
 (Secondary Memory Interface) peripheral. The event format and the read cycle
 are defined in [`docs/protocol.md`](../docs/protocol.md). This logic implements
 that document.
@@ -25,68 +25,52 @@ The queue depth is the generic `DEPTH` (default 4, a power of two, at least 2).
 
 ## What the logic does
 
-For every Z80 write it decides whether the write is an event:
+Every Z80 memory write and every I/O write is one event. The event holds the
+full address A15 to A0, the data byte and the event kind (KIND 00 for a
+memory write, 01 for an I/O write). The CPLD does no address decode for
+events and keeps no paging state. The Pi decides what each write means.
 
-- A memory write to RAM bank 5 or bank 7 with an offset below 0x1B00 inside
-  the bank (TYPE 1 and 2). The bank comes from the CPLD's copies of ports
-  0x7FFD and 0x1FFD, in normal and +2A/+3 special paging.
-- An I/O write that matches the port 0xFE, ULAplus 0xBF3B, ULAplus 0xFF3B,
-  0x7FFD or 0x1FFD decode (TYPE 3 to 7). The decodes are the ones in the
-  protocol table.
+When /RESET goes high, the logic queues a reset event (KIND 10, address 0,
+DATA 0). It goes into the queue after every event from before the reset and
+before every event from after it. See [Reset event](#reset-event).
 
-Writes to 0x7FFD and 0x1FFD also update the paging copies. Bit 5 of 0x7FFD
-locks both ports until /RESET. Locked writes change nothing and queue no
-event. /RESET low clears both copies.
-
-When /RESET goes high, the logic queues a reset event (TYPE 0, DATA 0,
-OFFSET 0). It goes into the queue after every event from before the reset
-and before every event from after it. See [Reset event](#reset-event).
-
-Each event goes into the queue with its TYPE, OFFSET, DATA and an OVF mark.
-When the queue is full, the event is dropped and an overflow flag is set. The
-next event that is stored carries OVF = 1 and clears the flag. So OVF = 1
-marks the first event after one or more drops. A reset event follows the
-same rule: if the queue is full at the end of a reset, the reset event is
+Each event goes into the queue with its address, DATA, KIND, an OVF mark and
+an F mark. When the queue is full, the event is dropped and an overflow flag
+is set. The next event that is stored carries OVF = 1 and clears the flag. So
+OVF = 1 marks the first event after one or more drops. A reset event follows
+the same rule: if the queue is full at the end of a reset, the reset event is
 dropped, and the first event stored after it carries OVF = 1. The Pi then
 gets no reset event for that reset.
+
+### Frame flag
+
+The Z80 acknowledges an interrupt with /M1 and /IORQ low together. No other
+cycle has that combination. A flag is set asynchronously while /M1 and /IORQ
+are both low, and cleared at the `wclk` rising edge that stores an event. The
+stored event takes the flag as its F mark, so the first event stored after an
+acknowledge has F = 1. An event dropped on a full queue does not clear the
+flag, so the next stored event carries F = 1 (and OVF = 1). Two acknowledges
+with no stored event between them give one F. A reset event is an event, so
+it carries F = 1 when it is the first event after an acknowledge.
 
 ### ULAplus read-back
 
 The ULAplus data port 0xFF3B is read/write, and software reads it to detect
-ULAplus. The CPLD keeps the group of the last register-port write (mode group
-or not), the mode register, and the last byte written to the data port. An
-I/O read with the 0xFF3B decode (/IORQ and /RD low, A15..A14 = 11,
-A7..A6 = 00, A2 = 0, A0 = 1) drives D0 to D7 with the mode register when the
-mode group is selected, and with the last byte written otherwise. The CPLD
-keeps no copy of the palette, so a read in the palette group does not return
-the palette entry. /RESET low clears all three registers.
+ULAplus. This is the only read the CPLD answers. The CPLD keeps the group of
+the last write to the register port 0xBF3B (mode group or not), the mode
+register, and the last byte written to the data port 0xFF3B. The port
+decodes are:
 
-### Two events from one write
+| Port | A15, A14 | A7, A6 | A2 | A0 |
+|---|---|---|---|---|
+| 0xBF3B (register) | 1, 0 | 0, 0 | 0 | 1 |
+| 0xFF3B (data) | 1, 1 | 0, 0 | 0 | 1 |
 
-One I/O write can match the 0xFE decode (A0 = 0) and the 0x1FFD decode
-together, for example port 0x1FFC. No other pair of decodes can match the
-same address. The protocol asks for two events, TYPE 3 then TYPE 7. The read
-side sends such an entry as two pairs, TYPE 3 then TYPE 7, with the same DATA
-and OFFSET 0, and removes it after the second pair. One entry per write keeps
-the write pointer moving one step at a time, which the Gray-code pointer
-crossing needs.
-
-All eight TYPE codes are protocol events, so the double entry has no code of
-its own. It is stored as TYPE code 0 with OFFSET bit 0 set:
-
-| Stored TYPE | Stored OFFSET bit 0 | Sent as |
-|---|---|---|
-| 0 | 0 | TYPE 0 (reset) |
-| 0 | 1 | TYPE 3, then TYPE 7 |
-| 1 to 7 | any | that TYPE |
-
-Reset and I/O events always send OFFSET 0, so OFFSET bit 0 of a code 0 entry
-carries no other information. The read side clears that bit in half-word 1
-for both pairs of a double entry. This adds no bit to each queue entry. A
-fourth TYPE bit would add DEPTH storage registers and widen the TYPE
-multiplexer. The marker costs a one-bit OFFSET multiplexer at the next-entry
-index, one register (`dbl`) and the mask on OFFSET bit 0. See
-[Logic element estimate](#logic-element-estimate).
+An I/O read with the 0xFF3B decode (/IORQ and /RD low) drives D0 to D7 with
+the mode register when the mode group is selected, and with the last byte
+written otherwise. The CPLD keeps no copy of the palette, so a read in the
+palette group does not return the palette entry. /RESET low clears all three
+registers. Writes to both ports are also ordinary I/O events.
 
 ## Reset event
 
@@ -100,11 +84,10 @@ write.
   `wclk` falling edge, which is the /WR falling edge of the first write after
   the reset.
 - At the `wclk` rising edge made by /RESET going high, `rst_seen` is 1, so the
-  decode makes a reset event, with DATA and OFFSET forced to 0 whatever the
-  bus holds. It goes through the normal queue write, full test and overflow
-  flag. `rst_seen` does not change at that edge, so it needs no synchronizer.
-- The paging copies are cleared while /RESET is low. The reset event does not
-  write them.
+  logic stores a reset event, with the address and DATA forced to 0 whatever
+  the bus holds. It goes through the normal queue write, full test and
+  overflow flag. `rst_seen` does not change at that edge, so it needs no
+  synchronizer.
 - The read pointer the write side uses for the full test is the one sampled
   at the last `wclk` falling edge: when /RESET went low, or the last /WR
   falling edge before that. It can be stale, which only makes the queue look
@@ -173,11 +156,14 @@ information only.
 
 SYNC (GPIO 26) is an asynchronous reset of both pointers, the pointer copies,
 the overflow flag, the half-word pointer and the output register. It does not
-touch the paging copies. A write that ends while SYNC is high is not queued.
+touch the frame flag or the ULAplus registers. A write that ends while SYNC is
+high is not queued.
 
 ## SMI read side
 
-The output register PI_SD changes only on the SOE rising edge. After
+The output register PI_SD changes only on the SOE rising edge. Half-word 0
+is H = 0, V, OVF, F, KIND, 0, A15 and DATA. Half-word 1 is H = 1 and A14 to
+A0. After
 half-word 0 is read, it loads half-word 1 of the same entry. After half-word 1
 is read, it removes the entry (if the pair was an event) and loads half-word 0
 of the next entry, or an empty pair if the queue looks empty. An empty pair
@@ -230,7 +216,7 @@ give one transition only.
 | `BUS_WR` | /WR | 100 |
 | `BUS_RESET` | /RESET, input only | 1 |
 | `BUS_ROMCS` | /ROMCS, high impedance | 6 |
-| `M1` | /M1, not used | 18 |
+| `M1` | /M1, for the interrupt acknowledge | 18 |
 | `CLK` | Edge-connector clock, not used | 62 |
 | `PI_SA(0)` | GPIO 5 (SA0), ignored | 49 |
 | `PI_SA(1)` | GPIO 4 (SA1), ignored | 72 |
@@ -276,29 +262,36 @@ fails. Build files go in `build/`.
 
 The testbench has a Z80 bus model and a Pi reader model:
 
-- The bus model makes memory and I/O writes with Zilog cycle timing at
-  3.5 MHz. I/O writes put the wrong byte on the data bus until 30 ns after
-  /WR falls. After /WR rises, the data bus goes to `X` after 60 ns. A design
-  that captures too early or too late fails.
+- The bus model makes memory writes, I/O writes, I/O reads and interrupt
+  acknowledges with Zilog cycle timing at 3.5 MHz. I/O writes put the wrong
+  byte on the data bus until 30 ns after /WR falls. After /WR rises, the data
+  bus goes to `X` after 60 ns. A design that captures too early or too late
+  fails.
 - I/O writes can move /IORQ before or after /WR.
 - The edge-connector clock can be inverted.
 - The Pi reader reads pairs back to back. SOE low and high times vary
   pseudo-randomly, with no fixed relation to the bus clock. It checks the H
   bit of every half-word, checks that empty pairs are exactly 0x0000 and
-  0x8000, and records every event.
+  0x8000, rejects malformed events, and records every event.
 
-The tests cover the bank 5 offset limit, bank 5 and bank 7 at 0xC000 through
-0x7FFD, the four +3 special layouts, the lock bit, /RESET, every I/O TYPE, a
-write that matches both 0xFE and 0x1FFD, the inverted clock, back-to-back
-writes while the Pi reads, overflow and OVF, and SYNC (queue emptied,
-overflow cleared, paging kept, half-word pointer reset).
+The tests cover:
 
-The reset event tests check one reset event at power-up and one per reset,
-with DATA 0 and OFFSET 0 while the bus carries other values. They check that
-the reset event comes after events queued before the reset and before
-events after it, that paging is cleared, that a double match after a reset
-still arrives as TYPE 3 then TYPE 7 with OFFSET 0, and that a reset on a full
-queue is dropped and the next event carries OVF = 1.
+- Memory writes anywhere in 0x0000 to 0xFFFF and I/O writes to any port, with
+  the exact address and DATA, including a walking one and a walking zero on
+  every address and data line.
+- I/O reads and interrupt acknowledges, which are not events.
+- The reset event: one at power-up and one per reset, with address 0 and
+  DATA 0 while the bus carries other values; its place in the queue between
+  earlier and later events; and a reset on a full queue, which is dropped
+  and gives OVF = 1 on the next event.
+- The F mark: on the first event after an acknowledge only, one F for two
+  acknowledges, F on a reset event, and F kept across dropped events.
+- Back-to-back writes three T-states apart (stack pushes) while the Pi reads.
+- Overflow and OVF, and SYNC (queue emptied, overflow cleared, half-word
+  pointer reset).
+- ULAplus read-back: the mode register in the mode group, the last byte
+  otherwise, no drive on other ports or between reads, and all three
+  registers cleared by /RESET.
 
 Simulation checks function only. It does not check timing or metastability.
 
@@ -342,19 +335,20 @@ From the Quartus 13.0sp1 fitter report. A MAX II logic element (LE) has one 4-in
 | Design | Logic elements | Pins |
 |---|---|---|
 | Upstream TK-Pie CPLD | 37 | 63 |
-| This design, DEPTH 4 | 217 | 61 |
-| This design, DEPTH 2 | 146 | 61 |
+| This design, DEPTH 4 | 190 | 61 |
+| This design, DEPTH 2 | 120 | 61 |
 
-DEPTH 4 is the default. Each step of depth costs about 35 LEs.
+DEPTH 4 is the default. Each queue entry costs about 35 LEs.
 
-The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures are 56.9 MHz for the write clock and 68.6 MHz (DEPTH 4) for the SOE clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
+The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures (DEPTH 4) are 57.5 MHz for the write clock and 98.0 MHz for the SOE clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
 
 ## Not verified
 
 - Timing against real constraints. An `.sdc` with the /WR and SOE clocks and
   the input and output delays is needed for real slack figures.
-- The /IORQ flag uses an asynchronous set driven by logic (/IORQ and /WR both
-  low). How Quartus implements it on MAX II is not known.
+- The /IORQ flag and the frame flag use an asynchronous set driven by logic
+  (/IORQ and /WR both low; /M1 and /IORQ both low). How Quartus implements
+  them on MAX II is not known.
 - The write-side clock `wclk` is made by logic (/WR and /RESET). Quartus
   puts it on a global clock; its skew against the bus inputs is not known.
 - The rise time of /RESET on each Spectrum model, and whether a slow or

@@ -22,13 +22,14 @@ static const u64 TransferNs = (u64) SmiBatchTransfers
 			      * (SmiSetup + SmiStrobe + SmiHold + SmiPace) * SmiCycleNs;
 
 CSpPieApp::CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffer,
-		      CSmiEventReader *pReader, unsigned nArmClockMHz)
+		      CSmiEventReader *pReader, unsigned nArmClockMHz, TMachineChoice Choice)
 :	CMultiCoreSupport (pMemorySystem),
 	m_pFrameBuffer (pFrameBuffer),
 	m_pReader (pReader),
-	m_nArmClockMHz (nArmClockMHz)
+	m_nArmClockMHz (nArmClockMHz),
+	m_Timeline (&m_Log, TickFrequency (), Choice),
+	m_Presenter (&m_Log)
 {
-	m_State.Reset ();
 	memset (&m_Shared, 0, sizeof m_Shared);
 }
 
@@ -77,6 +78,7 @@ void CSpPieApp::RunIntake (void)
 	unsigned nRead = m_pReader->Start ();
 	u64 nTransferStart = ReadTicks ();
 	u64 nLastNotDone = nTransferStart;
+	m_Timeline.Start (nTransferStart);
 	Publish (&m_Shared.Running, 1);
 
 	while (1)
@@ -112,8 +114,9 @@ void CSpPieApp::RunIntake (void)
 			nLastNotDone = nLoopStart;
 		}
 
-		// New ring words: decode them into the state model.
+		// New ring words: stamp, decode and log them.
 		unsigned nProducer = m_pReader->ProducerIndex ();
+		u64 nSeen = ReadTicks ();
 		if (nProducer == RingWords)
 		{
 			nBadProducer++;
@@ -129,14 +132,16 @@ void CSpPieApp::RunIntake (void)
 			}
 
 			bool bMismatch = false;
+			m_Timeline.BeginBatch (nSeen);
 			while (nRead != nProducer && !bMismatch)
 			{
 				unsigned nEnd = nProducer > nRead ? nProducer : RingWords;
 				m_pReader->InvalidateWords (nRead, nEnd);
 				size_t nUsed = ProcessWords (pRing + nRead, nEnd - nRead,
-							     m_State, Counters, bMismatch);
+							     m_Timeline, Counters, bMismatch);
 				nRead = (unsigned) ((nRead + nUsed) % RingWords);
 			}
+			m_Timeline.EndBatch ();
 
 			if (bMismatch)
 			{
@@ -146,10 +151,20 @@ void CSpPieApp::RunIntake (void)
 			}
 		}
 
+		// Frames whose end has passed are complete.
+		m_Timeline.Advance (ReadTicks ());
+
 		if (bBusy)
 		{
 			nBusyTicks += ReadTicks () - nLoopStart;
 
+			const CFrameLock &rLock = m_Timeline.Lock ();
+			Publish (&m_Shared.FrameEvents, Counters.FrameEvents);
+			Publish (&m_Shared.LogDropped, m_Log.Dropped ());
+			Publish (&m_Shared.Clamped, m_Timeline.Clamped ());
+			Publish (&m_Shared.Acquisitions, rLock.Acquisitions ());
+			Publish (&m_Shared.PeriodNs, rLock.PeriodNs ());
+			Publish (&m_Shared.Locked, rLock.Locked () ? 1 : 0);
 			Publish (&m_Shared.Events, Counters.Events);
 			Publish (&m_Shared.EmptyPairs, Counters.EmptyPairs);
 			Publish (&m_Shared.Overflows, Counters.Overflows);
@@ -167,19 +182,46 @@ void CSpPieApp::RunIntake (void)
 
 void CSpPieApp::RunRenderer (void)
 {
-	u32 *pDraw = new u32[ScreenWidth * ScreenHeight];
+	// The whole display in RAM: the Spectrum picture in the middle, black
+	// (or the overlay) at the sides.
+	u32 *pDraw = new u32[DisplayWidth * DisplayHeight];
+	for (unsigned i = 0; i < DisplayWidth * DisplayHeight; i++)
+	{
+		pDraw[i] = 0xFF000000u;
+	}
+	u32 *pPicture = pDraw + PictureTop * DisplayWidth + PictureLeft;
+
 	uintptr nBuffer = (uintptr) m_pFrameBuffer->GetBuffer ();
 	unsigned nPitchBytes = m_pFrameBuffer->GetPitch ();
 
+	// Both halves of the frame buffer start black. The frame buffer is
+	// device memory: aligned 64-bit stores, two pixels each.
+	for (unsigned y = 0; y < 2 * DisplayHeight; y++)
+	{
+		volatile u64 *pDest = (volatile u64 *) (nBuffer + y * nPitchBytes);
+		for (unsigned x = 0; x < DisplayWidth / 2; x++)
+		{
+			pDest[x] = 0xFF000000FF000000ull;
+		}
+	}
+
 #if SPPIE_OVERLAY
+	// The overlay changes the side areas, so whole rows are copied.
+	const unsigned nCopyX = 0, nCopyWidth = DisplayWidth;
+	const unsigned nCopyY = 0, nCopyHeight = DisplayHeight;
+
 	COverlay Overlay;
 	TFrameReport Report;
 	memset (&Report, 0, sizeof Report);
 	Report.ArmClockMHz = m_nArmClockMHz;
 
 	const u64 nFrequency = TickFrequency ();
-	u64 nPrevEvents = 0, nPrevEmpty = 0, nPrevBusy = 0;
+	u64 nPrevEvents = 0, nPrevEmpty = 0, nPrevFrameEvents = 0, nPrevBusy = 0;
 	u64 nPrevFrameEnd = ReadTicks ();
+#else
+	// Only the picture changes.
+	const unsigned nCopyX = PictureLeft, nCopyWidth = PictureWidth;
+	const unsigned nCopyY = PictureTop, nCopyHeight = PictureHeight;
 #endif
 
 	u32 nFrame = 0;
@@ -191,19 +233,19 @@ void CSpPieApp::RunRenderer (void)
 		u64 nStart = ReadTicks ();
 #endif
 
-		RenderFrame (m_State, FlashSwapped (nFrame), pDraw, ScreenWidth);
+		// One complete Spectrum frame, or the last one again.
+		m_Presenter.Present (pPicture, DisplayWidth);
 #if SPPIE_OVERLAY
-		Overlay.Draw (Report, pDraw, ScreenWidth);
+		Overlay.Draw (Report, pDraw, DisplayWidth);
 #endif
 
-		// Copy into the hidden half. The frame buffer is device memory:
-		// aligned 64-bit stores, two pixels each.
-		for (unsigned y = 0; y < ScreenHeight; y++)
+		// Copy into the hidden half.
+		for (unsigned y = nCopyY; y < nCopyY + nCopyHeight; y++)
 		{
 			volatile u64 *pDest = (volatile u64 *) (nBuffer
-				+ (nHidden * ScreenHeight + y) * nPitchBytes);
-			const u64 *pSrc = (const u64 *) (pDraw + y * ScreenWidth);
-			for (unsigned x = 0; x < ScreenWidth / 2; x++)
+				+ (nHidden * DisplayHeight + y) * nPitchBytes + nCopyX * 4);
+			const u64 *pSrc = (const u64 *) (pDraw + y * DisplayWidth + nCopyX);
+			for (unsigned x = 0; x < nCopyWidth / 2; x++)
 			{
 				pDest[x] = pSrc[x];
 			}
@@ -213,7 +255,7 @@ void CSpPieApp::RunRenderer (void)
 		u64 nDrawn = ReadTicks ();
 #endif
 
-		m_pFrameBuffer->SetVirtualOffset (0, nHidden * ScreenHeight);
+		m_pFrameBuffer->SetVirtualOffset (0, nHidden * DisplayHeight);
 		m_pFrameBuffer->WaitForVerticalSync ();
 
 		nHidden ^= 1;
@@ -223,12 +265,14 @@ void CSpPieApp::RunRenderer (void)
 		u64 nFrameEnd = ReadTicks ();
 		u64 nEvents = Fetch (&m_Shared.Events);
 		u64 nEmpty = Fetch (&m_Shared.EmptyPairs);
+		u64 nFrameEvents = Fetch (&m_Shared.FrameEvents);
 		u64 nBusy = Fetch (&m_Shared.BusyTicks);
 		u64 nFrameTicks = nFrameEnd - nPrevFrameEnd;
 		u64 nBusyDelta = nBusy - nPrevBusy;
 
 		Report.Events = (unsigned) (nEvents - nPrevEvents);
 		Report.EmptyPairs = (unsigned) (nEmpty - nPrevEmpty);
+		Report.FrameEvents = (unsigned) (nFrameEvents - nPrevFrameEvents);
 		Report.IntakeBusyUs = (unsigned) TicksToMicroseconds (nBusyDelta, nFrequency);
 		Report.IntakeIdleUs = (unsigned) TicksToMicroseconds (
 			nFrameTicks > nBusyDelta ? nFrameTicks - nBusyDelta : 0, nFrequency);
@@ -243,11 +287,21 @@ void CSpPieApp::RunRenderer (void)
 		Report.MaxRestartGapUs = (unsigned) TicksToMicroseconds (
 			Fetch (&m_Shared.MaxRestartGapTicks), nFrequency);
 		Report.BadProducer = (unsigned) Fetch (&m_Shared.BadProducer);
+		Report.LogDropped = (unsigned) Fetch (&m_Shared.LogDropped);
+		Report.Clamped = (unsigned) Fetch (&m_Shared.Clamped);
+		Report.Acquisitions = (unsigned) Fetch (&m_Shared.Acquisitions);
+		Report.PeriodNs = (unsigned) Fetch (&m_Shared.PeriodNs);
+		Report.Locked = Fetch (&m_Shared.Locked) != 0;
+		Report.Skipped = m_Presenter.Skipped ();
+		Report.Repeated = m_Presenter.Repeated ();
+		Report.SpectrumFrame = m_Presenter.LastFrame ();
+		Report.Machine = m_Presenter.LastRecord ().Machine;
 		Report.Frames = nFrame;
 		Report.NotEmpty = m_pReader->NotEmpty ();
 
 		nPrevEvents = nEvents;
 		nPrevEmpty = nEmpty;
+		nPrevFrameEvents = nFrameEvents;
 		nPrevBusy = nBusy;
 		nPrevFrameEnd = nFrameEnd;
 #endif

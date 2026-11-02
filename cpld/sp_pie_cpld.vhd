@@ -1,8 +1,10 @@
 -- SP-Pie CPLD logic for the TK-Pie board (Altera EPM240T100C5, MAX II).
 --
--- The CPLD watches the Spectrum bus, turns screen writes and port writes into
--- events, queues them, and hands them to the Raspberry Pi through SMI reads.
--- The contract with the Pi is docs/protocol.md.
+-- The CPLD watches the Spectrum bus and stores every Z80 memory write and
+-- every I/O write as one event: the full address, the data byte and the
+-- event kind. It does no address decode for events and keeps no paging
+-- state. It queues the events and hands them to the Raspberry Pi through SMI
+-- reads. The contract with the Pi is docs/protocol.md.
 --
 -- The design drives the Spectrum bus only to answer a read of the ULAplus
 -- data port 0xFF3B: D0-D7 carry the answer while /IORQ and /RD are low with
@@ -34,7 +36,7 @@ entity sp_pie_cpld is
     DEPTH : positive := 4
   );
   port (
-    -- Spectrum bus (all inputs).
+    -- Spectrum bus (all inputs, except D0-D7 for ULAplus reads).
     BUS_A           : in  std_logic_vector(15 downto 0);
     BUS_D           : inout std_logic_vector(7 downto 0);  -- driven only for ULAplus reads
     BUS_MRQ         : in  std_logic;  -- /MREQ
@@ -44,7 +46,7 @@ entity sp_pie_cpld is
     BUS_WR          : in  std_logic;  -- /WR
     BUS_RESET       : in  std_logic;  -- /RESET, input only
     BUS_ROMCS       : out std_logic;  -- /ROMCS, always high impedance
-    M1              : in  std_logic;  -- /M1, not used
+    M1              : in  std_logic;  -- /M1, for the interrupt acknowledge
     CLK             : in  std_logic;  -- edge-connector clock, not used
 
     -- Raspberry Pi SMI and GPIO.
@@ -93,33 +95,22 @@ architecture rtl of sp_pie_cpld is
     return b;
   end function;
 
-  -- Stored TYPE code. The codes are the protocol TYPE values, 0 to 7.
-  --
-  -- One I/O write that matches both the 0xFE and the 0x1FFD decodes is stored
-  -- as one entry with code 0 and OFFSET bit 0 set. A reset entry is code 0
-  -- with OFFSET 0. I/O and reset events always send OFFSET 0, so OFFSET bit 0
-  -- of a code 0 entry is free to tell the two apart, and no bit is added to
-  -- each entry. The read side sends the double entry as two events, TYPE 3
-  -- then TYPE 7, with the same DATA and OFFSET 0. Storing one entry keeps the
-  -- write pointer to single steps, which the Gray-code crossing needs.
-  constant T_RESET  : std_logic_vector(2 downto 0) := "000";
-  constant T_BANK5  : std_logic_vector(2 downto 0) := "001";
-  constant T_BANK7  : std_logic_vector(2 downto 0) := "010";
-  constant T_FE     : std_logic_vector(2 downto 0) := "011";
-  constant T_BF3B   : std_logic_vector(2 downto 0) := "100";
-  constant T_FF3B   : std_logic_vector(2 downto 0) := "101";
-  constant T_7FFD   : std_logic_vector(2 downto 0) := "110";
-  constant T_1FFD   : std_logic_vector(2 downto 0) := "111";
+  -- Event KIND codes, as sent in half-word 0. Code 11 is never sent.
+  constant K_MEM   : std_logic_vector(1 downto 0) := "00";
+  constant K_IO    : std_logic_vector(1 downto 0) := "01";
+  constant K_RESET : std_logic_vector(1 downto 0) := "10";
 
-  -- Queue storage. Each entry holds TYPE, OFFSET, DATA and the OVF mark.
-  -- V is not stored: an entry is valid when it lies between the pointers.
-  type type_arr_t is array (0 to DEPTH - 1) of std_logic_vector(2 downto 0);
-  type off_arr_t  is array (0 to DEPTH - 1) of std_logic_vector(12 downto 0);
+  -- Queue storage. Each entry holds the address, DATA, KIND, the OVF mark
+  -- and the F mark. V is not stored: an entry is valid when it lies between
+  -- the pointers.
+  type adr_arr_t  is array (0 to DEPTH - 1) of std_logic_vector(15 downto 0);
   type dat_arr_t  is array (0 to DEPTH - 1) of std_logic_vector(7 downto 0);
-  signal q_type : type_arr_t;
-  signal q_off  : off_arr_t;
+  type kind_arr_t is array (0 to DEPTH - 1) of std_logic_vector(1 downto 0);
+  signal q_adr  : adr_arr_t;
   signal q_dat  : dat_arr_t;
+  signal q_kind : kind_arr_t;
   signal q_ovf  : std_logic_vector(DEPTH - 1 downto 0);
+  signal q_frm  : std_logic_vector(DEPTH - 1 downto 0);
 
   ---------------------------------------------------------------------------
   -- Write side (/WR domain)
@@ -130,19 +121,13 @@ architecture rtl of sp_pie_cpld is
   signal io_seen   : std_logic := '0';
   signal mreq_seen : std_logic := '0';
   signal rst_seen  : std_logic := '0';
+  signal inta      : std_logic;
+  signal frm_flag  : std_logic := '0';
 
-  -- Paging state: port 0x7FFD bits 5 (lock) and 2..0 (bank at 0xC000), and
-  -- port 0x1FFD bits 2..0 (layout and special-paging enable).
-  signal r7ffd_lock : std_logic := '0';
-  signal r7ffd_bank : std_logic_vector(2 downto 0) := (others => '0');
-  signal r1ffd      : std_logic_vector(2 downto 0) := (others => '0');
-
-  signal ev_hit  : std_logic;
-  signal ev_type : std_logic_vector(2 downto 0);
-  signal ev_off  : std_logic_vector(12 downto 0);
-  signal ev_dat  : std_logic_vector(7 downto 0);
-  signal wr_7ffd : std_logic;
-  signal wr_1ffd : std_logic;
+  signal st_hit  : std_logic;  -- the wclk rising edge stores an event
+  signal st_kind : std_logic_vector(1 downto 0);
+  signal st_adr  : std_logic_vector(15 downto 0);
+  signal st_dat  : std_logic_vector(7 downto 0);
   signal wr_bf3b : std_logic;
   signal wr_ff3b : std_logic;
 
@@ -167,8 +152,6 @@ architecture rtl of sp_pie_cpld is
   signal sd_r      : std_logic_vector(14 downto 0) := (others => '0');
   signal hw1       : std_logic := '0';  -- 1 while PI_SD holds half-word 1
   signal cur_valid : std_logic := '0';  -- the pair on PI_SD is an event, not empty
-  signal pend2     : std_logic := '0';  -- the current entry still owes its TYPE 7 event
-  signal dbl       : std_logic := '0';  -- the pair on PI_SD comes from a double entry
 
 begin
 
@@ -209,9 +192,9 @@ begin
   -- Reset detection: rst_seen is set asynchronously while /RESET is low and
   -- cleared at the next wclk falling edge, which is the /WR falling edge of
   -- the first write after the reset. At the wclk rising edge made by /RESET
-  -- going high, rst_seen is 1 and the decode queues a reset event. At the
-  -- end of every later write it is 0. rst_seen does not change at that edge
-  -- (it was set before and stays set), so the edge needs no synchronizer.
+  -- going high, rst_seen is 1 and a reset event is stored. At the end of
+  -- every later write it is 0. rst_seen does not change at that edge (it was
+  -- set before and stays set), so the edge needs no synchronizer.
   ---------------------------------------------------------------------------
   io_set <= (not iorq_n) and (not BUS_WR);
 
@@ -221,6 +204,25 @@ begin
       io_seen <= '1';
     elsif falling_edge(wclk) then
       io_seen <= '0';
+    end if;
+  end process;
+
+  -- Frame flag. The Spectrum interrupts the Z80 once per frame, and the Z80
+  -- acknowledges with /M1 and /IORQ low together, a combination no other
+  -- cycle has. frm_flag is set asynchronously during the acknowledge and
+  -- cleared at the wclk rising edge that stores an event, so the first event
+  -- stored after an acknowledge carries F = 1. An event dropped on a full
+  -- queue leaves the flag set. The acknowledge never overlaps a write.
+  inta <= (not M1) and (not iorq_n);
+
+  p_frm : process (wclk, inta)
+  begin
+    if inta = '1' then
+      frm_flag <= '1';
+    elsif rising_edge(wclk) then
+      if st_hit = '1' and q_full = '0' then
+        frm_flag <= '0';
+      end if;
     end if;
   end process;
 
@@ -258,103 +260,29 @@ begin
     end if;
   end process;
 
-  -- Event decode, from the address held at the wclk rising edge and the
-  -- paging state left by earlier writes. At the end of a reset, the event is
-  -- a reset event with DATA 0 and OFFSET 0, whatever the bus holds.
-  p_decode : process (BUS_A, BUS_D, mreq_seen, io_seen, rst_seen,
-                      r7ffd_lock, r7ffd_bank, r1ffd)
-    variable a          : std_logic_vector(15 downto 0);
-    variable in_screen  : boolean;
-    variable bank5      : boolean;
-    variable bank7      : boolean;
-    variable layout     : std_logic_vector(1 downto 0);
-    variable p_fe       : boolean;
-    variable p_bf3b     : boolean;
-    variable p_ff3b     : boolean;
-    variable p_7ffd     : boolean;
-    variable p_1ffd     : boolean;
-  begin
-    a      := BUS_A;
-    layout := r1ffd(2 downto 1);
+  -- The event for this wclk rising edge. Every memory write and every I/O
+  -- write is an event, with the address and data held on the bus. At the end
+  -- of a reset the event is a reset event with address 0 and DATA 0,
+  -- whatever the bus holds.
+  st_hit <= rst_seen or mreq_seen or io_seen;
 
-    -- OFFSET inside the 16 KB bank is A13..A0; events cover 0x0000-0x1AFF.
-    in_screen := a(13) = '0' and unsigned(a(12 downto 8)) < "11011";
+  st_kind <= K_RESET when rst_seen = '1' else
+             K_MEM   when mreq_seen = '1' else
+             K_IO;
 
-    if r1ffd(0) = '0' then
-      -- Normal paging: bank 5 at 0x4000, the 0x7FFD bank at 0xC000.
-      bank5 := a(15 downto 14) = "01" or
-               (a(15 downto 14) = "11" and r7ffd_bank = "101");
-      bank7 := a(15 downto 14) = "11" and r7ffd_bank = "111";
-    else
-      -- Special paging (+2A/+3). Bank 5 is at 0x4000 in layouts 01 and 10.
-      -- Bank 7 is at 0x4000 in layout 11 and at 0xC000 in layout 01.
-      bank5 := a(15 downto 14) = "01" and (layout = "01" or layout = "10");
-      bank7 := (a(15 downto 14) = "01" and layout = "11") or
-               (a(15 downto 14) = "11" and layout = "01");
-    end if;
+  st_adr <= (others => '0') when rst_seen = '1' else BUS_A;
+  st_dat <= (others => '0') when rst_seen = '1' else BUS_D;
 
-    p_fe   := a(0) = '0';
-    p_bf3b := a(15 downto 14) = "10" and a(7 downto 6) = "00" and a(2) = '0' and a(0) = '1';
-    p_ff3b := a(15 downto 14) = "11" and a(7 downto 6) = "00" and a(2) = '0' and a(0) = '1';
-    p_7ffd := a(15 downto 14) = "01" and a(1 downto 0) = "01" and r7ffd_lock = '0';
-    p_1ffd := a(15 downto 13) = "000" and a(12) = '1' and a(1) = '0' and r7ffd_lock = '0';
-
-    ev_hit  <= '0';
-    ev_type <= T_RESET;
-    ev_off  <= (others => '0');
-    ev_dat  <= BUS_D;
-    wr_7ffd <= '0';
-    wr_1ffd <= '0';
-    wr_bf3b <= '0';
-    wr_ff3b <= '0';
-
-    if rst_seen = '1' then
-      ev_hit <= '1';
-      ev_dat <= (others => '0');
-    elsif mreq_seen = '1' then
-      if in_screen and bank5 then
-        ev_hit  <= '1';
-        ev_type <= T_BANK5;
-        ev_off  <= a(12 downto 0);
-      elsif in_screen and bank7 then
-        ev_hit  <= '1';
-        ev_type <= T_BANK7;
-        ev_off  <= a(12 downto 0);
-      end if;
-    elsif io_seen = '1' then
-      -- Of all the I/O decodes, only 0xFE and 0x1FFD can match together.
-      if p_fe or p_bf3b or p_ff3b or p_7ffd or p_1ffd then
-        ev_hit <= '1';
-      end if;
-      if p_fe and p_1ffd then
-        -- Double entry: code 0 with OFFSET bit 0 set.
-        ev_type   <= T_RESET;
-        ev_off(0) <= '1';
-      elsif p_fe then
-        ev_type <= T_FE;
-      elsif p_bf3b then
-        ev_type <= T_BF3B;
-      elsif p_ff3b then
-        ev_type <= T_FF3B;
-      elsif p_7ffd then
-        ev_type <= T_7FFD;
-      else
-        ev_type <= T_1FFD;
-      end if;
-      if p_7ffd then
-        wr_7ffd <= '1';
-      end if;
-      if p_1ffd then
-        wr_1ffd <= '1';
-      end if;
-      if p_bf3b then
-        wr_bf3b <= '1';
-      end if;
-      if p_ff3b then
-        wr_ff3b <= '1';
-      end if;
-    end if;
-  end process;
+  -- ULAplus port decodes for the read-back registers. 0xBF3B: A15..A14 = 10,
+  -- A7..A6 = 00, A2 = 0, A0 = 1. 0xFF3B: the same with A15..A14 = 11.
+  wr_bf3b <= '1' when io_seen = '1' and rst_seen = '0' and mreq_seen = '0' and
+                      BUS_A(15 downto 14) = "10" and BUS_A(7 downto 6) = "00" and
+                      BUS_A(2) = '0' and BUS_A(0) = '1'
+             else '0';
+  wr_ff3b <= '1' when io_seen = '1' and rst_seen = '0' and mreq_seen = '0' and
+                      BUS_A(15 downto 14) = "11" and BUS_A(7 downto 6) = "00" and
+                      BUS_A(2) = '0' and BUS_A(0) = '1'
+             else '0';
 
   -- ULAplus registers for read-back. Cleared while /RESET is low.
   p_ulaplus : process (wclk, BUS_RESET)
@@ -392,25 +320,6 @@ begin
            ulap_last when rd_ff3b = '1' else
            (others => 'Z');
 
-  -- Paging registers. Cleared while /RESET is low. A write is accepted only
-  -- while 0x7FFD bit 5 is clear (the decode above already includes the lock).
-  p_paging : process (wclk, BUS_RESET)
-  begin
-    if BUS_RESET = '0' then
-      r7ffd_lock <= '0';
-      r7ffd_bank <= (others => '0');
-      r1ffd      <= (others => '0');
-    elsif rising_edge(wclk) then
-      if wr_7ffd = '1' then
-        r7ffd_lock <= BUS_D(5);
-        r7ffd_bank <= BUS_D(2 downto 0);
-      end if;
-      if wr_1ffd = '1' then
-        r1ffd <= BUS_D(2 downto 0);
-      end if;
-    end if;
-  end process;
-
   -- Full when the write pointer is DEPTH entries ahead of the read pointer.
   p_full : process (wp_gray, rp_wsync)
     variable used : ptr_t;
@@ -429,13 +338,14 @@ begin
     variable idx    : natural range 0 to DEPTH - 1;
   begin
     if rising_edge(wclk) then
-      if ev_hit = '1' and q_full = '0' then
+      if st_hit = '1' and q_full = '0' then
         wp_bin := gray2bin(wp_gray);
         idx    := to_integer(wp_bin(IW - 1 downto 0));
-        q_type(idx) <= ev_type;
-        q_off(idx)  <= ev_off;
-        q_dat(idx)  <= ev_dat;
+        q_adr(idx)  <= st_adr;
+        q_dat(idx)  <= st_dat;
+        q_kind(idx) <= st_kind;
         q_ovf(idx)  <= ovf_flag;
+        q_frm(idx)  <= frm_flag;
       end if;
     end if;
   end process;
@@ -446,7 +356,7 @@ begin
       wp_gray  <= (others => '0');
       ovf_flag <= '0';
     elsif rising_edge(wclk) then
-      if ev_hit = '1' then
+      if st_hit = '1' then
         if q_full = '0' then
           wp_gray  <= bin2gray(gray2bin(wp_gray) + 1);
           ovf_flag <= '0';
@@ -463,12 +373,13 @@ begin
   -- PI_SD changes only on the SOE rising edge, the end of a read, so each read
   -- sees data that has been stable since the previous read ended.
   --
+  -- Half-word 0: H = 0, V, OVF, F, KIND, 0, A15, DATA.
+  -- Half-word 1: H = 1, A14..A0.
+  --
   -- After half-word 0 is read, PI_SD is loaded with half-word 1 of the same
   -- entry. After half-word 1 is read, the entry is removed (if the pair was an
   -- event) and the next entry is loaded as half-word 0, or an empty pair when
-  -- the queue is empty. A double entry (code 0, OFFSET bit 0 set) is sent as a
-  -- TYPE 3 pair, then a TYPE 7 pair, both with OFFSET 0, and removed after the
-  -- second. dbl is 1 for both pairs and clears OFFSET bit 0 in half-word 1.
+  -- the queue is empty.
   --
   -- Clock-domain crossing, write pointer into the read side: wp_gray passes
   -- through two registers clocked by SOE. Gray code makes each sample the old
@@ -483,7 +394,6 @@ begin
     variable rp_n   : ptr_t;
     variable ridx   : natural range 0 to DEPTH - 1;
     variable nidx   : natural range 0 to DEPTH - 1;
-    variable t      : std_logic_vector(2 downto 0);
   begin
     if PI_SYNC = '1' then
       rp_gray   <= (others => '0');
@@ -492,8 +402,6 @@ begin
       sd_r      <= (others => '0');
       hw1       <= '0';
       cur_valid <= '0';
-      pend2     <= '0';
-      dbl       <= '0';
     elsif rising_edge(PI_SOE) then
       wp_rsync1 <= wp_gray;
       wp_rsync2 <= wp_rsync1;
@@ -502,50 +410,33 @@ begin
       ridx   := to_integer(rp_bin(IW - 1 downto 0));
 
       if hw1 = '0' then
-        -- Half-word 0 was read. Present half-word 1: H = 1, OFFSET.
+        -- Half-word 0 was read. Present half-word 1: H = 1, A14..A0.
         sd_r <= (others => '0');
         if cur_valid = '1' then
-          sd_r(12 downto 1) <= q_off(ridx)(12 downto 1);
-          sd_r(0)           <= q_off(ridx)(0) and not dbl;
+          sd_r <= q_adr(ridx)(14 downto 0);
         end if;
         hw1 <= '1';
       else
         -- Half-word 1 was read. Finish the pair and present the next half-word 0.
-        if cur_valid = '1' and pend2 = '0' then
+        if cur_valid = '1' then
           rp_n := rp_bin + 1;
         else
           rp_n := rp_bin;
         end if;
         nidx := to_integer(rp_n(IW - 1 downto 0));
-        t    := q_type(nidx);
 
         sd_r <= (others => '0');
-        if pend2 = '1' then
-          -- Second event of a double entry: TYPE 7, OVF = 0.
+        if bin2gray(rp_n) /= wp_rsync2 then
           sd_r(14)           <= '1';
-          sd_r(12 downto 10) <= T_1FFD;
+          sd_r(13)           <= q_ovf(nidx);
+          sd_r(12)           <= q_frm(nidx);
+          sd_r(11 downto 10) <= q_kind(nidx);
+          sd_r(8)            <= q_adr(nidx)(15);
           sd_r(7 downto 0)   <= q_dat(nidx);
           cur_valid          <= '1';
-          pend2              <= '0';
-        elsif bin2gray(rp_n) /= wp_rsync2 then
-          sd_r(14) <= '1';
-          sd_r(13) <= q_ovf(nidx);
-          if t = T_RESET and q_off(nidx)(0) = '1' then
-            sd_r(12 downto 10) <= T_FE;
-            pend2              <= '1';
-            dbl                <= '1';
-          else
-            sd_r(12 downto 10) <= t;
-            pend2              <= '0';
-            dbl                <= '0';
-          end if;
-          sd_r(7 downto 0) <= q_dat(nidx);
-          cur_valid        <= '1';
         else
           -- Queue empty: empty pair, half-word 0 is all zero.
           cur_valid <= '0';
-          pend2     <= '0';
-          dbl       <= '0';
         end if;
         rp_gray <= bin2gray(rp_n);
         hw1     <= '0';

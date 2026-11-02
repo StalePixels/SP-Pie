@@ -8,7 +8,7 @@
 namespace sppie {
 
 size_t ProcessWords (const volatile uint32_t *pWords, size_t nCount,
-		     CSpectrumState &rState, TIntakeCounters &rCounters,
+		     IEventSink &rSink, TIntakeCounters &rCounters,
 		     bool &bMismatch)
 {
 	bMismatch = false;
@@ -27,11 +27,15 @@ size_t ProcessWords (const volatile uint32_t *pWords, size_t nCount,
 			{
 				rCounters.Overflows++;
 			}
-			if (Event.Type == EventReset)
+			if (Event.Kind == KindReset)
 			{
 				rCounters.Resets++;
 			}
-			rState.Apply (Event);
+			if (Event.Frame)
+			{
+				rCounters.FrameEvents++;
+			}
+			rSink.Event (Event);
 			rCounters.Events++;
 			break;
 

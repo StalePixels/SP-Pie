@@ -8,6 +8,7 @@
 #include <circle/bcmpropertytags.h>
 #include <circle/machineinfo.h>
 #include <circle/memory.h>
+#include <circle/util.h>
 
 using namespace sppie;
 
@@ -40,13 +41,13 @@ boolean CKernel::Initialize (void)
 		Fail (FailSystem);
 	}
 
-	// 320 x 240 at 32 bits per pixel, twice as high for the flip. The
-	// firmware scales it to the HDMI mode.
-	m_pFrameBuffer = new CBcmFrameBuffer (ScreenWidth, ScreenHeight, 32,
-					      ScreenWidth, ScreenHeight * 2);
+	// 640 x 360 at 32 bits per pixel, twice as high for the flip. The
+	// firmware scales it to the HDMI mode (x3 for 1080p).
+	m_pFrameBuffer = new CBcmFrameBuffer (DisplayWidth, DisplayHeight, 32,
+					      DisplayWidth, DisplayHeight * 2);
 	if (   m_pFrameBuffer == 0
 	    || !m_pFrameBuffer->Initialize ()
-	    || m_pFrameBuffer->GetPitch () < ScreenWidth * 4)
+	    || m_pFrameBuffer->GetPitch () < DisplayWidth * 4)
 	{
 		Fail (FailFrameBuffer);
 	}
@@ -60,7 +61,8 @@ boolean CKernel::Initialize (void)
 
 	unsigned nArmClockMHz = CMachineInfo::Get ()->GetClockRate (CLOCK_ID_ARM) / 1000000;
 
-	m_pApp = new CSpPieApp (CMemorySystem::Get (), m_pFrameBuffer, m_pReader, nArmClockMHz);
+	m_pApp = new CSpPieApp (CMemorySystem::Get (), m_pFrameBuffer, m_pReader, nArmClockMHz,
+				MachineChoice ());
 	if (m_pApp == 0 || !m_pApp->Initialize ())	// starts cores 1 to 3; must be last
 	{
 		Fail (FailCores);
@@ -74,6 +76,20 @@ TShutdownMode CKernel::Run (void)
 	m_pApp->Run (0);	// renderer; does not return
 
 	return ShutdownHalt;
+}
+
+// The "machine" option in cmdline.txt: auto (the default), auto128, 48, 128
+// or plus3. See machinetiming.h, TMachineChoice.
+TMachineChoice CKernel::MachineChoice (void) const
+{
+	const char *pValue = m_Options.GetAppOptionString ("machine", "auto");
+
+	if (strcmp (pValue, "auto128") == 0)	return ChooseAuto128;
+	if (strcmp (pValue, "48") == 0)		return Choose48K;
+	if (strcmp (pValue, "128") == 0)	return Choose128K;
+	if (strcmp (pValue, "plus3") == 0)	return ChoosePlus3;
+
+	return ChooseAuto;
 }
 
 void CKernel::Fail (unsigned nCount)

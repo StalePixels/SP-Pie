@@ -29,58 +29,46 @@ The CPLD pin for each GPIO is in the upstream TK-Pie pin assignments (`CPLD/EPM2
 
 ## Event format
 
+The CPLD sends every Z80 memory write and every I/O write as one event, in the order they happen, with the full address and the data byte. It does no address decode and keeps no paging state. The Pi decides what each write means: which RAM bank it goes to, which port it is, and what it changes.
+
 Half-word 0:
 
-| Bit | 15 | 14 | 13 | 12 to 10 | 9, 8 | 7 to 0 |
-|---|---|---|---|---|---|---|
-| Field | H = 0 | V | OVF | TYPE | 0 | DATA |
+| Bit | 15 | 14 | 13 | 12 | 11, 10 | 9 | 8 | 7 to 0 |
+|---|---|---|---|---|---|---|---|---|
+| Field | H = 0 | V | OVF | F | KIND | 0 | A15 | DATA |
 
 Half-word 1:
 
-| Bit | 15 | 14, 13 | 12 to 0 |
-|---|---|---|---|
-| Field | H = 1 | 0 | OFFSET |
+| Bit | 15 | 14 to 0 |
+|---|---|---|
+| Field | H = 1 | A14 to A0 |
 
 - **H** marks the half. A half-word 0 with H = 1, or a half-word 1 with H = 0, means the Pi and the CPLD disagree about which half comes next. The Pi then pulses SYNC.
 - **V** is 1 for an event and 0 for an empty pair.
-- **OVF** is 1 on the first event queued after one or more events were dropped because the queue was full. Events between the last event sent and this one are lost.
-- **TYPE** is the event kind, below.
+- **OVF** is 1 on the first event stored after one or more events were dropped because the queue was full. Events between the last event sent and this one are lost.
+- **F** is 1 on the first event stored after an interrupt acknowledge. See [Frame events](#frame-events).
+- **KIND** is the event kind, below.
+- **A15 to A0** is the address of the write: the memory address for a memory write, the full 16-bit port address for an I/O write.
 - **DATA** is the byte the Z80 wrote.
-- **OFFSET** is the offset inside the screen bank, 0x0000 to 0x1AFF, for TYPE 1 and 2. It is 0 for other types.
 
-| TYPE | Event | Decode |
+| KIND | Event | Address and DATA |
 |---|---|---|
-| 0 | Reset | /RESET went high (end of a Spectrum reset). DATA and OFFSET are 0 |
-| 1 | Write to RAM bank 5, OFFSET below 0x1B00 | Memory write, bank from the paging state |
-| 2 | Write to RAM bank 7, OFFSET below 0x1B00 | Memory write, bank from the paging state |
-| 3 | Write to port 0xFE | I/O write, A0 = 0 |
-| 4 | Write to ULAplus register port 0xBF3B | I/O write, A15..A14 = 10, A7..A6 = 00, A2 = 0, A0 = 1 |
-| 5 | Write to ULAplus data port 0xFF3B | I/O write, A15..A14 = 11, A7..A6 = 00, A2 = 0, A0 = 1 |
-| 6 | Write to port 0x7FFD, accepted | I/O write, A15..A14 = 01, A1..A0 = 01, paging not locked |
-| 7 | Write to port 0x1FFD, accepted | I/O write, A15..A13 = 000, A12 = 1, A1 = 0, paging not locked |
+| 00 | Memory write | Memory address, data byte |
+| 01 | I/O write | Port address (all 16 bits), data byte |
+| 10 | Reset: /RESET went high (end of a Spectrum reset) | Address 0, DATA 0 |
+| 11 | Reserved, never sent | |
 
-The I/O decodes are the decodes of the upstream TK-Pie CPLD, so software that works with TK-Pie works with this board. The 0x7FFD decode is narrower than the real 128K and +2 decode (A15 = 0, A1 = 0): a write to an address such as 0x3FFD or 0x7FFC pages a real 128K but queues no event.
+A word with V = 1 and KIND 11, a set bit 9, or a reset event with a non-zero address or DATA is malformed.
 
-One I/O write can match both the 0xFE and the 0x1FFD decodes, as on the +2A/+3. The CPLD keeps this as one queue entry and sends it as two events, TYPE 3 and then TYPE 7. When the queue is full, both events are dropped together. No other pair of decodes can match the same write.
+## Frame events
 
-## Paging state in the CPLD
+The Spectrum interrupts the Z80 once per frame, at a fixed point of the ULA's frame. The Z80 acknowledges with /M1 and /IORQ low together, which no other cycle does. It then pushes its return address to the stack, so the first write after the acknowledge comes a short, bounded time after the interrupt.
 
-The CPLD keeps copies of port 0x7FFD and port 0x1FFD to know which bank a memory write goes to.
+The CPLD sets F = 1 on the first event it stores after an acknowledge. When the queue is full and that event is dropped, the next stored event carries F = 1 (and OVF = 1). The acknowledge happens only while the Z80 has interrupts enabled, so a program that runs with interrupts disabled gives no F events.
 
-- Both are cleared while /RESET is low.
-- When /RESET goes high, the CPLD queues a reset event (TYPE 0). It comes after every event from before the reset. When the queue is full, the reset event is dropped like any other event, and the next event has OVF = 1. On a reset event the Pi sets its copies of 0x7FFD and 0x1FFD to 0, turns ULAplus mode off and sets the ULAplus register to 0. The ULAplus palette and the border stay as they are.
-- 0x7FFD bit 5 set locks both ports until reset. Writes to a locked port are ignored and queue no event.
-- With 0x1FFD bit 0 = 0 (normal paging): 0x4000 to 0x7FFF is bank 5, and 0xC000 to 0xFFFF is the bank in 0x7FFD bits 2 to 0.
-- With 0x1FFD bit 0 = 1 (special paging, +2A/+3), 0x1FFD bits 2 and 1 select the banks for 0x0000, 0x4000, 0x8000 and 0xC000:
+## Reset event
 
-| Bits 2, 1 | 0x0000 | 0x4000 | 0x8000 | 0xC000 |
-|---|---|---|---|---|
-| 0, 0 | 0 | 1 | 2 | 3 |
-| 0, 1 | 4 | 5 | 6 | 7 |
-| 1, 0 | 4 | 5 | 6 | 3 |
-| 1, 1 | 4 | 7 | 6 | 3 |
-
-The CPLD does not know which Spectrum model it is on. On a 48K machine the paging registers stay at 0 unless software writes to an address that matches the 0x7FFD or 0x1FFD decode. The real 128K and +2 decode 0x7FFD on A15 = 0 and A1 = 0 only, so on those machines a write to 0x1FFD also pages 0x7FFD; the CPLD treats it as a 0x1FFD write.
+When /RESET goes high, the CPLD stores a reset event. It comes after every event from before the reset and before every event from after it. When the queue is full, it is dropped like any other event, and the next event has OVF = 1.
 
 ## Write capture
 
@@ -88,4 +76,4 @@ The CPLD captures A0 to A15 and D0 to D7 for a write while /WR is low, with valu
 
 ## SYNC
 
-While SYNC is high the CPLD empties the queue, clears the overflow flag and sets the half-word pointer to half-word 0. The paging state is not changed. The Pi holds SYNC high for at least 1 µs, with no SMI reads during that time, and waits at least 1 µs after SYNC goes low before the next read.
+While SYNC is high the CPLD empties the queue, clears the overflow flag and sets the half-word pointer to half-word 0. The Pi holds SYNC high for at least 1 µs, with no SMI reads during that time, and waits at least 1 µs after SYNC goes low before the next read.

@@ -44,6 +44,8 @@ private:
 	// the screen may not be up, so this is how a start-up failure shows.
 	void Fail (unsigned nCount);
 
+	sppie::TMachineChoice MachineChoice (void) const;
+
 private:
 	// do not change this order
 	CActLED			m_ActLED;

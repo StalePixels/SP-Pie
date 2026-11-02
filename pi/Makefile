@@ -29,7 +29,8 @@ endif
 include $(CIRCLE_WORLD)/Config.mk
 
 OBJS	= src/main.o src/kernel.o src/sppieapp.o src/smieventreader.o \
-	  src/intake.o src/spectrumstate.o src/renderer.o src/overlay.o
+	  src/intake.o src/spectrumstate.o src/renderer.o src/overlay.o \
+	  src/framelock.o src/timeline.o src/presenter.o
 
 DEFINE	+= -DSPPIE_OVERLAY=$(OVERLAY)
 
