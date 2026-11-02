@@ -13,7 +13,7 @@
 // Event R0:   bit 17 T4, bit 16 T3, bit 15 H = 0, bit 14 V = 1, bit 13 OVF,
 //             bit 12 F, bits 11..10 KIND, bit 9 T2, bit 8 A15, bits 7..0 DATA
 // Event R1:   bit 17 T1, bit 16 T0, bit 15 H = 1, bits 14..0 A14..A0
-// Empty R0:   bit 15 H = 0, bit 14 V = 0, bits 4..0 C4..C0, all else 0
+// Empty R0:   bit 15 H = 0, bit 14 V = 0, bit 5 STL, bits 4..0 C4..C0, all else 0
 // Empty R1:   0x08000
 //
 // T4..T0 and C4..C0 are 5-bit Gray codes of the CPLD's clock count.
@@ -45,6 +45,7 @@ struct TEvent
 	bool		Overflow;	// OVF: first event stored after the CPLD dropped events
 	bool		Frame;		// F: first event stored after an interrupt acknowledge
 	uint8_t		Count;		// clock count at the end of the write, mod 32 (binary)
+	bool		Stall;		// empty pairs: STL, a held Z80 clock measured since the last
 };
 
 enum TPairKind
@@ -74,6 +75,7 @@ static const uint32_t WordT4T1		= 1u << 17;	// T4 in R0, T1 in R1
 static const uint32_t WordT3T0		= 1u << 16;	// T3 in R0, T0 in R1
 static const uint32_t R1AddressMask	= 0x7FFFu;
 static const uint32_t EmptyR0CountMask	= CountMask;
+static const uint32_t EmptyR0Stall	= 1u << 5;
 static const uint32_t EmptyR1		= WordH;
 static const uint32_t WordMask		= 0x3FFFFu;	// 18 bits
 
@@ -104,7 +106,7 @@ static inline bool IsR0 (uint32_t nWord)
 //
 // Checks, in order:
 //  - R0 must have H = 0 and R1 must have H = 1, otherwise PairMismatch;
-//  - V = 0 gives PairEmpty only when R0 has no bit set outside H and
+//  - V = 0 gives PairEmpty only when R0 has no bit set outside H, STL and
 //    C4..C0 and R1 is exactly 0x08000; otherwise PairMalformed;
 //  - for V = 1: KIND 11, or a reset event with a non-zero address or DATA,
 //    give PairMalformed. OVF and F may be set on any event.
@@ -121,11 +123,12 @@ static inline TPairKind DecodePair (uint32_t nR0, uint32_t nR1, TEvent &rEvent)
 
 	if ((nR0 & R0V) == 0)
 	{
-		if ((nR0 & ~EmptyR0CountMask) != 0 || nR1 != EmptyR1)
+		if ((nR0 & ~(EmptyR0CountMask | EmptyR0Stall)) != 0 || nR1 != EmptyR1)
 		{
 			return PairMalformed;
 		}
 		rEvent.Count = GrayToBinary ((uint8_t) (nR0 & EmptyR0CountMask));
+		rEvent.Stall = (nR0 & EmptyR0Stall) != 0;
 		return PairEmpty;
 	}
 
@@ -151,6 +154,7 @@ static inline TPairKind DecodePair (uint32_t nR0, uint32_t nR1, TEvent &rEvent)
 	rEvent.Overflow = (nR0 & R0Ovf) != 0;
 	rEvent.Frame = (nR0 & R0Frame) != 0;
 	rEvent.Count = GrayToBinary (nGray);
+	rEvent.Stall = false;
 
 	return PairEvent;
 }
@@ -180,9 +184,9 @@ static inline void EncodeEvent (uint32_t *pWords, uint8_t nKind, uint16_t nAddre
 }
 
 // The two read words of an empty pair with clock count nCount mod 32.
-static inline void EncodeEmpty (uint32_t *pWords, uint8_t nCount)
+static inline void EncodeEmpty (uint32_t *pWords, uint8_t nCount, bool bStall = false)
 {
-	pWords[0] = BinaryToGray (nCount & CountMask);
+	pWords[0] = BinaryToGray (nCount & CountMask) | (bStall ? EmptyR0Stall : 0);
 	pWords[1] = EmptyR1;
 }
 

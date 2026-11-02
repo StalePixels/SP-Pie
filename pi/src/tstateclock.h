@@ -46,8 +46,10 @@ public:
 
 	// Every event captured before nCount - CaptureLagClocks has been given
 	// to TimedEvent (). nCount is the count an empty pair carried; nTicks
-	// is when the CPLD took it, in ticks of the Pi's timer, with a fraction.
-	virtual void Clock (uint64_t nCount, double nTicks) = 0;
+	// is when the CPLD took it, in ticks of the Pi's timer, with a fraction;
+	// bStall is its STL bit (the CPLD measured a held Z80 clock since the
+	// empty pair before).
+	virtual void Clock (uint64_t nCount, double nTicks, bool bStall) = 0;
 
 	// Reads stopped and start again with the transfer that begins now.
 	virtual void ReadsRestarted (void) {}
@@ -94,7 +96,7 @@ public:
 
 	double ReadTicks (void) const		{ return m_Clock.ReadTicks (); }
 
-	void Empty (uint8_t nCount, uint64_t nWord) override;
+	void Empty (uint8_t nCount, bool bStall, uint64_t nWord) override;
 	void Event (const TEvent &rEvent, uint64_t nWord) override;
 
 	bool HaveCount (void) const		{ return m_bHaveCount; }

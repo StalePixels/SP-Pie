@@ -21,8 +21,15 @@
 --   depend on the phase of the edge-connector clock (inverted on the
 --   +2A/+3) or on clock stretching.
 --
---   Time base: clocked by the rising edge of the edge-connector clock CLK
---   (pin 62). It runs the free-running time counter and the /RESET filter.
+--   Edge clock: clocked by the rising edge of the edge-connector clock CLK
+--   (pin 62). It runs the /RESET filter and the FCLK detector.
+--
+--   Time count: clocked by the rising edge of tclk, which is FCLK (Pi GPIO 4,
+--   pin 72, 25 MHz from the Pi) while the FCLK detector sees FCLK run, and
+--   CLK when it does not. With FCLK, the time counter measures the length of
+--   every CLK phase and counts ULA time: one for each CLK rising edge, plus
+--   one for each whole T-state by which a stalled phase is longer than
+--   normal. Without FCLK, it counts the CLK rising edges.
 --
 --   Read side: clocked by the rising edge of the Pi SMI read strobe SOE
 --   (GPIO 6). Each rising edge ends one SMI read and loads the next read word.
@@ -30,6 +37,7 @@
 --   The two sides share the queue storage and exchange the queue pointers in
 --   Gray code. The time count goes to both sides in Gray code. See the
 --   "Clock-domain crossing" notes below.
+
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -55,7 +63,9 @@ entity sp_pie_cpld is
     CLK             : in  std_logic;  -- edge-connector clock: time count, /RESET filter
 
     -- Raspberry Pi SMI and GPIO.
-    PI_SA           : in  std_logic_vector(5 downto 0);  -- GPIO 0-5, ignored
+    PI_SA0          : in  std_logic;                     -- GPIO 5, ignored
+    PI_FCLK         : in  std_logic;                     -- GPIO 4, 25 MHz clock
+    PI_SA           : in  std_logic_vector(5 downto 2);  -- GPIO 3-0, ignored
     PI_SOE          : in  std_logic;                     -- GPIO 6, read strobe, active low
     PI_SWE          : in  std_logic;                     -- GPIO 7, ignored
     PI_SD           : out std_logic_vector(15 downto 0); -- GPIO 8-23, read data
@@ -119,11 +129,30 @@ architecture rtl of sp_pie_cpld is
   signal q_ovf  : std_logic_vector(DEPTH - 1 downto 0);
   signal q_frm  : std_logic_vector(DEPTH - 1 downto 0);
 
+  subtype cnt_t is unsigned(4 downto 0);
+
+  function gray5(b : cnt_t) return std_logic_vector is
+  begin
+    return std_logic_vector(b xor shift_right(b, 1));
+  end function;
+
   ---------------------------------------------------------------------------
-  -- Time base (CLK domain)
+  -- FCLK detector (f_tog: FCLK domain; the rest: CLK domain)
   ---------------------------------------------------------------------------
-  signal cnt_bin  : unsigned(4 downto 0) := (others => '0');
-  signal cnt_gray : std_logic_vector(4 downto 0) := (others => '0');
+  signal f_tog    : std_logic := '0';
+  signal ft_s     : std_logic_vector(2 downto 0) := (others => '0');  -- f_tog samples
+  signal ft_miss  : unsigned(2 downto 0) := (others => '0');
+  signal use_f    : std_logic := '0';  -- 1: FCLK runs
+
+  ---------------------------------------------------------------------------
+  -- Time counter (tclk domain)
+  ---------------------------------------------------------------------------
+  signal tclk     : std_logic;
+  signal f_clk    : std_logic_vector(2 downto 0) := (others => '0');  -- CLK samples
+  signal f_sub    : unsigned(2 downto 0) := (others => '0');
+  signal t_bin    : cnt_t := (others => '0');
+  signal t_gray   : std_logic_vector(4 downto 0) := (others => '0');
+  signal stl_p    : std_logic := '0';  -- one FCLK period high per stall T-state
 
   ---------------------------------------------------------------------------
   -- Write side (/WR domain)
@@ -168,6 +197,8 @@ architecture rtl of sp_pie_cpld is
   signal sd_t      : std_logic_vector(1 downto 0)  := (others => '0');  -- SD17, SD16
   signal hw1       : std_logic := '0';  -- 1 while the output register holds R1
   signal cur_valid : std_logic := '0';  -- the pair on PI_SD is an event, not empty
+  signal ld_empty  : std_logic;         -- this SOE rising edge loads an empty R0
+  signal stl_r     : std_logic := '0';  -- a stall since the last empty R0 load
 
 begin
 
@@ -176,18 +207,105 @@ begin
   -- Pins 98 and 76 both carry /IORQ. Either one low means /IORQ is low.
   iorq_n <= BUS_IORQ_i and BUS_IORQ_COPY_i;
 
-  -- Time counter. A free-running 5-bit binary counter counts the rising
-  -- edges of the edge-connector clock. Neither SYNC nor /RESET resets it.
-  -- cnt_gray is a register that holds the reflected binary Gray code of the
-  -- counter (one clock behind it), so exactly one bit of cnt_gray changes at
-  -- each rising edge of CLK, and it changes without glitches. The write side
-  -- and the read side sample cnt_gray at edges that have no fixed relation
-  -- to CLK; a sample taken while it changes is the old or the new count.
-  p_count : process (CLK)
+  -- FCLK detector. f_tog toggles at every FCLK rising edge. At each CLK
+  -- rising edge ft_s samples it; ft_s(0) has one CLK period to settle.
+  -- While FCLK runs, f_tog changes between two samples almost every time: a
+  -- CLK period is 7 or 8 FCLK periods (never 8 twice in a row), or more
+  -- during a stall, and f_tog has a period of two FCLK periods. use_f goes to
+  -- 1 at the first change and back to 0 after eight CLK rising edges without
+  -- a change. It changes only when FCLK starts or stops.
+  p_ftog : process (PI_FCLK)
+  begin
+    if rising_edge(PI_FCLK) then
+      f_tog <= not f_tog;
+    end if;
+  end process;
+
+  p_fdet : process (CLK)
   begin
     if rising_edge(CLK) then
-      cnt_bin  <= cnt_bin + 1;
-      cnt_gray <= std_logic_vector(cnt_bin xor shift_right(cnt_bin, 1));
+      ft_s <= ft_s(1 downto 0) & f_tog;
+      if ft_s(1) /= ft_s(2) then
+        ft_miss <= (others => '0');
+        use_f   <= '1';
+      elsif ft_miss = 7 then
+        use_f   <= '0';
+      else
+        ft_miss <= ft_miss + 1;
+      end if;
+    end if;
+  end process;
+
+  -- Time counter clock: FCLK while use_f is 1, CLK while it is 0. use_f
+  -- changes only when FCLK starts or stops (the Pi starting or leaving its
+  -- clock), and the switch can then give tclk one short or missing pulse.
+  -- That can leave any value in the time counter's registers. Every value
+  -- is a legal state: the next tclk edge loads t_gray from t_bin + 1 and
+  -- f_sub moves on from any value, so the count is consistent again one
+  -- edge later. The Pi sees one jump in the count, once, when FCLK starts
+  -- or stops.
+  tclk <= PI_FCLK when use_f = '1' else CLK;
+
+  -- Time counter. A free-running 5-bit binary counter t_bin, and t_gray, a
+  -- register loaded with the reflected binary Gray code of the new count at
+  -- the same edge, so exactly one bit of t_gray changes per step, without
+  -- glitches. Neither SYNC nor /RESET resets it. The write side and the read
+  -- side sample t_gray at edges that have no fixed relation to tclk; a
+  -- sample taken while it changes is the old or the new count.
+  --
+  -- Without FCLK (use_f = 0) tclk is CLK and the counter advances at every
+  -- CLK rising edge.
+  --
+  -- With FCLK (use_f = 1) tclk is FCLK: 25 MHz, 40 ns, 7.05 periods per
+  -- T-state at 3.5469 MHz and 7.14 at 3.5 MHz. f_clk(0) samples CLK and
+  -- f_clk(1) is the synchronised level; f_clk(0) has one FCLK period to
+  -- settle from metastability. f_clk(1) /= f_clk(2) marks a CLK edge, either
+  -- way. f_sub counts FCLK periods since the last edge, modulo 7: it is 1 in
+  -- the first period after an edge.
+  --
+  -- The counter advances by one at each CLK rising edge, and by one more
+  -- each time a phase (high or low) is still running 7, 14, 21 (and so on)
+  -- FCLK periods after the edge that started it. A phase that lasts L
+  -- periods, measured edge to edge, so adds k = (L - 1) / 7 rounded down: L
+  -- up to 7 is a normal phase (k = 0), 8 to 14 is one stall T-state, 15 to
+  -- 21 two, and so on. The thresholds 7k + 1 sit half way between the phase
+  -- lengths of k - 1 and k stall T-states, with at least 2.5 periods of
+  -- margin on each side for k = 1 to 6 at 3.5 and 3.5469 MHz and a 50 %
+  -- duty cycle. Both phases are measured, so the logic does not depend on
+  -- the level at which the ULA holds the clock.
+  --
+  -- An extra count needs 7 periods without an edge, so it never comes in
+  -- the same period as a rising edge, and t_gray changes at most once per
+  -- FCLK period. A CLK rising edge reaches t_gray 80 to 120 ns later (the
+  -- third FCLK rising edge after it at the latest). The extra counts of a
+  -- stall come before the stalled phase ends.
+  --
+  -- stl_p is high for one FCLK period after each extra count, for STL.
+  p_tcount : process (tclk)
+    variable inc : std_logic;
+  begin
+    if rising_edge(tclk) then
+      f_clk <= f_clk(1 downto 0) & CLK;
+      inc   := '0';
+      stl_p <= '0';
+      if f_clk(1) /= f_clk(2) then
+        f_sub <= to_unsigned(1, 3);
+        inc   := f_clk(1);
+      else
+        if f_sub = 6 then
+          f_sub <= (others => '0');
+        else
+          f_sub <= f_sub + 1;
+        end if;
+        if f_sub = 0 then
+          inc   := '1';
+          stl_p <= use_f;
+        end if;
+      end if;
+      if inc = '1' or use_f = '0' then
+        t_bin  <= t_bin + 1;
+        t_gray <= gray5(t_bin + 1);
+      end if;
     end if;
   end process;
 
@@ -226,11 +344,13 @@ begin
   -- edge would miss late I/O data, so it is not used.
   --
   -- Clock-domain crossing, time count into the write side: the same wclk
-  -- rising edge stores cnt_gray as the event's T4..T0. Gray code makes the
-  -- sample the old or the new count when the edge comes as cnt_gray changes.
+  -- rising edge stores t_gray as the event's T4..T0. Gray code makes the
+  -- sample the old or the new count when the edge comes as t_gray changes.
   -- The stored value is read at least two SOE edges later, so it has time to
   -- settle. The wclk edge at the end of a reset is made by rst_n, a CLK
-  -- register, so it always comes just after a CLK rising edge.
+  -- register, so it always comes just after a CLK rising edge. With FCLK
+  -- running, that CLK edge reaches the count 80 to 120 ns later, after the
+  -- reset event has been stored.
   --
   -- /MREQ and /IORQ rise at the same clock edge as /WR, so they cannot be read
   -- at the /WR rising edge. They are remembered while /WR is low:
@@ -399,7 +519,7 @@ begin
         q_adr(idx)  <= st_adr;
         q_dat(idx)  <= st_dat;
         q_kind(idx) <= st_kind;
-        q_time(idx) <= cnt_gray;
+        q_time(idx) <= t_gray;
         q_ovf(idx)  <= ovf_flag;
         q_frm(idx)  <= frm_flag;
       end if;
@@ -431,8 +551,8 @@ begin
   --
   -- Event R0: T4, T3, H = 0, V = 1, OVF, F, KIND, T2, A15, DATA.
   -- Event R1: T1, T0, H = 1, A14..A0.
-  -- Empty R0: all 0 except C4..C0 in bits 4..0, the live count cnt_gray
-  --           sampled at the SOE rising edge that loads this R0.
+  -- Empty R0: all 0 except STL in bit 5 and C4..C0 in bits 4..0, the live
+  --           count t_gray sampled at the SOE rising edge that loads this R0.
   -- Empty R1: H = 1, all other bits 0.
   --
   -- After R0 is read, the output register is loaded with R1 of the same
@@ -440,7 +560,7 @@ begin
   -- and the next entry is loaded as R0, or an empty pair when the queue is
   -- empty.
   --
-  -- Clock-domain crossing, time count into the read side: cnt_gray is
+  -- Clock-domain crossing, time count into the read side: t_gray is
   -- sampled once, into the output register, at the SOE edge that loads an
   -- empty R0. Gray code makes the sample the old or the new count. The Pi
   -- reads it a full read later, so the register has that read to settle.
@@ -453,6 +573,30 @@ begin
   -- storage is written. An entry is written at the same wclk edge that advances
   -- wp_gray, and it is read at least two SOE edges after that.
   ---------------------------------------------------------------------------
+  -- STL. stl_r is set asynchronously while stl_p is high (one FCLK period
+  -- per stall T-state, a register output with clean edges) and cleared at
+  -- the SOE rising edge that loads an empty R0. That edge copies stl_r into
+  -- bit 5 of the R0, so STL = 1 says the ULA time counter added at least one
+  -- stall T-state since the previous empty R0 was loaded. When stl_p is high
+  -- at the loading edge, the set wins: the stall shows on this empty pair or
+  -- the next one, or on both. The bit is sampled asynchronously and has a
+  -- full read to settle, as the count has. SYNC does not clear stl_r.
+  ld_empty <= '1' when hw1 = '1' and
+                       ((cur_valid = '1' and bin2gray(gray2bin(rp_gray) + 1) = wp_rsync2) or
+                        (cur_valid = '0' and rp_gray = wp_rsync2))
+              else '0';
+
+  p_stl : process (PI_SOE, stl_p)
+  begin
+    if stl_p = '1' then
+      stl_r <= '1';
+    elsif rising_edge(PI_SOE) then
+      if ld_empty = '1' then
+        stl_r <= '0';
+      end if;
+    end if;
+  end process;
+
   p_read : process (PI_SOE, PI_SYNC)
     variable rp_bin : ptr_t;
     variable rp_n   : ptr_t;
@@ -505,8 +649,9 @@ begin
           sd_r(7 downto 0)   <= q_dat(nidx);
           cur_valid          <= '1';
         else
-          -- Queue empty: empty pair, R0 carries the live count.
-          sd_r(4 downto 0) <= cnt_gray;
+          -- Queue empty: empty pair, R0 carries the live count and STL.
+          sd_r(5)          <= stl_r;
+          sd_r(4 downto 0) <= t_gray;
           cur_valid        <= '0';
         end if;
         rp_gray <= bin2gray(rp_n);

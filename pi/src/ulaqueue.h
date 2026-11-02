@@ -54,12 +54,12 @@ public:
 		}
 	}
 
-	void Clock (uint64_t nCount, double nTicks) override
+	void Clock (uint64_t nCount, double nTicks, bool bStall) override
 	{
 		TEntry *pEntry = Next ();
 		if (pEntry)
 		{
-			pEntry->Type = TypeClock;
+			pEntry->Type = bStall ? TypeClockStall : TypeClock;
 			pEntry->Count = nCount;
 			pEntry->Ticks = nTicks;
 		}
@@ -95,7 +95,8 @@ public:
 			switch (rEntry.Type)
 			{
 			case TypeEvent:		rSink.TimedEvent (rEntry.Event, rEntry.Count);	break;
-			case TypeClock:		rSink.Clock (rEntry.Count, rEntry.Ticks);	break;
+			case TypeClock:		rSink.Clock (rEntry.Count, rEntry.Ticks, false);	break;
+			case TypeClockStall:	rSink.Clock (rEntry.Count, rEntry.Ticks, true);	break;
 			default:		rSink.ReadsRestarted ();			break;
 			}
 		}
@@ -104,7 +105,7 @@ public:
 	}
 
 private:
-	enum : uint8_t { TypeEvent, TypeClock, TypeRestart };
+	enum : uint8_t { TypeEvent, TypeClock, TypeClockStall, TypeRestart };
 
 	struct TEntry
 	{

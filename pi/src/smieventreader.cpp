@@ -54,6 +54,8 @@ CSmiEventReader::CSmiEventReader (void)
 	m_SOEPin (SoePin, GPIOModeAlternateFunction1),
 	m_SyncPin (SyncPin, GPIOModeOutput),
 	m_NotEmptyPin (NotEmptyPin, GPIOModeInput),
+	m_FastClock (GPIOClock0, GPIOClockSourcePLLD),
+	m_FastClockPin (FastClockPin, GPIOModeAlternateFunction0),
 	m_nDMAChannel (DMA_CHANNEL_NONE),
 	m_pControlBlock (0),
 	m_pRingAlloc (0),
@@ -84,6 +86,12 @@ CSmiEventReader::~CSmiEventReader (void)
 
 boolean CSmiEventReader::Initialize (void)
 {
+	// The CPLD's clock for measuring held Z80 clock phases.
+	if (!m_FastClock.Start (FastClockDivider))
+	{
+		return FALSE;
+	}
+
 	m_nDMAChannel = CMachineInfo::Get ()->AllocateDMAChannel (DMA_CHANNEL_NORMAL);
 	if (m_nDMAChannel == DMA_CHANNEL_NONE)
 	{

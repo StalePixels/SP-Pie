@@ -6,7 +6,8 @@ This is the interface between the CPLD on the TK-Pie board and the Raspberry Pi 
 
 | Pi GPIO | SMI function | Direction | Use |
 |---|---|---|---|
-| 0 to 5 | SA5 to SA0 | Pi to CPLD | Reserved. The CPLD ignores them. |
+| 0 to 3, 5 | SA5 to SA2, SA0 | Pi to CPLD | Reserved. The CPLD ignores them. |
+| 4 | none (GPCLK0) | Pi to CPLD | FCLK. A 25 MHz clock for the time count (see [Time base](#time-base)), or a steady level. |
 | 6 | SOE (read strobe, active low) | Pi to CPLD | Each low pulse is one SMI read. |
 | 7 | SWE (write strobe, active low) | Pi to CPLD | Reserved. The CPLD ignores it. |
 | 8 to 25 | SD0 to SD17 | CPLD to Pi | Read data, one 18-bit read word per read. The CPLD drives these lines all the time. |
@@ -14,6 +15,8 @@ This is the interface between the CPLD on the TK-Pie board and the Raspberry Pi 
 | 27 | none | CPLD to Pi | NOT_EMPTY. High when the queue holds at least one event. Information only. |
 
 The Pi uses 18-bit SMI. It must never drive GPIO 8 to 25 and must not do SMI writes.
+
+FCLK is the general-purpose clock GPCLK0 on GPIO 4 (function ALT0): PLLD (500 MHz) divided by 20 with the integer divider (MASH 0), 25.000 MHz. The CPLD uses it as a clock, so the Pi must either run it at that frequency or leave GPIO 4 at a steady level. A GPIO 4 left as an input with its default pull-up is a steady level.
 
 The CPLD pin for each GPIO is in the upstream TK-Pie pin assignments (`CPLD/EPM240/CPLD_TK-Pie.qsf`, signals `GPIO[0]` to `GPIO[23]` and `GPIO_24` to `GPIO_27`).
 
@@ -64,29 +67,37 @@ An event with KIND 11, or a reset event with a non-zero address or DATA, is malf
 
 R0 of an empty pair:
 
-| Bit | 17, 16 | 15 | 14 | 13 to 5 | 4 to 0 |
-|---|---|---|---|---|---|
-| Field | 0 | H = 0 | V = 0 | 0 | C4 to C0 |
+| Bit | 17, 16 | 15 | 14 | 13 to 6 | 5 | 4 to 0 |
+|---|---|---|---|---|---|---|
+| Field | 0 | H = 0 | V = 0 | 0 | STL | C4 to C0 |
 
 R1 of an empty pair is 0x08000: H = 1 and every other bit 0.
 
 C4 to C0 is the time count, in Gray code, at the SOE rising edge that loaded R0. An empty pair with any other bit set is malformed.
 
+STL is 1 when the CPLD measured at least one stalled clock phase since it loaded the previous empty pair (see [Time base](#time-base)). A stall that comes at the same time as that load can show on this empty pair, on the next one, or on both. Without FCLK, STL is always 0. On the +2A/+3 the edge-connector clock never stalls, so STL is 0 there too; on the 48K and the 128K it is 1 after contention. SYNC does not clear it.
+
 The first pair after power-up or SYNC is an empty pair that no SOE edge loaded. Its C4 to C0 is 0 and is not a time count. The Pi ignores it.
 
 ## Time base
 
-The CPLD counts the rising edges of the edge-connector clock (CPLD pin 62) with a free-running 5-bit counter. Neither SYNC nor /RESET resets it. The count goes to the Pi in the 5-bit reflected binary Gray code (`g = b xor (b >> 1)`), so a count sampled while it changes is either the old value or the new one, never a mix.
+The CPLD keeps a free-running 5-bit time count. Neither SYNC nor /RESET resets it. The count goes to the Pi in the 5-bit reflected binary Gray code (`g = b xor (b >> 1)`). It changes by one step at a time, so a count sampled while it changes is either the old value or the new one, never a mix.
+
+What the count counts depends on FCLK:
+
+- **With FCLK** the count is ULA time, in T-states, on every model. The CPLD counts each rising edge of the edge-connector clock (CPLD pin 62), and it measures the length of every high and every low phase of that clock with FCLK. A phase that is longer than normal by whole T-states is a stall: on the 48K and the 128K, the ULA stops the Z80 clock during contention and the edge-connector clock with it. The CPLD adds one count for each T-state of the stall. A phase of L FCLK periods adds (L - 1) / 7, rounded down, so a normal phase (about 3.5 periods) adds nothing and a phase longer by k T-states (about 3.5 + 7.05 k periods) adds k. A clock edge reaches the count 80 to 120 ns after the edge. The extra counts of a stall come before the stalled phase ends.
+- **Without FCLK** the count is the number of rising edges of the edge-connector clock. On the +2A/+3 this is ULA time, because that clock never stops. On the 48K and the 128K it leaves out the T-states of every stall.
+
+The CPLD sees whether FCLK runs. It changes from one count to the other within eight clock periods of FCLK starting or stopping, and the count then jumps once. The Pi starts FCLK before it reads the queue and ignores the counts of the first 10 µs after it started FCLK.
 
 - An event carries the count at the rising edge of /WR that ends the write (T4 to T0).
 - An empty pair carries the count when its R0 was loaded (C4 to C0).
 
-The count wraps every 32 clocks. The Pi rebuilds the full count:
+The count wraps every 32 counts. The Pi rebuilds the full count:
 
 - **Empty pairs.** The Pi reads an empty pair every few reads while the queue is empty, and the count moves by less than 32 between two of them. The Pi adds the difference, modulo 32, to its running total. Across a stop in the reads, such as the gap between two SMI transfers, it uses its own timer to choose the number of wraps.
-- **Events.** An event is captured before the CPLD loads the next empty pair, so its count is at most the count of the next empty pair. The Pi gives the event the latest count at or below that empty pair's count that matches T4 to T0. This is exact while an event waits less than 32 clocks between its capture and the next empty pair. An event that waits in the queue through a stop in the reads of 32 clocks or more cannot be placed this way.
+- **Events.** An event is captured before the CPLD loads the next empty pair, so its count is at most the count of the next empty pair. The Pi gives the event the latest count at or below that empty pair's count that matches T4 to T0. This is exact while an event waits less than 32 counts between its capture and the next empty pair. An event that waits in the queue through a stop in the reads of 32 counts or more cannot be placed this way.
 
-On the +2A/+3 the edge-connector clock runs without stopping, and the count is the ULA's T-state count. On the 48K and the 128K the edge-connector clock is the Z80 clock, which the ULA holds during contention, so the count leaves out every T-state the Z80 waits. The Pi then rebuilds the ULA's count from its own time (`pi/README.md`, ULA clock).
 
 ## Frame events
 
@@ -94,7 +105,7 @@ The Spectrum interrupts the Z80 once per frame, at a fixed point of the ULA's fr
 
 The CPLD sets F = 1 on the first event it stores after an acknowledge. When the queue is full and that event is dropped, the next stored event carries F = 1 (and OVF = 1). The acknowledge happens only while the Z80 has interrupts enabled, so a program that runs with interrupts disabled gives no F events.
 
-The count of an F event without OVF is the count of the acknowledge plus a constant. The difference between the counts of the F events of two frames in a row is the number of clocks per frame, plus the change in the time the Z80 took to finish its instruction. A clock that never stops gives 69,888 clocks per frame on the 48K and 70,908 on the 128K class, give or take that instruction time. A clock that stops during contention gives fewer, and the number changes with the program.
+The count of an F event without OVF is the count of the acknowledge plus a constant. The difference between the counts of the F events of two frames in a row is the number of counts per frame, plus the change in the time the Z80 took to finish its instruction. ULA time gives 69,888 counts per frame on the 48K and 70,908 on the 128K class, give or take that instruction time. Without FCLK, a clock that stops during contention gives fewer, and the number changes with the program.
 
 ## Reset event
 

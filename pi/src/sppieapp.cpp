@@ -137,23 +137,8 @@ u64 CSpPieApp::Fetch (const u64 *pField)
 	return __atomic_load_n (pField, __ATOMIC_RELAXED);
 }
 
-static u64 DoubleBits (double nValue)
-{
-	u64 nBits;
-	memcpy (&nBits, &nValue, sizeof nBits);
-	return nBits;
-}
-
-static double BitsDouble (u64 nBits)
-{
-	double nValue;
-	memcpy (&nValue, &nBits, sizeof nValue);
-	return nValue;
-}
-
-// Core 2: the ULA clock and the frame clock, fed from core 1's queue. It
-// publishes its counters, and for core 1's restart planning where the next
-// frame starts in Pi time.
+// Core 2: the ULA clock stage and the frame clock, fed from core 1's queue.
+// It publishes their counters.
 void CSpPieApp::RunUla (void)
 {
 	const u64 nFrequency = TickFrequency ();
@@ -174,18 +159,11 @@ void CSpPieApp::RunUla (void)
 		}
 		nLastPublish = nNow;
 
-		double nStart;
-		boolean bPlan = m_UlaClock.NextFrameStartTicks (nStart);
-		Publish (&m_Shared.PlanFrameStart, DoubleBits (bPlan ? nStart : 0.0));
-		Publish (&m_Shared.PlanRate, DoubleBits (m_UlaClock.Rate ()));
-		Publish (&m_Shared.PlanFrameTStates, m_FrameClock.FrameTStates ());
-		Publish (&m_Shared.PlanValid, bPlan ? 1 : 0);
-
 		Publish (&m_Shared.Port1FFDWrite, m_FrameClock.Port1FFDWrite ());
 		Publish (&m_Shared.ResetBursts, m_FrameClock.Resets ());
 		Publish (&m_Shared.LogDropped, m_Log.Dropped ());
 		Publish (&m_Shared.Clamped, m_FrameClock.Clamped ());
-		Publish (&m_Shared.Ambiguous, m_UlaClock.Ambiguous () + m_UlaClock.PhaseSlips ());
+		Publish (&m_Shared.Ambiguous, 0);
 		Publish (&m_Shared.ClockStopped, m_UlaClock.Stopped () ? 1 : 0);
 		Publish (&m_Shared.Acquisitions, m_FrameClock.Acquisitions ());
 		Publish (&m_Shared.Alignments, m_FrameClock.Alignments ());
@@ -195,33 +173,6 @@ void CSpPieApp::RunUla (void)
 		Publish (&m_Shared.MinFrameClocks, m_UlaClock.MinFrameClocks ());
 		Publish (&m_Shared.MaxFrameClocks, m_UlaClock.MaxFrameClocks ());
 	}
-}
-
-// Reads for the next SMI transfer, starting now. In stopped mode it ends
-// in the border, where the ULA clock can hold the stall across the
-// restart (PlanTransferReads); otherwise it is the longest transfer.
-unsigned CSpPieApp::PlanReads (void)
-{
-	if (Fetch (&m_Shared.PlanValid) == 0)
-	{
-		return SmiBatchTransfers;
-	}
-	double nStart = BitsDouble (Fetch (&m_Shared.PlanFrameStart));
-	double nRate = BitsDouble (Fetch (&m_Shared.PlanRate));
-	double nL = (double) Fetch (&m_Shared.PlanFrameTStates);
-	if (nRate <= 0 || nL <= 0)
-	{
-		return SmiBatchTransfers;
-	}
-
-	double t = ((double) ReadTicks () - nStart) * nRate;
-	t -= nL * (double) (int64_t) (t / nL);
-	if (t < 0)
-	{
-		t += nL;
-	}
-	return PlanTransferReads (t, m_TStateClock.ReadTicks () * nRate, (uint32_t) nL,
-				  SmiBatchTransfers);
 }
 
 void CSpPieApp::RunIntake (void)
@@ -299,7 +250,6 @@ void CSpPieApp::RunIntake (void)
 					}
 				}
 
-				nTransferReads = PlanReads ();
 				m_pReader->Restart (nTransferReads);
 				nTransferStart = ReadTicks ();
 				bSpun = FALSE;

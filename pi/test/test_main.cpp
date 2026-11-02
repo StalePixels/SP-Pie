@@ -225,8 +225,9 @@ static void TestDecoderEmptyAndMalformed (void)
 class CRecordSink : public IEventSink
 {
 public:
-	void Empty (uint8_t nCount, uint64_t nWord) override
+	void Empty (uint8_t nCount, bool bStall, uint64_t nWord) override
 	{
+		(void) bStall;
 		Empties.push_back (nCount);
 		EmptyWords.push_back (nWord);
 	}
@@ -441,8 +442,10 @@ public:
 			}
 			else
 			{
-				EncodeEmpty (w, (uint8_t) (CountAtNs (nEnd) & CountMask));
+				EncodeEmpty (w, (uint8_t) (CountAtNs (nEnd) & CountMask),
+					     StallBetweenNs && StallBetweenNs (nLastEmptyNs, nEnd));
 				nLoaded = w[0];
+				nLastEmptyNs = nEnd;
 			}
 
 			// Transfers end on pair boundaries. The Pi times the start of
@@ -468,6 +471,11 @@ public:
 	// The CPLD's count at a moment: the ULA's T-states, or fewer where the
 	// clock stops.
 	std::function<uint64_t (double)> CountAtNs = CountAt;
+
+	// TRUE when the Z80 clock was held between two moments: the empty
+	// pair loaded at the second one carries STL.
+	std::function<bool (double, double)> StallBetweenNs = nullptr;
+	double nLastEmptyNs = 0;
 
 	double			StartJitterNs = 0;
 	uint32_t		nJitterSeed = 1;
@@ -528,9 +536,10 @@ public:
 		Events.push_back (rEvent);
 		Counts.push_back (nCount);
 	}
-	void Clock (uint64_t nCount, double nTicks) override
+	void Clock (uint64_t nCount, double nTicks, bool bStall) override
 	{
 		(void) nTicks;
+		(void) bStall;
 		Last = nCount;
 	}
 
@@ -718,7 +727,7 @@ static void TestFrameStartFromEarliestAck (void)
 				   nFrameStart + FrameEventTStates + Delay[n]);
 		Frames.TimedEvent (MakeEvent (KindMemory, 0x5800, n), nFrameStart + 20000);
 		Frames.TimedEvent (MakeEvent (KindIo, 0x00FE, n), nFrameStart + 30000);
-		Frames.Clock (nFrameStart + L + 10, 0.0);
+		Frames.Clock (nFrameStart + L + 10, 0.0, false);
 	}
 
 	CHECK (Frames.Locked ());
@@ -770,7 +779,7 @@ static void TestMachineDetection (void)
 		{
 			uint64_t s = 1000000 + (uint64_t) n * 69888;
 			Frames.TimedEvent (MakeEvent (KindMemory, 0xFFFE, 0, true), s + 10 + (n % 3));
-			Frames.Clock (s + 69888 + 10, 0.0);
+			Frames.Clock (s + 69888 + 10, 0.0, false);
 		}
 		CHECK_EQ (Frames.Machine (), Machine48K);
 		CHECK_EQ (Frames.FrameTStates (), 69888u);
@@ -787,7 +796,7 @@ static void TestMachineDetection (void)
 			{
 				Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), s + 500);
 			}
-			Frames.Clock (s + 70908 + 10, 0.0);
+			Frames.Clock (s + 70908 + 10, 0.0, false);
 			CHECK_EQ (Frames.Machine (), n < 3 ? Machine128K : MachinePlus3);
 		}
 		CHECK_EQ (Frames.FrameTStates (), 70908u);
@@ -1142,7 +1151,7 @@ static void RunContentionAligned (int nAckPhase, bool bEarlyFrameEvent, unsigned
 		{
 			Frames.TimedEvent (rWrite.second, s + rWrite.first);
 		}
-		Frames.Clock (s + L + 10, 0.0);
+		Frames.Clock (s + L + 10, 0.0, false);
 	}
 	while (Presenter.Present ())
 	{
@@ -1343,7 +1352,10 @@ public:
 		Counts.push_back (nCount);
 		m_pNext->TimedEvent (rEvent, nCount);
 	}
-	void Clock (uint64_t nCount, double nTicks) override	{ m_pNext->Clock (nCount, nTicks); }
+	void Clock (uint64_t nCount, double nTicks, bool bStall) override
+	{
+		m_pNext->Clock (nCount, nTicks, bStall);
+	}
 	void ReadsRestarted (void) override			{ m_pNext->ReadsRestarted (); }
 
 	std::vector<TEvent> Events;
@@ -1400,7 +1412,7 @@ private:
 };
 
 static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClockHz,
-					double nStartJitterNs = 0, bool bStopsInBorder = true)
+					double nStartJitterNs = 0)
 {
 	// Each frame: the interrupt push 0 to 3 T-states after the start
 	// (HALT), then attribute writes for every line of 6 character rows and
@@ -1439,6 +1451,11 @@ static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClock
 		uint64_t nPush = s + FrameEventTStates + (n * 3 + 1) % 4 * (n == 2 ? 0 : 1);
 		True.push_back ({ nPush, { 0, KindMemory, 0xBFFE, 0x12, true, 0 } });
 		True.push_back ({ nPush + 3, { 0, KindMemory, 0xBFFD, 0x34, false, 0 } });
+		if (n == 5)
+		{
+			// The Bifrost* demo writes 0x04 to exactly 0x1FFD on a 128K.
+			True.push_back ({ nPush + 300, { 0, KindIo, 0x1FFD, 0x04, false, 0 } });
+		}
 
 		uint64_t nNow = s + 1000;
 		unsigned nIndex = 0;
@@ -1467,38 +1484,29 @@ static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClock
 		}
 	}
 
+	// The CPLD counts ULA T-states: the Z80 clock's edges plus every
+	// T-state it was held, measured against the Pi's fast clock.
 	std::vector<TSimWrite> Writes;
 	for (TTrueWrite &rTrue : True)
 	{
-		rTrue.Write.Count = Z80.CountAt ((double) rTrue.u);
+		rTrue.Write.Count = rTrue.u;
 		rTrue.Write.Ns = ((double) rTrue.u - 0.5) * ClockNs;
 		Writes.push_back (rTrue.Write);
 	}
 
 	double nEndNs = ((double) (S + (uint64_t) nFrames * L) + 2000) * ClockNs;
-	// Restarts as the Pi plans them in stopped mode: each transfer ends in
-	// a border (PlanTransferReads), or every 65,534 reads.
 	std::vector<TSimStop> Stops;
-	for (double t = 0; ; )
+	for (double t = 65534 * ReadNs; t < nEndNs; t += 65534 * ReadNs + 2000)
 	{
-		uint32_t nReads = 65534;
-		if (bStopsInBorder)
-		{
-			double u = t / ClockNs - (double) S;
-			double nFrameT = u - (double) L * (double) (int64_t) (u / L);
-			nReads = PlanTransferReads (nFrameT, ReadNs / ClockNs, L, 65534);
-		}
-		t += nReads * ReadNs;
-		if (t >= nEndNs)
-		{
-			break;
-		}
 		Stops.push_back ({ t, 2000 });
-		t += 2000;
 	}
 	CCpldSim Sim;
 	Sim.StartJitterNs = nStartJitterNs;
-	Sim.CountAtNs = [&Z80] (double ns) { return Z80.CountAt (ns / ClockNs); };
+	Sim.StallBetweenNs = [&Z80] (double a, double b)
+	{
+		return Z80.CountAt (b / ClockNs) - Z80.CountAt (a / ClockNs)
+		       < (uint64_t) (b / ClockNs) - (uint64_t) (a / ClockNs);
+	};
 	Sim.Run (Writes, Stops, nEndNs);
 	CHECK_EQ (Sim.Stored.size (), Writes.size ());
 
@@ -1511,42 +1519,29 @@ static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClock
 	std::unique_ptr<CUlaQueue> pQueue (new CUlaQueue);
 	CTStateClock Clock (pQueue.get (), TickHz, 3546900);
 	TIntakeCounters Counters;
-	double nCore2Ns = 0;
-	auto t0 = std::chrono::steady_clock::now ();
 	Feed (Sim, Clock, Counters, 97, [&] (void)
 	{
 		pQueue->Publish ();
-		auto a = std::chrono::steady_clock::now ();
 		pQueue->Drain (Ula);
-		nCore2Ns += std::chrono::duration<double, std::nano> (std::chrono::steady_clock::now () - a).count ();
 	});
-	auto t1 = std::chrono::steady_clock::now ();
 	CHECK_EQ (pQueue->Dropped (), 0u);
 	pLog->Publish ();
-	if (Machine == FUSEULA_128K && ReadNs == 200.0)
-	{
-		double nNs = std::chrono::duration<double, std::nano> (t1 - t0).count () - nCore2Ns;
-		double nPairs = (double) (Sim.Words.size () / 2);
-		printf ("cost (host, stopped clock): core 1 %.1f ns per pair, core 2 %.1f ns per pair\n",
-			nNs / nPairs, nCore2Ns / nPairs);
-	}
 
-	CHECK (Ula.Stopped ());
-	CHECK (Ula.LastFrameClocks () + 500 < L);
+	CHECK (Ula.Stopped ());				// STL seen: not a +2A/+3
 	CHECK_EQ (Frames.Machine (), Expect);
-	// Only while the phase settles, in the first frames after the clock is
-	// found stopped.
-	CHECK (Ula.Ambiguous () <= 16);
-	CHECK (Frames.Acquisitions () <= 2);
-	CHECK (Ula.PhaseSlips () <= 2);
-	CHECK (Ula.RestartsInDisplay () <= 8);	// before the frame start settles
+	CHECK (Ula.MinFrameClocks () + MaxAckDelayTStates > L);
+	CHECK (Ula.MaxFrameClocks () < L + MaxAckDelayTStates);
+	// The first lock, and on the 48K one more when the frame period
+	// changes the class from the 128K start.
+	CHECK (Frames.Acquisitions () <= (Expect == Machine48K ? 2u : 1u));
+	CHECK_EQ (Clock.Ambiguous (), 0u);
 
-	// Every write from frame 10 on at its true ULA time, up to one constant.
+	// Every write from frame 1 on at its true ULA time, up to one constant.
 	CHECK_EQ (Tee.Counts.size (), True.size ());
 	if (Tee.Counts.size () == True.size ())
 	{
 		size_t nFrom = 0;
-		while (nFrom < True.size () && True[nFrom].u < S + 10 * L)
+		while (nFrom < True.size () && True[nFrom].u < S + L)
 		{
 			nFrom++;
 		}
@@ -1594,8 +1589,8 @@ static void TestStoppedClockMulticolour (void)
 	ReadNs = 200.0;
 
 	// The first read of a transfer up to 500 ns after the Pi times its
-	// start, with the restarts in the border.
-	RunStoppedClockMulticolour (FUSEULA_128K, 3546900, 500, true);
+	// start.
+	RunStoppedClockMulticolour (FUSEULA_128K, 3546900, 500);
 	ClockNs = 1e9 / 3546900.0;
 }
 
@@ -1633,7 +1628,7 @@ static void TestBouncingReset (void)
 		for (unsigned n = 0; n < 10; n++, s += L)
 		{
 			Frames.TimedEvent (MakeEvent (KindMemory, 0xFFFE, 0, true), s + 10);
-			Frames.Clock (s + L + 10, 0.0);
+			Frames.Clock (s + L + 10, 0.0, false);
 		}
 		uint32_t nAcq = Frames.Acquisitions ();
 		uint64_t c = s + 5000;
@@ -1733,7 +1728,7 @@ int main (void)
 	Run ("frame clock: frame start from +3 contention", TestContentionAlignedFrameStart);
 	Run ("presenter: whole frames, skips and repeats", TestPresenterWholeFrames);
 	Run ("end to end: multicolour through CPLD, clocks and Fuse", TestEndToEndMulticolour);
-	Run ("48K and 128K: stopped clock, multicolour at ULA time", TestStoppedClockMulticolour);
+	Run ("48K and 128K: Z80 clock held, CPLD counts ULA time, multicolour", TestStoppedClockMulticolour);
 	Run ("frame clock: a reset clears the +2A/+3 detection", TestResetClearsPlus3);
 	Run ("frame clock: a bouncing reset", TestBouncingReset);
 

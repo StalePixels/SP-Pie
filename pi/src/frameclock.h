@@ -111,7 +111,7 @@ public:
 	void EnableContentionCheck (bool bEnable);
 
 	void TimedEvent (const TEvent &rEvent, uint64_t nCount) override;
-	void Clock (uint64_t nCount, double nTicks) override;
+	void Clock (uint64_t nCount, double nTicks, bool bStall) override;
 
 	bool Locked (void) const		{ return m_bLocked; }
 	uint32_t Acquisitions (void) const	{ return m_nAcquisitions; }

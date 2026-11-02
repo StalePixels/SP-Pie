@@ -432,9 +432,10 @@ void CFrameClock::TimedEvent (const TEvent &rEvent, uint64_t nCount)
 	}
 }
 
-void CFrameClock::Clock (uint64_t nCount, double nTicks)
+void CFrameClock::Clock (uint64_t nCount, double nTicks, bool bStall)
 {
 	(void) nTicks;
+	(void) bStall;
 
 	if (!m_bHaveStart)
 	{

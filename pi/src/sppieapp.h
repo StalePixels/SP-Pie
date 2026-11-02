@@ -12,12 +12,12 @@
 //  Core 1: event intake. Polls the DMA producer position, decodes the new
 //          ring words into pairs, rebuilds the CPLD clock count of every
 //          event (CTStateClock) and hands counts, read times and events to
-//          core 2 (ulaqueue.h). It restarts SMI transfers, in stopped mode
-//          only in the border (PlanReads), and resyncs on H-bit mismatches.
+//          core 2 (ulaqueue.h). It restarts SMI transfers and resyncs on
+//          H-bit mismatches.
 //          It takes no interrupts and never waits for another core.
-//  Core 2: turns the counts into the ULA's T-state count where the clock
-//          stops during contention (CUlaClock), gives each event its frame
-//          and T-state (CFrameClock) and writes it to the event log.
+//  Core 2: learns the model from the clock (CUlaClock), gives each event
+//          its frame and T-state (CFrameClock) and writes it to the event
+//          log.
 //  Core 3: unused; it returns from Run () and halts.
 //
 // Core 1 hands to core 2 through the queue, core 2 to core 0 through the
@@ -64,17 +64,13 @@ struct TIntakeShared
 	u64	BadProducer;		// DMA destination samples outside the ring
 	u64	LogDropped;
 	u64	Clamped;
-	u64	Ambiguous;		// events whose time is not fixed exactly
+	u64	Ambiguous;		// unused (0)
 	u64	ClockStopped;		// the edge-connector clock stops during contention
 	u64	ReadPicoseconds;	// measured SMI read period
 	u64	Port1FFDWrite;		// write that selected the +2A/+3: address << 8 | data
 	u64	ResetBursts;		// resets, one per burst of reset events
 	u64	CountAmbiguous;		// core 1: events whose count the 5 bits did not fix
 	u64	QueueDropped;		// entries lost because core 2's queue was full
-	u64	PlanFrameStart;		// core 2 to core 1: next frame start in ticks (double bits)
-	u64	PlanRate;		// ULA T-states per tick (double bits)
-	u64	PlanFrameTStates;
-	u64	PlanValid;		// the three above hold in stopped mode
 	u64	Acquisitions;
 	u64	Alignments;		// frame start moves by the contention check
 	u64	Aligned;		// the contention check has set the frame start
@@ -100,7 +96,6 @@ private:
 	void RunRenderer (void);
 	void RunIntake (void);
 	void RunUla (void);
-	unsigned PlanReads (void);
 	void Publish (u64 *pField, u64 nValue);
 	u64 Fetch (const u64 *pField);
 

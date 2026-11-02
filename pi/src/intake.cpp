@@ -45,7 +45,7 @@ size_t ProcessWords (const volatile uint32_t *pWords, size_t nCount, uint64_t nF
 		{
 		case PairEmpty:
 			rCounters.EmptyPairs++;
-			rSink.Empty (Event.Count, rState.R0Word);
+			rSink.Empty (Event.Count, Event.Stall, rState.R0Word);
 			break;
 
 		case PairEvent:

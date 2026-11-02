@@ -21,7 +21,9 @@
 //
 // Pins: GPIO 6 (SOE) and GPIO 8 to 25 (SD0 to SD17) are switched to SMI.
 // SMI only ever does read transfers here, so the Pi does not drive SD0 to
-// SD17. GPIO 0 to 5 and 7 are not touched. GPIO 26 is the SYNC output and
+// SD17. GPIO 4 carries GPCLK0, the 25 MHz clock the CPLD measures held Z80
+// clock phases with (PLLD 500 MHz / 20, integer divider). GPIO 0 to 3, 5
+// and 7 are not touched. GPIO 26 is the SYNC output and
 // GPIO 27 (NOT_EMPTY) an input.
 //
 // Initialize () runs on core 0. Everything else runs on the intake core only.
@@ -35,6 +37,7 @@
 #include <circle/smimaster.h>
 #include <circle/gpiopin.h>
 #include <circle/dmachannel.h>
+#include <circle/gpioclock.h>
 #include <circle/types.h>
 
 namespace sppie {
@@ -45,6 +48,8 @@ static const unsigned RingWords		= 512 * 1024;
 static const unsigned SyncPin		= 26;
 static const unsigned NotEmptyPin	= 27;
 static const unsigned SoePin		= 6;
+static const unsigned FastClockPin	= 4;	// GPCLK0 (ALT0)
+static const unsigned FastClockDivider	= 20;	// PLLD 500 MHz / 20 = 25 MHz
 
 class CSmiEventReader
 {
@@ -97,6 +102,8 @@ private:
 	CGPIOPin	m_SOEPin;
 	CGPIOPin	m_SyncPin;
 	CGPIOPin	m_NotEmptyPin;
+	CGPIOClock	m_FastClock;
+	CGPIOPin	m_FastClockPin;
 
 	unsigned	m_nDMAChannel;
 	TDMAControlBlock *m_pControlBlock;

@@ -45,25 +45,99 @@ gets no reset event for that reset.
 
 ### Time base
 
-A free-running 5-bit counter counts the rising edges of the edge-connector
-clock (`CLK`, pin 62). Neither SYNC nor /RESET resets it. A second 5-bit
-register holds the counter's value in reflected binary Gray code
-(`g = b xor (b >> 1)`), one clock behind the counter. Exactly one bit of this
-register changes at each clock edge, and it is a register output, so it has
-no glitches. The count wraps every 32 clocks.
+The time count is a free-running 5-bit counter, `t_bin`, and a 5-bit
+register, `t_gray`, that holds its value in reflected binary Gray code
+(`g = b xor (b >> 1)`). Both load at the same clock edge, so exactly one bit
+of `t_gray` changes per step, and it is a register output, so it has no
+glitches. Neither SYNC nor /RESET resets the count. It wraps every 32 counts.
 
-- The `wclk` rising edge that stores an event also stores the Gray count as
-  the event's T4 to T0. For a write this is the /WR rising edge. For a reset
-  event it is the edge made by the filtered /RESET going high, which comes
-  just after a clock edge.
-- The SOE rising edge that loads the R0 of an empty pair samples the Gray
-  count into C4 to C0 of that R0. The R1 that follows is a constant and does
-  not sample it again.
+The counter's clock is `tclk`. It is FCLK (Pi GPIO 4, pin 72) while the FCLK
+detector sees FCLK run, and the edge-connector clock `CLK` (pin 62) when it
+does not.
 
-Both sides sample the count at edges that have no fixed relation to `CLK`.
-When a sample is taken as the count changes, Gray code makes it the old count
-or the new one, never a mix. The Pi reads an empty R0 one full read after
-it was loaded, so the sample has that read to settle.
+- **Without FCLK**, the counter advances at every rising edge of `CLK`.
+- **With FCLK** (25 MHz, 40 ns), the counter counts ULA time. Two registers
+  bring `CLK` into the FCLK domain, and a third gives its last level. A
+  change between the last two is a `CLK` edge, rising or falling. The
+  counter advances by one at each rising edge. A 3-bit counter, `f_sub`,
+  counts FCLK periods since the last edge, modulo 7. Each time a phase is
+  still running 7, 14, 21 (and so on) periods after the edge that started
+  it, the counter advances by one more. A phase of L periods so adds
+  k = (L - 1) / 7, rounded down.
+
+The ULA stops the Z80 clock for whole T-states. A T-state is 7.05 FCLK
+periods at 3.5469 MHz (128K) and 7.14 at 3.5 MHz (48K), and a normal phase
+is half of that. The thresholds sit half way between the phase lengths:
+
+| Measured phase L (FCLK periods) | Extra T-states k | Expected L at 3.5469 MHz | Expected L at 3.5 MHz |
+|---|---|---|---|
+| 0 to 7 | 0 | 3.5 | 3.6 |
+| 8 to 14 | 1 | 10.6 | 10.7 |
+| 15 to 21 | 2 | 17.6 | 17.9 |
+| 22 to 28 | 3 | 24.7 | 25.0 |
+| 29 to 35 | 4 | 31.7 | 32.1 |
+| 36 to 42 | 5 | 38.8 | 39.3 |
+| 43 to 49 | 6 | 45.8 | 46.4 |
+
+At a 50 % duty cycle, every expected length is at least 2.5 periods from
+the nearest other row, for k = 0 to 6 and both clock rates. The
+measurement of L can be off by up to one period. A duty cycle of 40/60 moves
+a normal phase by 0.7 periods, which leaves about 1.8 periods. The logic
+measures both phases, so it works whether the ULA holds the clock high or
+low. Stalls longer than six T-states keep adding counts every 7 periods, so
+they drift by 0.05 (128K) or 0.14 (48K) periods per T-state.
+
+An extra count needs 7 periods without an edge, so it never comes in the
+same FCLK period as a rising edge. The count therefore changes at most once
+per FCLK period, one Gray step at a time. A `CLK` rising edge reaches
+`t_gray` 80 to 120 ns after it (the third FCLK rising edge at the latest).
+The extra counts of a stall come during the stall, before the stalled phase
+ends. A write's own contention stall ends more than a T-state before /WR
+rises, so its counts are in the count at the /WR rising edge. /WR rises a
+short delay after a falling edge of the Z80 clock. Where the
+edge-connector clock is the inverse of the Z80 clock, its rising edge is
+that falling edge, and it reaches the count at least 80 ns later: the count
+at /WR does not include it as long as /WR rises less than 80 ns after the
+edge. Where the edge-connector clock is the Z80 clock, its last rising
+edge before /WR is half a T-state plus that delay earlier (about 180 ns),
+and the count includes it.
+
+**FCLK detector.** A register in the FCLK domain, `f_tog`, toggles at every
+FCLK edge. Two registers sample it at each `CLK` rising edge and a third
+holds the last sample. A `CLK` period is 7 or 8 FCLK periods (never 8 twice
+in a row) or more during a stall, so `f_tog` changes between two samples
+almost every time while FCLK runs. `use_f` goes to 1 at the first change and
+back to 0 after eight `CLK` rising edges without one. It changes only when
+FCLK starts or stops.
+
+**Clock switch.** `tclk` is a multiplexer of FCLK and `CLK` selected by
+`use_f`. Quartus puts it on a global clock. When `use_f` changes, `tclk` can
+have one short or missing pulse, and the counter's registers can take any
+value. Every value is a legal state: the next `tclk` edge loads `t_gray`
+from `t_bin + 1`, and `f_sub` moves on from any value. The count is
+consistent again one edge later. The Pi sees one jump in the count when it
+starts or stops FCLK. A second counter clocked by `CLK`, with a selector at
+the output, would avoid the short pulse, but it needs more logic elements
+than the device has left.
+
+**Sampling.** The `wclk` rising edge that stores an event also stores
+`t_gray` as the event's T4 to T0. For a write this is the /WR rising edge.
+For a reset event it is the edge made by the filtered /RESET going high,
+which comes just after a `CLK` edge. The SOE rising edge that loads the R0 of
+an empty pair samples `t_gray` into C4 to C0 of that R0. The R1 that follows
+is a constant and does not sample it again. Both sides sample the count at
+edges that have no fixed relation to `tclk`. When a sample is taken as the
+count changes, Gray code makes it the old count or the new one, never a mix.
+The Pi reads an empty R0 one full read after it was loaded, so the sample
+has that read to settle.
+
+**STL.** Each extra count also makes `stl_p` high for one FCLK period, and
+only while `use_f` is 1. `stl_p` sets `stl_r` asynchronously. The SOE rising
+edge that loads an empty R0 copies `stl_r` into bit 5 of that R0 (STL) and
+clears it. So STL = 1 says that the counter added at least one stall
+T-state since the previous empty R0 was loaded. When `stl_p` is high at the
+loading edge the set wins, and the stall shows on this empty pair, the next
+one, or both. SYNC does not clear `stl_r`.
 
 ### Frame flag
 
@@ -154,22 +228,24 @@ use the edge-connector clock.
     while /IORQ and /WR are both low. The flag is still set at the /WR rising
     edge.
 - The edge-connector clock is inverted relative to the CPU clock on the
-  +2A/+3, and may be stretched by contention. The capture of the address,
-  data and kind uses only /WR, /MREQ, /IORQ, the address and the data, so
-  neither matters for those fields. The time count does depend on the clock
-  (see [Time base](#time-base)).
+  +2A/+3, and is stretched by contention on the 48K and the 128K. The
+  capture of the address, data and kind uses only /WR, /MREQ, /IORQ, the
+  address and the data, so neither matters for those fields. The time count
+  does depend on the clock (see [Time base](#time-base)).
 
 ## Clock domains
 
-There are three clock domains:
+The clock domains are:
 
 - The write side is clocked by `wclk`, which is /WR while /RESET is high,
   plus one rising edge at the end of a reset.
 - The read side is clocked by the rising edge of SOE (Pi GPIO 6).
-- The time base is clocked by the rising edge of the edge-connector clock
-  `CLK`. It runs the time counter and the /RESET filter.
+- The edge-connector clock `CLK` clocks the /RESET filter and the FCLK
+  detector.
+- `tclk` (FCLK or `CLK`) clocks the time counter. One register, `f_tog`, is
+  clocked by FCLK alone.
 
-The edges of the three clocks have no fixed relation. The queue pointers
+The edges of these clocks have no fixed relation. The queue pointers
 cross between the write and read sides in Gray code, and the time count goes
 to both sides in Gray code. A value sampled while it changes is either the
 old value or the new one.
@@ -197,7 +273,7 @@ information only.
 
 SYNC (GPIO 26) is an asynchronous reset of both pointers, the pointer copies,
 the overflow flag, the read-word pointer and the output register. It does not
-touch the time counter, the frame flag or the ULAplus registers. A write that ends while SYNC is
+touch the time counter, STL, the frame flag or the ULAplus registers. A write that ends while SYNC is
 high is not queued.
 
 ## SMI read side
@@ -209,14 +285,14 @@ register changes only on the SOE rising edge, all 18 bits together.
 |---|---|---|---|
 | Event R0 | T4, T3 | H = 0 | V = 1, OVF, F, KIND, T2 (bit 9), A15, DATA |
 | Event R1 | T1, T0 | H = 1 | A14 to A0 |
-| Empty R0 | 0 | H = 0 | 0, except C4 to C0 in bits 4 to 0 |
+| Empty R0 | 0 | H = 0 | 0, except STL in bit 5 and C4 to C0 in bits 4 to 0 |
 | Empty R1 | 0 | H = 1 | 0 |
 
 After R0 is read, the register loads R1 of the same entry. After R1 is read,
 it removes the entry (if the pair was an event) and loads R0 of the next
 entry, or an empty R0 if the queue looks empty. An empty R1 is always
 0x08000. SYNC and power-up clear the output register to an empty R0 with
-C4 to C0 = 0, which no SOE edge has loaded, so the first pair after power-up
+STL = 0 and C4 to C0 = 0, which no SOE edge has loaded, so the first pair after power-up
 or SYNC does not carry the time count.
 
 SD0 to SD17 drive GPIO 8 to 25 all the time, not only during SOE. The Pi must
@@ -228,9 +304,12 @@ The pin numbers come from the upstream TK-Pie pin assignments
 (`CPLD/EPM240/CPLD_TK-Pie.qsf`). Pins 17 and 21 have no PCB track and are not
 used. Unused pins are reserved as tri-stated inputs. Every input the logic
 uses has the 3.3V Schmitt-trigger input standard. The write side is clocked by
-/WR and /RESET, the read side by SOE and the time count by CLK, so a slow or
-noisy edge on those pins must give one transition only. The Pi inputs the
-logic ignores (SA0 to SA5, SWE) keep the default standard.
+/WR and /RESET, the read side by SOE and the time count by CLK and FCLK, so a
+slow or noisy edge on those pins must give one transition only. FCLK is a
+fast clock from the Pi, but the logic samples `CLK` with it and has no
+timing relation to keep with other inputs, so the small extra delay of the
+Schmitt-trigger input does not matter. The Pi inputs the logic ignores (SA0,
+SA2 to SA5, SWE) keep the default standard.
 
 | Port | Signal | CPLD pin |
 |---|---|---|
@@ -267,8 +346,8 @@ logic ignores (SA0 to SA5, SWE) keep the default standard.
 | `BUS_ROMCS` | /ROMCS, high impedance | 6 |
 | `M1` | /M1, for the interrupt acknowledge | 18 |
 | `CLK` | Edge-connector clock, for the time count and the /RESET filter | 62 |
-| `PI_SA(0)` | GPIO 5 (SA0), ignored | 49 |
-| `PI_SA(1)` | GPIO 4 (SA1), ignored | 72 |
+| `PI_SA0` | GPIO 5 (SA0), ignored | 49 |
+| `PI_FCLK` | GPIO 4 (GPCLK0), FCLK | 72 |
 | `PI_SA(2)` | GPIO 3 (SA2), ignored | 74 |
 | `PI_SA(3)` | GPIO 2 (SA3), ignored | 75 |
 | `PI_SA(4)` | GPIO 1 (SA4), ignored | 51 |
@@ -319,14 +398,32 @@ The testbench has a Z80 bus model and a Pi reader model:
 - I/O writes can move /IORQ before or after /WR.
 - The edge-connector clock is the Z80 clock, and it can be inverted. /WR
   rises 40 ns after the falling edge of T3 of the Z80 clock, for memory
-  writes and for I/O writes. The testbench counts the rising edges of the
-  edge-connector clock itself and notes the count at each /WR rising edge
-  and at the end of each reset.
+  writes and for I/O writes.
+- The clock model can stall: about one phase in four, at one chosen level
+  of the edge-connector clock, is longer by 1 to 6 whole T-states
+  (pseudo-random, never two phases in a row). The bus model waits on the
+  clock, so bus cycles stretch with it.
+- FCLK runs at 25 MHz, with each edge moved by up to 2 ns, and has no fixed
+  relation to the Z80 clock. It can be started and stopped.
+- The testbench keeps its own counts: the rising edges of the
+  edge-connector clock, and ULA time (those edges plus each stall T-state).
+  Without FCLK the design must give the edge count. With FCLK it must give
+  ULA time, 72 to 128 ns late. A count sample is checked against the window
+  of counts that its time allows; the window has two values only when a
+  count step comes in it.
 - The Pi reader reads pairs back to back. SOE low and high times vary
-  pseudo-randomly, with no fixed relation to the bus clock. It checks the H
-  bit of every read word, checks that an empty R0 has only C4 to C0 set and
-  that an empty R1 is exactly 0x08000, rejects malformed events, and records
-  every event.
+  pseudo-randomly, with no fixed relation to the bus clock or FCLK. It
+  checks the H bit of every read word, checks that an empty R0 has only STL
+  and C4 to C0 set and that an empty R1 is exactly 0x08000, rejects
+  malformed events, and records every event.
+- A monitor checks that the design's count changes by one Gray step at a
+  time, and with FCLK at most once per FCLK period.
+
+The suite of tests below runs five times: without FCLK; with FCLK and
+stalls in the high phase; with FCLK and stalls in the low phase; with FCLK
+and no stalls; and with FCLK stopped again, with stalls. Between the runs the
+testbench starts or stops FCLK with the reader off, checks that the design
+switched its count, and lines its own count up with the design's.
 
 The tests cover:
 
@@ -350,13 +447,15 @@ The tests cover:
   - Every event's T4 to T0 is the Gray code of the testbench count at its
     /WR rising edge, or at the end of the reset for a reset event. This also
     checks the bit positions: T4, T3 in SD17, SD16 and T2 in bit 9 of R0,
-    and T1, T0 in SD17, SD16 of R1.
-  - Every empty pair's C4 to C0 is the Gray code of the testbench count at
-    the SOE rising edge that loaded its R0. Between two empty pairs in one
-    run of reads, the step of C modulo 32 equals the number of clock edges
-    modulo 32. A difference of one is accepted only when the SOE edge comes
-    at the same time as a clock edge. The first pair of each run of reads is
-    not checked, because the reader did not see the edge that loaded it.
+    and T1, T0 in SD17, SD16 of R1. With FCLK, every event's window has one
+    value. Without FCLK, a reset event's window has two, because the edge
+    that ends a reset comes just after a clock edge.
+  - Every empty pair's C4 to C0 is the Gray code of a count in the window
+    for the SOE rising edge that loaded its R0. Between two empty pairs in
+    one run of reads, the step of C modulo 32 is a step the two windows
+    allow. The first pair of each run of reads is not checked, because the
+    reader did not see the edge that loaded it.
+  - Every stall length from 1 to 6 T-states occurs, in both phases.
   - For each event written while the reader runs, the next empty pair has a
     count at or above the event's and less than 32 above it. The count the
     Pi rebuilds from T4 to T0 and that empty pair (the latest count at or
@@ -364,9 +463,17 @@ The tests cover:
     the write.
   - The count is not reset by SYNC or by /RESET: empty pairs after two SYNCs
     and after two resets a few clocks apart still carry the testbench count.
+- STL, on every empty pair whose previous empty pair the reader also saw:
+  without FCLK it is 0. With FCLK it is 1 when the design's stall pulse for
+  a testbench stall T-state must lie between the two loads, and it is 0
+  when no stall pulse can.
 
-Each time check was shown to fail on a copy of the design with that feature
-broken.
+Each time check and each STL check was shown to fail on a copy of the
+design with that feature broken: wrong threshold spacing, thresholds one
+period early, stall T-states not added, a binary count register, two count
+steps at once, one phase not measured (each phase in turn), no fallback to
+`CLK`, a detector that does not see FCLK stop, STL stuck at 1 or 0, STL not
+gated without FCLK, STL cleared at every R0 load, and STL never cleared.
 
 Simulation checks function only. It does not check timing or metastability.
 
@@ -410,12 +517,12 @@ From the Quartus 13.0sp1 fitter report. A MAX II logic element (LE) has one 4-in
 | Design | Logic elements | Pins |
 |---|---|---|
 | Upstream TK-Pie CPLD | 37 | 63 |
-| This design, DEPTH 4 | 206 | 61 |
-| This design, DEPTH 2 | 147 | 61 |
+| This design, DEPTH 4 | 225 | 61 |
+| This design, DEPTH 2 | 169 | 61 |
 
 DEPTH 4 is the default.
 
-The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures (DEPTH 4) are 49.1 MHz for the write clock, 76.7 MHz for the SOE clock and 209.2 MHz for the edge-connector clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
+The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures (DEPTH 4) are 39.4 MHz for the write clock, 57.7 MHz for the SOE clock, and 112.5 MHz for FCLK and for the edge-connector clock (86.5 MHz restricted by a hold check on the edge-connector clock), where the time counter's paths through `tclk` are counted under both. FCLK needs 25 MHz. Quartus puts `CLK`, SOE, `wclk` and `tclk` on the four global clocks, and reports `tclk` as a clock multiplexer. The fitter reports no latches and no combinational loops.
 
 ## Not verified
 
@@ -431,15 +538,23 @@ The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses 
 - The SOE low and high times the read side needs. They depend on the Quartus
   timing report.
 - The Z80A (NMOS) data hold time after /WR rises.
-- Whether the edge-connector clock keeps running while the ULA holds the Z80
-  clock during contention, on each Spectrum model. If it stops, the count
-  is not the ULA's T-state count.
-- Whether the /WR rising edge can come at the same time as a rising edge of
-  the edge-connector clock. On the +2A/+3 the edge-connector clock is
-  inverted, so its rising edge is the Z80 clock's falling edge, the edge
-  that /WR rises after. When the two edges meet, Gray code gives the count
-  before or after that clock edge, so the event's count can be one clock
-  off. The same holds for a reset event, whose edge comes just after a
-  clock edge on every model.
+- The stall measurement on hardware: the phase lengths on a 48K and a 128K,
+  their duty cycle, and the level at which each ULA holds the
+  edge-connector clock. The logic measures both phases. With a duty cycle
+  far from 50 %, the margin of the thresholds shrinks below two FCLK
+  periods.
+- The FCLK detector against a real GPIO 4: that a GPIO 4 left as an input
+  stays at a steady level, and that no other use of GPIO 4 makes it toggle.
+  A toggling GPIO 4 would be taken as FCLK.
+- The clock switch on hardware: that the one short pulse on `tclk` when FCLK
+  starts or stops only disturbs the count, as the logic expects.
+- How Quartus implements the asynchronous set of `stl_r` (by `stl_p`) on
+  MAX II, as for the /IORQ flag and the frame flag.
+- The Z80 /WR delay after the falling clock edge. Where the edge-connector
+  clock is the inverse of the Z80 clock, a delay of 80 ns or more would let
+  the count at /WR include the edge before it on some writes and not on
+  others. Without FCLK, that edge and /WR always come close together, so the
+  event's count can be one count off. The same holds for a reset event,
+  whose edge comes just after a clock edge, without FCLK.
 - Metastability of the count samples. The simulation does not model it.
 - Behaviour on hardware. The design is programmed and verified in a board, but not yet run with the Pi software on a Spectrum.

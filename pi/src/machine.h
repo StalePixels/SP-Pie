@@ -74,53 +74,6 @@ static inline bool IsPort1FFD (uint16_t nPort)
 	return nPort == 0x1FFD;
 }
 
-// The border: T-states of a frame where the ULA contends nothing. Fuse
-// contends 192 display lines from T-state 14,336 on the 48K, 14,361 on
-// the 128K and 14,365 on the +2A/+3, at 224 or 228 T-states a line, so the
-// last contention ends before T-state 58,040. In stopped mode the intake
-// core restarts SMI transfers only from BorderFromTState of a frame to
-// LastRestartTState of the next, which leaves RestartHoldTStates with no
-// contention after each restart; the ULA clock holds the stall there.
-static const uint32_t BorderFromTState	= 58100;
-static const uint32_t LastRestartTState	= 13300;
-static const uint32_t RestartHoldTStates = 1000;
-
-// The planner aims this far inside the border, for the error of its view
-// of the frame.
-static const uint32_t PlanMarginTStates	= 300;
-
-static inline bool InBorder (int64_t nTState, uint32_t nFrameTStates)
-{
-	return nTState >= 0 && nTState < (int64_t) nFrameTStates
-	       && (nTState >= BorderFromTState || nTState <= LastRestartTState);
-}
-
-// Reads for an SMI transfer that starts at T-state nStartTState of a frame
-// of nFrameTStates and should end in a border: nMaxReads when that ends in
-// a border, PlanMarginTStates inside it, else as many as end that far
-// before LastRestartTState of the frame it would end in. The display (about 13.08 ms on the 128K class) is shorter than
-// the longest transfer (65,534 reads, 13.11 ms), so from the end of one
-// border a transfer reaches the start of the next. Always even.
-static inline uint32_t PlanTransferReads (double nStartTState, double nTStatesPerRead,
-					  uint32_t nFrameTStates, uint32_t nMaxReads)
-{
-	double nL = (double) nFrameTStates;
-	double nEnd = nStartTState + nMaxReads * nTStatesPerRead;
-	double nEndInFrame = nEnd - nL * (double) (int64_t) (nEnd / nL);
-	uint32_t nReads = nMaxReads;
-	if (   nEndInFrame < (double) (BorderFromTState + PlanMarginTStates)
-	    && nEndInFrame > (double) (LastRestartTState - PlanMarginTStates))
-	{
-		double nBack = nEndInFrame - (double) (LastRestartTState - PlanMarginTStates);
-		double nWant = (nEnd - nBack - nStartTState) / nTStatesPerRead;
-		if (nWant >= 2.0)
-		{
-			nReads = (uint32_t) nWant;
-		}
-	}
-	return nReads & ~1u;
-}
-
 // A reset bounces: a press and a release of a reset button each give a
 // burst of /RESET edges, and the CPLD sends a reset event for each one.
 // Reset events closer together than this are one reset. Between a press

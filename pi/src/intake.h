@@ -26,7 +26,7 @@ namespace sppie {
 class IEventSink
 {
 public:
-	virtual void Empty (uint8_t nCount, uint64_t nWord) = 0;
+	virtual void Empty (uint8_t nCount, bool bStall, uint64_t nWord) = 0;
 	virtual void Event (const TEvent &rEvent, uint64_t nWord) = 0;
 
 protected:
