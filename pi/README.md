@@ -119,7 +119,7 @@ The frame lengths come from libspectrum's timing tables at start-up. The class c
 
 A reset button bounces at both the press and the release, and the CPLD sends a reset event for each edge. Reset events less than 70,000 T-states (about 20 ms) apart are one reset. From a reset event until 70,000 T-states after the last one, F events do not touch the frame start or the class, and port writes do not select the +2A/+3. Fuse takes every reset event, which leaves the state of one reset at the end of the burst. The Z80 is held between the press and the release, so it writes nothing there. `RST` counts these resets: a press and a release far apart count as two. The model applies per Spectrum frame, so the frame that holds that first write is already a +3 frame. A 128K program that writes to 0x1FFD selects the +3 by mistake; `auto128` prevents that.
 
-The `machine` option in `cmdline.txt` on the SD card changes the choice:
+`machine=` in the `[sp-pie]` section of `config.txt` changes the choice (see [Settings in config.txt](#settings-in-configtxt)). Without it, the `machine` option in `cmdline.txt` does, as before:
 
 | Value | Model |
 |---|---|
@@ -203,17 +203,43 @@ A Z80 writing as fast as it can (PUSH) makes about 640,000 writes a second, abou
 
 ### Presentation
 
-The frame buffer is 480 x 270 pixels at 32 bits per pixel, 16:9, which the firmware scales by exactly 4 to the HDMI mode. `config.txt` sets 1920 x 1080 at the 128K-class Spectrum frame rate, 50.0211 Hz (the CEA 1080p50 timings with the pixel clock raised to 148.56 MHz, through `hdmi_timings`), so a 128K or +3 frame is skipped only when its crystal differs from the nominal rate; a 48K runs at 50.0801 Hz and still has a skip about every 17 s, with HDMI on even when no display is detected at start-up, and `force_turbo=1` keeps the ARM cores at their full 1000 MHz. The Spectrum picture is 352 x 270 pixels in the middle and fills the height: the 256 x 192 screen with 48 pixels of border left and right and 39 lines above and below. The World of Spectrum 48K reference gives the visible border as 48 pixels at each side, 48 lines above the screen and 56 below. The display shows all of the side border and the 39 lines nearest the screen above and below. The areas left and right of the picture are black. With the border extension on (control-port feature 2, see [../docs/control-ports.md](../docs/control-ports.md)), each line of those areas takes the colour of the line's leftmost or rightmost picture pixel, and the border fills the screen (`src/borderextension.h`). The HUD, when on, is drawn over them.
+The display is 480 x 270 pixels at 32 bits per pixel, 16:9. The frame buffer has two lines for each display line, 480 x 540, which the firmware scales by exactly 4 across and 2 down to the HDMI mode, so each display line is 4 HDMI lines. Both frame buffer lines of a display line are the same, except in the line weave of interlace mixing (see [Interlace mixing](#interlace-mixing)). `config.txt` sets 1920 x 1080 at the 128K-class Spectrum frame rate, 50.0211 Hz (the CEA 1080p50 timings with the pixel clock raised to 148.56 MHz, through `hdmi_timings`), so a 128K or +3 frame is skipped only when its crystal differs from the nominal rate; a 48K runs at 50.0801 Hz and still has a skip about every 17 s, with HDMI on even when no display is detected at start-up, and `force_turbo=1` keeps the ARM cores at their full 1000 MHz. The Spectrum picture is 352 x 270 pixels in the middle and fills the height: the 256 x 192 screen with 48 pixels of border left and right and 39 lines above and below. The World of Spectrum 48K reference gives the visible border as 48 pixels at each side, 48 lines above the screen and 56 below. The display shows all of the side border and the 39 lines nearest the screen above and below. The areas left and right of the picture are black. With the border extension on (control-port feature 2, see [../docs/control-ports.md](../docs/control-ports.md)), each line of those areas takes the colour of the line's leftmost or rightmost picture pixel, and the border fills the screen (`src/borderextension.h`). The HUD, when on, is drawn over them.
 
 `src/presenter.cpp` runs once per HDMI frame on core 0:
 
-1. It runs the oldest complete Spectrum frame through Fuse: it selects the frame's model, applies each event at its T-state, and ends the frame. Fuse draws into a picture in RAM.
-2. Core 0 fills the side areas (border extension, black or HUD) and copies the whole display into the hidden half of a 480 x 540 frame buffer.
-3. It moves the display to that half (`SetVirtualOffset`) and waits for vertical sync (`WaitForVerticalSync`).
+1. It runs the oldest complete Spectrum frame through Fuse: it selects the frame's model, applies each event at its T-state, and ends the frame. Fuse draws into a picture of the presenter's own, and the presenter keeps a copy of the frame before.
+2. The presenter writes the picture to show into the display in RAM: the newest frame, or the two last frames mixed. It does this on every HDMI frame, also when no new Spectrum frame is complete, so whatever was drawn over the picture (the splash screen) goes.
+3. Core 0 draws the splash screen instead when it shows, fills the side areas (border extension, black or HUD), and copies the whole display into the hidden half of a frame buffer twice the height of the display, 480 x 1080, two lines for each display line.
+4. It moves the display to that half (`SetVirtualOffset`) and waits for vertical sync (`WaitForVerticalSync`).
 
 The Spectrum makes frames a little faster than HDMI shows them: 50.08 Hz on a 48K and 50.02 Hz on the 128K class, against 50.00 Hz. When three or more complete frames are waiting, the presenter runs the oldest through Fuse without showing them until one will be left after the one shown. That skips one whole frame about every 12.5 s on a 48K and every 47 s on the 128K class. Every frame goes through Fuse, so FLASH and the picture stay right across skips. When no frame is complete, the last one is shown again. The screen only ever shows whole Spectrum frames.
 
 The time from a Spectrum frame's end to its display is one to two HDMI frames.
+
+### Splash screen
+
+`src/splash.h` and `src/splash.cpp` draw a start-up screen in place of the Spectrum picture, so the display never stays blank. It shows from start-up until an HDMI frame shows a new Spectrum frame while the frame start is locked (`LOCK` on the HUD), and again after 50 HDMI frames in a row, about 1 s, with no new Spectrum frame: the Spectrum switched off or held in reset, or the board unplugged. Short gaps, such as a repeated frame, do not bring it back. Every Spectrum frame still goes through Fuse while it shows, and so does the sound. When it goes, the presenter's next picture covers it.
+
+It is drawn in the Spectrum's colours, on bright white paper: a black title bar with the name and the four-colour stripe of the Spectrum's packaging (bright red, yellow, green and cyan), the same stripe along the foot, and these lines:
+
+- the firmware version, `git describe --tags --always --dirty` of `public/` when the kernel was built (`src/version.h`, made by the Makefile),
+- the HDMI mode: its size, which the firmware gives at start-up before the frame buffer is set up (property tag `GET_DISPLAY_DIMENSIONS`, as Circle reads it to choose a frame buffer size), and its frame rate, measured from when the firmware's vertical sync returns, over the last 50 HDMI frames,
+- `CPLD link`: found while empty pairs from the CPLD keep coming,
+- `Spectrum clock`: found while Spectrum frames complete, which needs the CPLD's count to advance,
+- `Machine`: the model of the last frame once the frame start is locked,
+- `Frame lock`: locked once an F event has set the frame start,
+- how `config.txt` was read: `[sp-pie] read`, `no [sp-pie] section`, `not read`, or in red the first line of the section that was ignored,
+- the prompt `Switch on or reset your Spectrum.`
+
+Found items are green and waiting items red. The text uses Circle's 8 x 8 font (`lib/font8x8.cpp`, the Linux `lat1-8` console font, GPL-2.0-or-later), not the Sinclair ROM font. The border extension and the HUD work as usual while the splash shows: the extension then takes the splash's white edges.
+
+### Interlace mixing
+
+`src/interlace.h` and the presenter implement control-port feature 3 ([../docs/control-ports.md](../docs/control-ports.md), Display). After each complete Spectrum frame, shown or skipped, the presenter hashes Fuse's picture (64 bits). A frame alternates when its hash equals the hash of the frame two before and differs from the one just before. Mixing starts after 8 alternating frames in a row and stops after 4 that do not alternate. Because the presenter keeps the frame before every frame it runs, skipped frames included, the mix of a program that alternates stays the same across a skip.
+
+- Average: each channel `(a >> 1) + (b >> 1) + (a & b & 1)`, which rounds down.
+- CRT-style: each channel `(5 x newest + 3 x previous) >> 3`.
+- Line weave: the presenter writes the newest frame, and core 0's copy puts the frame before into the picture area of the second frame buffer line of each display line. The side areas, the HUD and the border extension are the same on both lines. While the splash screen shows there is no weave.
 
 ## Building
 
@@ -255,7 +281,18 @@ Copy these files to the FAT partition of the SD card:
 
 Circle's `boot/README` explains where the firmware files come from. In the rpi3 world it is at `../circle-libsdl2/circle-stdlib-rpi3/libs/circle/boot/README`.
 
-To choose the Spectrum model, add a `cmdline.txt` with one line such as `machine=plus3` (see [Machine model](#machine-model)). Without it the kernel chooses from the frame length.
+## Settings in config.txt
+
+The `[sp-pie]` section at the end of `config.txt` holds SP-Pie's start-up settings. The kernel reads it once at start-up, before the other cores start, through Circle's SD card driver and FatFs (`src/bootconfig.cpp`, `CKernel::ReadBootConfig`). The firmware treats a section name in square brackets as a condition and does not use the keys in this one. A firmware setting after the section needs an `[all]` line first.
+
+| Key | Value |
+|---|---|
+| `feature1`, `feature2`, `feature3`, `feature255` | The default of that control-port feature ([../docs/control-ports.md](../docs/control-ports.md)): its value at start-up and after every Spectrum reset. Decimal, or hex with `0x`. `feature0` takes 0 only. |
+| `machine` | `auto`, `auto128`, `48`, `128` or `plus3` (see [Machine model](#machine-model)) |
+
+Section and key names are not case-sensitive. Blank lines and lines that start with `#` are skipped. A value with reserved bits set, a reserved mode, a reserved feature, an unknown key or an unknown model is ignored, and the splash screen shows the first line ignored. A key given twice takes its last value. A missing section, or a card the kernel cannot read, leaves the built-in defaults.
+
+The `config.txt` in this directory has the section with the built-in defaults. `machine` in `cmdline.txt`, with one line such as `machine=plus3`, still works when `config.txt` gives no `machine`.
 
 The board has no serial console. When start-up fails, the ACT LED blinks a code in a loop: 1 for Circle start-up, 2 for the frame buffer, 3 for the SMI reader or its DMA channel, 4 for starting the second core, 5 for Fuse.
 
@@ -317,7 +354,7 @@ The Pi budget is the idle time per frame (`IDI` for core 1, `IDR` for core 0) un
 
 ## Host tests
 
-The decoder, the intake, the clock count, the frame clock, the event log, the presenter, Fuse with our layer, the sound, the control ports, the border extension and the resampler build and run on the build machine with its own compilers. The Fuse files are generated and compiled into `test/build`. The tests also build one more copy of Fuse's sound generator (`test/fusesound_ref.c`) and drive it directly, as Fuse's own AY port code does, as a reference.
+The decoder, the intake, the clock count, the frame clock, the event log, the presenter, Fuse with our layer, the sound, the control ports, the border extension, the splash screen and the resampler build and run on the build machine with its own compilers. The splash tests compile Circle's 8 x 8 font from the Circle source in `../circle-libsdl2`; no Circle build is needed. The Fuse files are generated and compiled into `test/build`. The tests also build one more copy of Fuse's sound generator (`test/fusesound_ref.c`) and drive it directly, as Fuse's own AY port code does, as a reference.
 
 ```sh
 gmake test
@@ -346,6 +383,9 @@ The tests cover:
 - each Covox port only with its bit, its 8-bit decode, its levels around 0x80, the DACs adding up and clipping, and a 48K write landing at its time in the 48K's frame,
 - the beeper: Fuse's EAR and MIC levels on the TV speaker, the 48K's high-pass speaker model, a square wave at its frequency on the 128K and the 48K with no sample lost across a change of model, silence with the beeper off, and its level back when it is on again,
 - control-port writes and a reset through the presenter: a device turned off in the middle of a frame, the HUD and the border extension, the defaults after a reset, and the samples reaching the audio ring,
+- interlace mixing through the presenter: screen flips every frame and one screen rewritten every frame start mixing after 8 alternating frames and show the average of red and green paper; mixing stops 4 frames after the alternation ends; a moving block, a double-buffered animation that flips screens every frame, and an alternation broken every 8 frames never mix; a skipped frame changes the shown picture without mixing and not with it; the CRT-style and line weave pixels, mixing always on, and the reserved mode ignored,
+- `config.txt`: no section, every key in any case and form, a section ended by another, every model, invalid lines ignored with the first one kept and cut to fit, the last of a repeated key, and the defaults applied at start-up and restored by a reset through the presenter,
+- the splash screen: showing from start-up, not hiding for frames without a lock, hiding with the first locked frame, staying away through gaps shorter than 50 HDMI frames, back at the 50th, and away again when locked frames return; the frame rate from vertical-sync times; the rendered pixels of every line of text, the title bar, both stripes and the colours of found and waiting items, for several sets of findings; and the picture whole again on the next HDMI frame after it, also with no new Spectrum frame,
 - the resampler: a straight line through the interpolation, and five minutes of Spectrum frames written once per HDMI frame with the Spectrum's clock 300 ppm fast, 300 ppm slow and exact: no underrun, no drop, the fill within two frames of the target, the ratio averaging to the clock difference and a 440 Hz tone at 440 Hz times the clock ratio; and the ring filling up with a clock difference beyond the limit,
 - end to end on a 48K and a 128K whose Z80 the ULA holds per Fuse's contention table, with the CPLD counting ULA time and setting STL, unseen contended reads, restart gaps with up to 500 ns of start delay, and the Bifrost* demo's write of 0x04 to 0x1FFD: every write at its exact ULA T-state, the multicolour lines right, a steady frame start, frames of 70,908 (69,888) T-states, and the 128K not taken for a +2A/+3; the same with SMI reads 200 ppm slower than assumed. All of it goes through core 2's queue.
 
@@ -358,6 +398,8 @@ On the +3 with Bifrost*, the overlay shows core 0 at about 1.7 to 2.0 ms per fra
 Core 2 takes the frame clock off core 1. On the host core 1's code costs about 6 ns per pair.
 
 On the build machine the sound costs core 0 about 50 µs per quiet frame and about 80 µs per frame with both AY chips playing and thousands of AY, beeper and Covox writes. The resampler takes about 4 µs for one frame of output on core 3. Core 3 has no other work and waits on the HDMI FIFO.
+
+The `RN` figure above is from before the presenter kept its own picture and before the frame buffer had two lines for each display line. Core 0 now also copies Fuse's picture once per Spectrum frame (the frame before, 380 KB), hashes it, writes the picture to show (380 KB) on every HDMI frame, and copies twice as many lines to the frame buffer (1 MB instead of 0.5 MB of device memory per HDMI frame). On the build machine a Spectrum frame with no writes, through Fuse, the sound and this picture path, takes about 90 µs unmixed, 95 µs averaged and 125 µs CRT-style, and the line weave's second lines take about 40 µs per frame. The splash screen and the reading of `config.txt` cost nothing once the Spectrum runs: the splash is not drawn, and the file is read once at start-up.
 
 ## What is not verified
 
@@ -377,6 +419,10 @@ No hardware was attached during development. Everything below is untested:
 - Whether the /WR rising edge can meet a counting edge of the edge-connector clock on the +2A/+3, which can make a count one clock off (see `../cpld/README.md`).
 - That Fuse's write points (memory at the end of the cycle, I/O one T-state after its start) match the relation of /WR to the ULA on the real machines; Fuse is calibrated against the real machines with its own Z80 timing, which is not run here.
 - Whether the firmware scales the 480 x 270 frame buffer to 1080p with sharp pixels or with smoothing.
+- That the firmware stretches the 480 x 540 frame buffer to 1920 x 1080, x4 across and x2 down, rather than keeping its shape. If it kept the shape, the whole display would be squeezed.
+- That the firmware ignores the keys in `[sp-pie]`. The Raspberry Pi documentation describes `[all]` and the filters it knows; it does not say what an unknown name does. The keys are not firmware settings in any case.
+- That Circle's SD card driver reads `config.txt` on the Zero 2 W at start-up with the other devices as they are set up here.
+- That `GET_DISPLAY_DIMENSIONS` before the frame buffer is set up gives the size of the HDMI mode from `config.txt` (`hdmi_timings`) on the Zero 2 W. The splash shows what it returns.
 - The real restart gaps, backlog and CPU times. They exist only once the kernel runs on the board.
 - HDMI sound: that Circle's HDMI sound device starts in polling mode on the Zero 2 W with `hdmi_drive=2`, that core 3 keeps the HDMI audio FIFO filled, and the sound itself.
 - The cost of the sound on core 0 and of the resampler on core 3 on the Pi. Only the host times above are measured.

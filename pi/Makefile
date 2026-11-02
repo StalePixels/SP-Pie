@@ -39,11 +39,19 @@ FUSEULA_OBJS = $(addprefix $(FUSEULA_OBJDIR)/,$(notdir $(FUSEULA_SOURCES:.c=.o))
 
 OBJS	= src/main.o src/kernel.o src/sppieapp.o src/smieventreader.o \
 	  src/intake.o src/tstateclock.o src/ulaclock.o src/frameclock.o src/presenter.o \
-	  src/audiostream.o src/overlay.o $(FUSEULA_OBJS)
+	  src/audiostream.o src/splash.o src/bootconfig.o src/overlay.o $(FUSEULA_OBJS)
 
 DEFINE	+= -DSPPIE_OVERLAY=$(OVERLAY)
 
-EXTRACLEAN = src/*.o src/*.d $(FUSEULA_OBJDIR)/*.o $(FUSEULA_OBJDIR)/*.d $(FUSEULA_GEN)/*
+# The firmware version on the splash screen: git describe of public/ at
+# build time. src/version.h changes only when the version does, so only
+# the files that include it are built again.
+SPPIE_VERSION := $(shell git -C .. describe --tags --always --dirty 2>/dev/null || echo unknown)
+$(shell echo '#define SPPIE_VERSION "$(SPPIE_VERSION)"' > src/version.h.new; \
+	cmp -s src/version.h.new src/version.h || cp src/version.h.new src/version.h; \
+	rm -f src/version.h.new)
+
+EXTRACLEAN = src/version.h src/*.o src/*.d $(FUSEULA_OBJDIR)/*.o $(FUSEULA_OBJDIR)/*.d $(FUSEULA_GEN)/*
 
 include $(CIRCLEHOME)/Rules.mk
 

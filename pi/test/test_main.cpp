@@ -22,7 +22,10 @@
 #include "../src/intake.h"
 #include "../src/machine.h"
 #include "../src/picture.h"
+#include "../src/bootconfig.h"
+#include "../src/interlace.h"
 #include "../src/presenter.h"
+#include "../src/splash.h"
 #include "../src/tstateclock.h"
 #include "../src/ulaclock.h"
 #include "../src/ulaqueue.h"
@@ -31,6 +34,9 @@
 #include "fusesound_ref.h"
 
 #include <algorithm>
+#include <circle/font.h>
+#include <iterator>
+#include <string>
 #include <chrono>
 #include <deque>
 #include <functional>
@@ -2626,6 +2632,649 @@ static void TestResampler (void)
 	}
 }
 
+
+// --- splash screen --------------------------------------------------------
+
+// Boot, frames without a lock, the lock, short gaps, the Spectrum
+// stopping for StopFrames HDMI frames, and coming back.
+static void TestSplashState (void)
+{
+	CSplashState Splash;
+	CHECK (Splash.Showing ());
+	CHECK (!Splash.FramesArriving ());
+
+	// Frames that complete before the first F event do not hide it.
+	for (unsigned i = 0; i < 10; i++)
+	{
+		Splash.Update (true, false);
+		CHECK (Splash.Showing ());
+		CHECK (Splash.FramesArriving ());
+	}
+	// A lock with no new frame does not either.
+	Splash.Update (false, true);
+	CHECK (Splash.Showing ());
+	Splash.Update (true, true);
+	CHECK (!Splash.Showing ());
+
+	// Repeated HDMI frames, up to StopFrames - 1 in a row, keep it away.
+	for (unsigned nGap = 1; nGap < CSplashState::StopFrames; nGap += 12)
+	{
+		for (unsigned i = 0; i < nGap; i++)
+		{
+			Splash.Update (false, true);
+		}
+		CHECK (!Splash.Showing ());
+		Splash.Update (true, true);
+	}
+
+	// The Spectrum stops: back after StopFrames HDMI frames, not before.
+	for (unsigned i = 0; i + 1 < CSplashState::StopFrames; i++)
+	{
+		Splash.Update (false, true);
+	}
+	CHECK (!Splash.Showing ());
+	CHECK (Splash.FramesArriving ());
+	Splash.Update (false, true);
+	CHECK (Splash.Showing ());
+	CHECK (!Splash.FramesArriving ());
+	for (unsigned i = 0; i < 500; i++)
+	{
+		Splash.Update (false, i < 250);
+	}
+	CHECK (Splash.Showing ());
+
+	// It comes back: without a lock the splash stays, with one it goes.
+	Splash.Update (true, false);
+	CHECK (Splash.Showing ());
+	CHECK (Splash.FramesArriving ());
+	Splash.Update (true, true);
+	CHECK (!Splash.Showing ());
+
+	Splash.Reset ();
+	CHECK (Splash.Showing ());
+}
+
+static void TestRefreshMeter (void)
+{
+	CRefreshMeter Meter;
+	const double fRate = 3546900.0 / 70908;		// 50.0211 Hz
+	for (unsigned n = 0; n <= CRefreshMeter::Frames; n++)
+	{
+		CHECK_EQ (Meter.CentiHz (TickHz), 0u);
+		Meter.VerticalSync (1000 + (uint64_t) (n * TickHz / fRate));
+	}
+	CHECK_EQ (Meter.CentiHz (TickHz), 5002u);
+	for (unsigned n = 0; n <= CRefreshMeter::Frames; n++)
+	{
+		Meter.VerticalSync (1000000000ull + (uint64_t) (n * TickHz / 50.0));
+	}
+	CHECK_EQ (Meter.CentiHz (TickHz), 5000u);
+	for (unsigned n = 0; n <= CRefreshMeter::Frames; n++)
+	{
+		Meter.VerticalSync (2000000000ull + (uint64_t) (n * TickHz / 49.996));
+	}
+	CHECK_EQ (Meter.CentiHz (TickHz), 5000u);	// 4,999.6 rounded
+}
+
+static TSplashFont TestSplashFont (void)
+{
+	TSplashFont Font = { (const uint8_t *) Font8x8.data, Font8x8.first_char, Font8x8.last_char };
+	return Font;
+}
+
+// The pixels of text drawn at (x, y): each font pixel is nColour where its
+// bit is set and nBackground where not. Returns the number that differ.
+static unsigned TextDiffers (const uint32_t *pPicture, unsigned nPitch, const char *pText,
+			     unsigned x, unsigned y, uint32_t nColour, uint32_t nBackground,
+			     unsigned nScale = 1)
+{
+	TSplashFont Font = TestSplashFont ();
+	unsigned nDiffer = 0;
+	for (; *pText != '\0'; pText++, x += 8 * nScale)
+	{
+		unsigned c = (unsigned char) *pText;
+		for (unsigned r = 0; r < 8 * nScale; r++)
+		{
+			for (unsigned b = 0; b < 8 * nScale; b++)
+			{
+				bool bSet = c >= Font.nFirst && c <= Font.nLast
+					    && (Font.pData[(c - Font.nFirst) * 8 + r / nScale]
+						& (0x80 >> (b / nScale)));
+				nDiffer += pPicture[(y + r) * nPitch + x + b]
+					   != (bSet ? nColour : nBackground);
+			}
+		}
+	}
+	return nDiffer;
+}
+
+// Writes the display to a binary PPM file, for a look at the splash.
+static void WritePpm (const char *pPath, const uint32_t *pDisplay, unsigned nWidth,
+		      unsigned nHeight)
+{
+	FILE *pFile = fopen (pPath, "wb");
+	if (pFile == nullptr)
+	{
+		return;
+	}
+	fprintf (pFile, "P6\n%u %u\n255\n", nWidth, nHeight);
+	for (unsigned i = 0; i < nWidth * nHeight; i++)
+	{
+		uint8_t Rgb[3] = { (uint8_t) (pDisplay[i] >> 16), (uint8_t) (pDisplay[i] >> 8),
+				   (uint8_t) pDisplay[i] };
+		fwrite (Rgb, 1, 3, pFile);
+	}
+	fclose (pFile);
+}
+
+// The splash, pixel by pixel: the title bar and its stripe, the title
+// text, the version, the HDMI mode, each finding in green when found and
+// red while waiting, the prompt in the middle of its line, the stripe at
+// the foot, and nothing but those colours. SPPIE_SPLASH_PPM=path writes the
+// start-up splash in the whole 480 x 270 display to a PPM file.
+static void TestSplashPixels (void)
+{
+	TSplashFont Font = TestSplashFont ();
+	CHECK_EQ (Font8x8.width, 8u);
+	CHECK_EQ (Font8x8.height, 8u);
+
+	std::vector<uint32_t> Display (DisplayWidth * DisplayHeight, 0xFF000000u);
+	uint32_t *pPicture = Display.data () + PictureTop * DisplayWidth + PictureLeft;
+	const unsigned P = DisplayWidth;
+
+	TSplashFacts Waiting = { SPPIE_VERSION, 1920, 1080, 5002, true, false, false, Machine128K,
+				 "config.txt: [sp-pie] read", false };
+	TSplashFacts Found = { "v9.8-7-gabcdef0", 1920, 1080, 5002, true, true, true, Machine48K,
+			       "config.txt ignored: feature2=0x80", true };
+	TSplashFacts Unknown = { nullptr, 0, 0, 0, false, false, false, Machine48K, nullptr, false };
+
+	DrawSplash (Waiting, Font, pPicture, P);
+	if (getenv ("SPPIE_SPLASH_PPM") != nullptr)
+	{
+		WritePpm (getenv ("SPPIE_SPLASH_PPM"), Display.data (), DisplayWidth, DisplayHeight);
+	}
+
+	// Only the picture area is drawn, only in the splash's colours.
+	unsigned nOutside = 0, nForeign = 0;
+	const uint32_t Palette[] = { SplashPaper, SplashInk, SplashBar, SplashTitle, SplashFound,
+				     SplashWaiting, SplashPrompt, SplashStripes[0], SplashStripes[1],
+				     SplashStripes[2], SplashStripes[3] };
+	for (unsigned y = 0; y < DisplayHeight; y++)
+	{
+		for (unsigned x = 0; x < DisplayWidth; x++)
+		{
+			uint32_t c = Display[y * P + x];
+			if (x < PictureLeft || x >= PictureLeft + PictureWidth)
+			{
+				nOutside += c != 0xFF000000u;
+			}
+			else
+			{
+				nForeign += std::find (std::begin (Palette), std::end (Palette), c)
+					    == std::end (Palette);
+			}
+		}
+	}
+	CHECK_EQ (nOutside, 0u);
+	CHECK_EQ (nForeign, 0u);
+	CHECK_EQ (pPicture[0], SplashPaper);
+	CHECK_EQ (pPicture[269 * P + 351], SplashPaper);
+
+	// The title bar, the name at twice the size, and the stripe: at the
+	// bottom line of the bar the bands start at SplashStripeX, and each
+	// line up leans one pixel further right.
+	CHECK_EQ (pPicture[(SplashBarY + 1) * P + SplashBarX + 1], SplashBar);
+	CHECK_EQ (pPicture[(SplashBarY + SplashBarHeight - 1) * P + SplashBarX + SplashBarWidth - 1],
+		  SplashBar);
+	CHECK_EQ (TextDiffers (pPicture, P, "SP-Pie", SplashBarX + 12, SplashBarY + 8,
+			       SplashTitle, SplashBar, 2), 0u);
+	// Bright red, yellow, green and cyan, in that order.
+	const uint32_t Stripe[4] = { 0xFFFF0000u, 0xFFFFFF00u, 0xFF00FF00u, 0xFF00FFFFu };
+	for (unsigned s = 0; s < 4; s++)
+	{
+		CHECK_EQ (SplashStripes[s], Stripe[s]);
+		unsigned x = SplashStripeX + s * SplashStripeBand + SplashStripeBand / 2;
+		CHECK_EQ (pPicture[(SplashBarY + SplashBarHeight - 1) * P + x], SplashStripes[s]);
+		CHECK_EQ (pPicture[SplashBarY * P + x + SplashBarHeight - 1], SplashStripes[s]);
+		CHECK_EQ (pPicture[(SplashFootY + s * SplashFootBand + 1) * P + SplashBarX + 5],
+			  SplashStripes[s]);
+	}
+	CHECK_EQ (pPicture[(SplashBarY + SplashBarHeight - 1) * P + SplashStripeX - 1], SplashBar);
+
+	// The lines of text.
+	std::string Version = std::string ("Firmware ") + SPPIE_VERSION;
+	CHECK_EQ (TextDiffers (pPicture, P, Version.c_str (), SplashTextX, SplashVersionY,
+			       SplashInk, SplashPaper), 0u);
+	CHECK_EQ (TextDiffers (pPicture, P, "HDMI 1920 x 1080, 50.02 Hz", SplashTextX, SplashHdmiY,
+			       SplashInk, SplashPaper), 0u);
+	const char *const Labels[] = { "CPLD link", "Spectrum clock", "Machine", "Frame lock" };
+	const char *const WaitingValues[] = { "found", "waiting", "waiting", "waiting" };
+	const bool WaitingFound[] = { true, false, false, false };
+	for (unsigned i = 0; i < 4; i++)
+	{
+		unsigned y = SplashRowsY + i * SplashRowPitch;
+		CHECK_EQ (TextDiffers (pPicture, P, Labels[i], SplashTextX, y, SplashInk, SplashPaper), 0u);
+		CHECK_EQ (TextDiffers (pPicture, P, WaitingValues[i], SplashValueX, y,
+				       WaitingFound[i] ? SplashFound : SplashWaiting, SplashPaper), 0u);
+	}
+	CHECK_EQ (TextDiffers (pPicture, P, "config.txt: [sp-pie] read", SplashTextX, SplashNoteY,
+			       SplashInk, SplashPaper), 0u);
+	const char Prompt[] = "Switch on or reset your Spectrum.";
+	CHECK_EQ (TextDiffers (pPicture, P, Prompt, (PictureWidth - 8 * (sizeof Prompt - 1)) / 2,
+			       SplashPromptY, SplashPrompt, SplashPaper), 0u);
+
+	// Everything found.
+	DrawSplash (Found, Font, pPicture, P);
+	CHECK_EQ (TextDiffers (pPicture, P, "Firmware v9.8-7-gabcdef0", SplashTextX, SplashVersionY,
+			       SplashInk, SplashPaper), 0u);
+	CHECK_EQ (TextDiffers (pPicture, P, "config.txt ignored: feature2=0x80", SplashTextX,
+			       SplashNoteY, SplashWaiting, SplashPaper), 0u);
+	const char *const FoundValues[] = { "found", "found", "48K", "locked" };
+	for (unsigned i = 0; i < 4; i++)
+	{
+		CHECK_EQ (TextDiffers (pPicture, P, FoundValues[i], SplashValueX,
+				       SplashRowsY + i * SplashRowPitch, SplashFound, SplashPaper), 0u);
+	}
+
+	// Nothing known: no version, no HDMI mode, no rate.
+	DrawSplash (Unknown, Font, pPicture, P);
+	CHECK_EQ (TextDiffers (pPicture, P, "Firmware unknown", SplashTextX, SplashVersionY,
+			       SplashInk, SplashPaper), 0u);
+	CHECK_EQ (TextDiffers (pPicture, P, "HDMI size unknown", SplashTextX, SplashHdmiY,
+			       SplashInk, SplashPaper), 0u);
+	CHECK_EQ (TextDiffers (pPicture, P, "CPLD link", SplashTextX, SplashRowsY, SplashInk,
+			       SplashPaper), 0u);
+	CHECK_EQ (TextDiffers (pPicture, P, "waiting", SplashValueX, SplashRowsY, SplashWaiting,
+			       SplashPaper), 0u);
+	CHECK_EQ (TextDiffers (pPicture, P, "                                        ", SplashTextX,
+			       SplashNoteY, SplashInk, SplashPaper), 0u);	// no note line
+
+	// A rate under 10 in its hundredths keeps its 0.
+	TSplashFacts Rate = Found;
+	Rate.nRefreshCentiHz = 5005;
+	Rate.nHdmiWidth = 1280;
+	Rate.nHdmiHeight = 720;
+	DrawSplash (Rate, Font, pPicture, P);
+	CHECK_EQ (TextDiffers (pPicture, P, "HDMI 1280 x 720, 50.05 Hz", SplashTextX, SplashHdmiY,
+			       SplashInk, SplashPaper), 0u);
+}
+
+// After the splash, the presenter writes the whole picture again, also
+// on an HDMI frame with no new Spectrum frame.
+static void TestSplashThenPicture (void)
+{
+	std::vector<uint32_t> Output (PictureWidth * PictureHeight, 0);
+	std::unique_ptr<CEventLog> pLog (new CEventLog);
+	CFramePresenter Presenter (pLog.get ());
+	CHECK (Presenter.Initialize (Output.data (), PictureWidth));
+	for (unsigned i = 0; i < 0x1800; i += 7)
+	{
+		TTimedEvent Event = { 0, 100, (uint16_t) (0x4000 + i), KindMemory, 0xA5 };
+		pLog->Push (Event);
+	}
+	pLog->Complete (1, Machine128K, true);
+	CHECK (Presenter.Present ());
+	std::vector<uint32_t> Reference (Output);
+
+	TSplashFacts Facts = { "test", 0, 0, 0, false, false, false, Machine48K, nullptr, false };
+	DrawSplash (Facts, TestSplashFont (), Output.data (), PictureWidth);
+	CHECK (Output != Reference);
+	CHECK (!Presenter.Present ());
+	CHECK (Output == Reference);
+}
+
+
+// --- interlace mixing -----------------------------------------------------
+
+// Frames through the presenter: Writes (n) gives frame n's events.
+struct CInterlaceRig
+{
+	std::vector<uint32_t>		Output;
+	std::unique_ptr<CEventLog>	pLog;
+	CFramePresenter			Presenter;
+	uint32_t			nFrames;
+
+	CInterlaceRig (void)
+	:	Output (PictureWidth * PictureHeight, 0),
+		pLog (new CEventLog),
+		Presenter (pLog.get ()),
+		nFrames (0)
+	{
+		CHECK (Presenter.Initialize (Output.data (), PictureWidth));
+	}
+
+	void Push (uint32_t nTState, uint8_t nKind, uint16_t nAddress, uint8_t nData)
+	{
+		TTimedEvent Event = { nFrames, nTState, nAddress, nKind, nData };
+		CHECK (pLog->Push (Event));
+	}
+
+	void Feature (uint8_t nFeature, uint8_t nValue)
+	{
+		Push (10, KindIo, 0x043B, nFeature);
+		Push (10, KindIo, 0x053B, nValue);
+	}
+
+	// Ends the frame being built; Show runs it through the presenter.
+	void End (bool bShow = true)
+	{
+		nFrames++;
+		pLog->Complete (nFrames, Machine128K, true);
+		if (bShow)
+		{
+			CHECK (Presenter.Present ());
+		}
+	}
+
+	// The middle of the screen, inside character cell (16, 12).
+	uint32_t Screen (void) const	{ return Output[(39 + 12 * 8 + 3) * PictureWidth + 48 + 16 * 8 + 3]; }
+
+	void Attributes (uint16_t nBase, uint8_t nAttr, unsigned nCells = 0x300)
+	{
+		for (unsigned i = 0; i < nCells; i++)
+		{
+			Push (0, KindMemory, (uint16_t) (nBase + i), nAttr);
+		}
+	}
+};
+
+static const uint8_t PaperRed = 0x10, PaperGreen = 0x20;
+
+// The two screens of a 128K: bank 5 with red paper, bank 7 with green.
+static void TwoScreens (CInterlaceRig &rRig)
+{
+	rRig.Push (0, KindIo, 0x7FFD, 0x07);		// bank 7 at 0xC000
+	rRig.Attributes (0x5800, PaperRed);
+	rRig.Attributes (0xD800, PaperGreen);
+	for (unsigned i = 0; i < 0x1800; i++)
+	{
+		rRig.Push (0, KindMemory, (uint16_t) (0x4000 + i), 0);
+		rRig.Push (0, KindMemory, (uint16_t) (0xC000 + i), 0);
+	}
+}
+
+// Flipping between the two screens every frame starts mixing after
+// OnFrames alternating frames, and the average shows. Stopping stops it
+// after OffFrames frames.
+static void TestInterlacePageFlip (void)
+{
+	CInterlaceRig Rig;
+	TwoScreens (Rig);
+	Rig.End ();
+	unsigned nOnAt = 0;
+	for (unsigned n = 1; n < 20; n++)
+	{
+		Rig.Push (0, KindIo, 0x7FFD, (n & 1) ? 0x0F : 0x07);
+		Rig.End ();
+		if (nOnAt == 0 && Rig.Presenter.Mixing () >= 0)
+		{
+			nOnAt = n;
+		}
+	}
+	// Frame 2 is the first to equal the frame two back and differ from
+	// the one before; mixing starts with the OnFrames-th such frame.
+	CHECK_EQ (nOnAt, 9u);		// the 8th alternating frame
+	CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeAverage);
+	CHECK_EQ (Rig.Screen (), MixPixels (Red, Green));
+	CHECK_EQ (Rig.Screen (), 0xFF505000u);
+
+	// Stop flipping: the mix stays for 3 frames, and goes with the 4th.
+	for (unsigned n = 1; n < 4; n++)
+	{
+		Rig.End ();
+		CHECK (Rig.Presenter.Mixing () >= 0);
+	}
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Mixing (), -1);
+	CHECK (Rig.Screen () == Red || Rig.Screen () == Green);
+}
+
+// Rewriting one screen with two pictures in turn mixes the same way.
+static void TestInterlaceSameBank (void)
+{
+	CInterlaceRig Rig;
+	for (unsigned n = 0; n < 16; n++)
+	{
+		Rig.Attributes (0x5800, (n & 1) ? PaperGreen : PaperRed);
+		Rig.End ();
+	}
+	CHECK (Rig.Presenter.Mixing () >= 0);
+	CHECK_EQ (Rig.Screen (), MixPixels (Red, Green));
+}
+
+// Normal animation never mixes: a block that moves every frame, and a
+// double-buffered animation that flips screens every frame with a new
+// picture each time. Two pictures that alternate but break the pattern
+// once in every OnFrames frames do not mix either.
+static void TestInterlaceNotAnimation (void)
+{
+	{
+		CInterlaceRig Rig;
+		Rig.Attributes (0x5800, 0x38);
+		for (unsigned n = 0; n < 60; n++)
+		{
+			Rig.Push (0, KindMemory, (uint16_t) (0x5800 + n), PaperRed);
+			Rig.End ();
+			CHECK_EQ (Rig.Presenter.Mixing (), -1);
+		}
+	}
+	{
+		CInterlaceRig Rig;
+		TwoScreens (Rig);
+		Rig.End ();
+		for (unsigned n = 1; n < 60; n++)
+		{
+			// Draw into the screen not shown, then show it.
+			uint16_t nHidden = (n & 1) ? 0xD800 : 0x5800;
+			Rig.Push (0, KindIo, 0x7FFD, (n & 1) ? 0x07 : 0x0F);
+			Rig.Push (0, KindMemory, (uint16_t) (nHidden + n), 0x08);
+			Rig.Push (0, KindIo, 0x7FFD, (n & 1) ? 0x0F : 0x07);
+			Rig.End ();
+			CHECK_EQ (Rig.Presenter.Mixing (), -1);
+		}
+	}
+	{
+		CInterlaceRig Rig;
+		for (unsigned n = 0; n < 60; n++)
+		{
+			bool bBreak = n % 8 == 0;
+			Rig.Attributes (0x5800, bBreak ? 0x08 : (n & 1) ? PaperGreen : PaperRed);
+			Rig.End ();
+			CHECK_EQ (Rig.Presenter.Mixing (), -1);
+		}
+	}
+}
+
+// With two pictures in turn, a frame the presenter skips shows one of
+// them twice in a row without mixing; with mixing the shown picture stays
+// the same.
+static void TestInterlaceSkip (void)
+{
+	for (int nMix = 0; nMix < 2; nMix++)
+	{
+		CInterlaceRig Rig;
+		if (!nMix)
+		{
+			Rig.Feature (3, 0x00);		// no mixing
+		}
+		std::vector<uint32_t> Shown;
+		for (unsigned n = 0; n < 30; n++)
+		{
+			Rig.Attributes (0x5800, (n & 1) ? PaperGreen : PaperRed);
+			bool bSkipNext = n == 20;
+			Rig.End (!bSkipNext && n != 21 && n != 22);
+			if (n == 22)
+			{
+				CHECK (Rig.Presenter.Present ());	// skips 20, shows 21
+				CHECK_EQ (Rig.Presenter.Skipped (), 1u);
+			}
+			if (n >= 12 && !(n >= 20 && n < 22))
+			{
+				Shown.push_back (Rig.Screen ());
+			}
+		}
+		bool bSteady = std::all_of (Shown.begin (), Shown.end (),
+					    [] (uint32_t c) { return c == MixPixels (Red, Green); });
+		CHECK_EQ (bSteady, nMix == 1);
+		if (!nMix)
+		{
+			// Alternating, and the skip shows the same picture twice.
+			unsigned nRepeats = 0;
+			for (size_t i = 1; i < Shown.size (); i++)
+			{
+				nRepeats += Shown[i] == Shown[i - 1];
+			}
+			CHECK_EQ (nRepeats, 1u);
+		}
+	}
+}
+
+// The modes: the CRT-style mix (the newest 5/8), the line weave (the
+// newest as written, the frame before for the second frame buffer line),
+// mixing always on, and the reserved mode leaving the feature alone.
+static void TestInterlaceModes (void)
+{
+	CInterlaceRig Rig;
+	Rig.Feature (3, 0x06);				// always, CRT-style
+	Rig.Attributes (0x5800, PaperRed);
+	Rig.End ();
+	Rig.Attributes (0x5800, PaperGreen);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeCrt);
+	CHECK_EQ (Rig.Screen (), MixPixelsCrt (Green, Red));
+	CHECK_EQ (Rig.Screen (), 0xFF3C6400u);		// 3/8 and 5/8 of 0xA0
+	CHECK (Rig.Presenter.WeavePicture () == nullptr);
+
+	Rig.Feature (3, 0x0A);				// always, line weave
+	Rig.Attributes (0x5800, PaperRed);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeWeave);
+	CHECK_EQ (Rig.Screen (), Red);
+	const uint32_t *pWeave = Rig.Presenter.WeavePicture ();
+	CHECK (pWeave != nullptr);
+	if (pWeave != nullptr)
+	{
+		unsigned nOffset = (39 + 12 * 8 + 3) * PictureWidth + 48 + 16 * 8 + 3;
+		CHECK_EQ (pWeave[nOffset], Green);
+
+		// The two frame buffer lines of one display line.
+		std::vector<uint32_t> Display (DisplayWidth, 0xFF123456u);
+		unsigned y = 39 + 12 * 8 + 3;
+		for (unsigned x = 0; x < PictureWidth; x++)
+		{
+			Display[PictureLeft + x] = Rig.Output[y * PictureWidth + x];
+		}
+		std::vector<uint32_t> First (DisplayWidth), Second (DisplayWidth);
+		WeaveLine (Display.data (), pWeave + y * PictureWidth, PictureLeft, PictureWidth,
+			   DisplayWidth, 0, First.data ());
+		WeaveLine (Display.data (), pWeave + y * PictureWidth, PictureLeft, PictureWidth,
+			   DisplayWidth, 1, Second.data ());
+		CHECK (First == Display);
+		CHECK_EQ (Second[0], 0xFF123456u);		// the side areas as drawn
+		CHECK_EQ (Second[DisplayWidth - 1], 0xFF123456u);
+		CHECK_EQ (Second[PictureLeft + 48 + 16 * 8 + 3], Green);
+		CHECK_EQ (First[PictureLeft + 48 + 16 * 8 + 3], Red);
+	}
+
+	// The reserved mode leaves the weave on; 0 turns mixing off.
+	Rig.Feature (3, 0x0E);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x0Au);
+	Rig.Feature (3, 0x00);
+	Rig.Attributes (0x5800, PaperGreen);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Mixing (), -1);
+	CHECK_EQ (Rig.Screen (), Green);
+	CHECK (Rig.Presenter.WeavePicture () == nullptr);
+}
+
+// --- config.txt -----------------------------------------------------------
+
+static TBootConfig ParseConfig (const char *pText)
+{
+	TBootConfig Config;
+	ParseBootConfig (pText, strlen (pText), Config);
+	return Config;
+}
+
+static void TestBootConfig (void)
+{
+	// No section: the built-in defaults.
+	TBootConfig Config = ParseConfig ("arm_64bit=1\nfeature1=0x01\nmachine=48\n");
+	CHECK (!Config.bSection);
+	CHECK_EQ (Config.Defaults.Devices, 0x07u);
+	CHECK (!Config.bHaveMachine);
+	CHECK_EQ (Config.nIgnored, 0u);
+
+	// Every key, in any case, decimal and hex, comments and blank lines,
+	// CR LF line ends, and the section ended by another.
+	Config = ParseConfig ("hdmi_drive=2\r\n# comment\r\n[SP-Pie]\r\n\r\n# feature1=0\r\n"
+			      "Feature1 = 0x3f\r\nfeature2=1\r\nFEATURE3=0X09\r\nfeature255=0\r\n"
+			      "feature0=0\r\nmachine = Plus3\r\n[all]\r\nfeature1=0x01\r\n");
+	CHECK (Config.bSection);
+	CHECK_EQ (Config.Defaults.Devices, 0x3Fu);
+	CHECK_EQ (Config.Defaults.Border, 0x01u);
+	CHECK_EQ (Config.Defaults.Display, 0x09u);
+	CHECK_EQ (Config.Defaults.Debug, 0x00u);
+	CHECK (Config.bHaveMachine);
+	CHECK_EQ (Config.Machine, ChoosePlus3);
+	CHECK_EQ (Config.nIgnored, 0u);
+
+	const char *const Machines[] = { "auto", "auto128", "48", "128", "plus3" };
+	const TMachineChoice Choices[] = { ChooseAuto, ChooseAuto128, Choose48K, Choose128K, ChoosePlus3 };
+	for (unsigned i = 0; i < 5; i++)
+	{
+		std::string Text = std::string ("[sp-pie]\nmachine=") + Machines[i] + "\n";
+		Config = ParseConfig (Text.c_str ());
+		CHECK (Config.bHaveMachine);
+		CHECK_EQ (Config.Machine, Choices[i]);
+	}
+
+	// Invalid lines are ignored, and the first is kept; the valid ones
+	// still apply. A key given twice takes the last value.
+	Config = ParseConfig ("[sp-pie]\nfeature1=0x40\nfeature2=2\nfeature3=0x0c\nfeature3=0x10\n"
+			      "feature4=0\nfeature0=1\nfeature255=0x81\nfeature1=0x100\nfeature1=zz\n"
+			      "feature1=\nfeature=1\nfeaturex=1\nmachine=16\nvolume=3\njunk\n"
+			      "feature2=0x01\nfeature1=0x05\nfeature1=0x0f\nfeature3=0x05\n");
+	CHECK_EQ (Config.nIgnored, 15u);
+	CHECK (strcmp (Config.Ignored, "feature1=0x40") == 0);
+	CHECK_EQ (Config.Defaults.Devices, 0x0Fu);
+	CHECK_EQ (Config.Defaults.Border, 0x01u);
+	CHECK_EQ (Config.Defaults.Display, 0x05u);
+	CHECK_EQ (Config.Defaults.Debug, 0x01u);
+	CHECK (!Config.bHaveMachine);
+
+	// A long ignored line is cut to fit.
+	Config = ParseConfig ("[sp-pie]\nfeature1=0x0123456789012345678901234567890123456789\n");
+	CHECK_EQ (Config.nIgnored, 1u);
+	CHECK_EQ (strlen (Config.Ignored), sizeof Config.Ignored - 1);
+
+	// The defaults apply at start-up and at every reset, through the
+	// presenter.
+	Config = ParseConfig ("[sp-pie]\nfeature1=0x0d\nfeature2=1\nfeature3=0x00\nfeature255=0\n");
+	CInterlaceRig Rig;
+	Rig.Presenter.SetDefaults (Config.Defaults);
+	CHECK (Rig.Presenter.Initialize (Rig.Output.data (), PictureWidth));
+	CHECK_EQ (fusesound_current_devices (), 0x0Du);
+	CHECK (Rig.Presenter.BorderExtended ());
+	CHECK (!Rig.Presenter.Hud ());
+	Rig.Feature (1, 0x07);
+	Rig.Feature (2, 0x00);
+	Rig.Feature (0xFF, 0x01);
+	Rig.End ();
+	CHECK_EQ (fusesound_current_devices (), 0x07u);
+	CHECK (Rig.Presenter.Hud ());
+	Rig.Push (100, KindReset, 0, 0);
+	Rig.End ();
+	CHECK_EQ (fusesound_current_devices (), 0x0Du);
+	CHECK (Rig.Presenter.BorderExtended ());
+	CHECK (!Rig.Presenter.Hud ());
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x00u);
+	Rig.Presenter.SetDefaults (CControlPorts::BuiltInDefaults ());
+	CHECK (Rig.Presenter.Initialize (Rig.Output.data (), PictureWidth));
+	CHECK_EQ (fusesound_current_devices (), (unsigned) FUSESOUND_DEFAULT);
+}
+
 // --- cost -----------------------------------------------------------------
 
 static void ReportCost (void)
@@ -2717,6 +3366,45 @@ static void ReportCost (void)
 	}
 	auto t8 = std::chrono::steady_clock::now ();
 
+	// Core 0's picture path: one frame with its snapshot, hash and
+	// output, not mixed, averaged and CRT-style; and the frame buffer
+	// lines of the weave.
+	double PictureUs[3];
+	const uint8_t Displays[3] = { 0x00, 0x02, 0x06 };
+	for (unsigned m = 0; m < 3; m++)
+	{
+		CInterlaceRig Rig;
+		Rig.Feature (3, Displays[m]);
+		Rig.End ();
+		auto ta = std::chrono::steady_clock::now ();
+		for (unsigned f = 0; f < nFramesRun; f++)
+		{
+			Rig.End ();
+		}
+		auto tb = std::chrono::steady_clock::now ();
+		PictureUs[m] = std::chrono::duration<double, std::micro> (tb - ta).count () / nFramesRun;
+	}
+	std::vector<uint32_t> DisplayRows (DisplayWidth * DisplayHeight, 0xFF000000u);
+	std::vector<uint32_t> WeaveFrom (PictureWidth * PictureHeight, 0xFF00A000u);
+	std::vector<uint32_t> LineOut (DisplayWidth);
+	uint64_t nWeaveSink = 0;
+	auto tc = std::chrono::steady_clock::now ();
+	for (unsigned f = 0; f < nFramesRun; f++)
+	{
+		for (unsigned y = 0; y < DisplayHeight; y++)
+		{
+			WeaveLine (DisplayRows.data () + y * DisplayWidth, WeaveFrom.data () + y * PictureWidth,
+				   PictureLeft, PictureWidth, DisplayWidth, 1, LineOut.data ());
+			nWeaveSink += LineOut[y];
+		}
+	}
+	auto td = std::chrono::steady_clock::now ();
+	printf ("cost (host): picture path on core 0 %.0f us per frame unmixed, %.0f averaged, "
+		"%.0f CRT-style; weave lines %.0f us per frame (%llu)\n",
+		PictureUs[0], PictureUs[1], PictureUs[2],
+		std::chrono::duration<double, std::micro> (td - tc).count () / nFramesRun,
+		(unsigned long long) (nWeaveSink & 1));
+
 	printf ("cost (host): sound on core 0 %.0f us per quiet frame, %.0f us per busy frame; "
 		"resampler on core 3 %.1f us per frame of output (%lld)\n",
 		std::chrono::duration<double, std::micro> (t5 - t4).count () / nFramesRun,
@@ -2759,6 +3447,16 @@ int main (void)
 	Run ("sound: Covox per port and enable bits", TestCovox);
 	Run ("sound: beeper EAR and MIC levels, tone, enable", TestBeeper);
 	Run ("sound: control ports and reset through the presenter", TestSoundThroughPresenter);
+	Run ("splash: when it shows", TestSplashState);
+	Run ("splash: HDMI frame rate from the vertical sync", TestRefreshMeter);
+	Run ("splash: the rendered pixels", TestSplashPixels);
+	Run ("splash: the picture whole again after it", TestSplashThenPicture);
+	Run ("interlace: screen flips every frame, on and off", TestInterlacePageFlip);
+	Run ("interlace: one screen rewritten every frame", TestInterlaceSameBank);
+	Run ("interlace: normal animation never mixes", TestInterlaceNotAnimation);
+	Run ("interlace: a skipped frame does not change the mix", TestInterlaceSkip);
+	Run ("interlace: CRT-style, line weave, always, reserved mode", TestInterlaceModes);
+	Run ("config.txt: the [sp-pie] section and the defaults", TestBootConfig);
 	Run ("audio: resampler interpolation", TestResamplerLine);
 	Run ("audio: resampler against clock differences", TestResampler);
 

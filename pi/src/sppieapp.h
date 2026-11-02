@@ -9,7 +9,9 @@
 //          double-height frame buffer, moves the display to that half, and
 //          waits for HDMI vertical sync. With each Spectrum frame it
 //          makes the frame's sound (fusesound.h) and writes the samples
-//          to the audio ring. Core 0 also takes Circle's peripheral
+//          to the audio ring. Until the Spectrum's frames arrive, and
+//          whenever they stop, it shows the splash screen (splash.h) in
+//          place of the picture. Core 0 also takes Circle's peripheral
 //          interrupts (the system timer).
 //  Core 1: event intake. Polls the DMA producer position, decodes the new
 //          ring words into pairs, rebuilds the CPLD clock count of every
@@ -93,10 +95,18 @@ class CSpPieApp : public CMultiCoreSupport
 {
 public:
 	// pSound is the started HDMI sound device in polling mode, or 0 for
-	// none.
+	// none. nHdmiWidth and nHdmiHeight are the HDMI mode's size as the
+	// firmware gave it before the frame buffer was set up, 0 when not
+	// known; the splash screen shows them. Defaults are the control-port
+	// feature defaults (from config.txt); pConfigNote says how config.txt
+	// was read, for the splash screen, and bConfigIgnored that some of it
+	// was ignored.
 	CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffer,
 		   CSmiEventReader *pReader, CHDMISoundBaseDevice *pSound,
-		   unsigned nArmClockMHz, TMachineChoice Choice);
+		   unsigned nArmClockMHz, TMachineChoice Choice,
+		   unsigned nHdmiWidth, unsigned nHdmiHeight,
+		   const CControlPorts::TDefaults &rDefaults, const char *pConfigNote,
+		   boolean bConfigIgnored);
 
 	// Allocates the picture and starts Fuse. Core 0, before Initialize ().
 	boolean InitializeRenderer (void);
@@ -116,6 +126,10 @@ private:
 	CSmiEventReader	*m_pReader;
 	CHDMISoundBaseDevice *m_pSound;
 	unsigned	m_nArmClockMHz;
+	unsigned	m_nHdmiWidth;
+	unsigned	m_nHdmiHeight;
+	const char	*m_pConfigNote;
+	boolean		m_bConfigIgnored;
 
 	CEventLog	m_Log;
 	CFrameClock	m_FrameClock;	// core 2

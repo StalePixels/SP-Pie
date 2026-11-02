@@ -26,13 +26,24 @@ This selects the debug feature and turns the HUD off.
 | 0 | SP-Pie | Reserved. | 0x00 |
 | 1 | Attached devices | Bit 0: AY. Bit 1: TurboSound, a second AY. Bit 2: beeper. Bit 3: Covox on port 0xFB. Bit 4: Covox on port 0xDD. Bit 5: Covox on port 0xDF. Bits 6 and 7 are reserved. | 0x07: AY, TurboSound and beeper on, every Covox off |
 | 2 | Border | Bit 0: border extension. Bits 1 to 7 are reserved for later border functions. | 0x00: off |
+| 3 | Display | Bit 0: interlace detection. Bit 1: interlace mixing always on. Bits 3 and 2: mixing mode, 00 average, 01 CRT-style, 10 line weave; 11 is reserved. Bits 4 to 7 are reserved. | 0x01: detection on, average |
 | 0xFF | Debug | Bit 0: HUD. Bits 1 to 7 are reserved for later debug flags and parameters. | 0x01: HUD on |
 
 Every other feature number is reserved. SP-Pie ignores data writes to a reserved feature and ignores reserved bits. Write 0 to reserved bits: a later version can give them a meaning.
 
+These are the built-in defaults. The `[sp-pie]` section of `config.txt` on the SD card can set others (see [../pi/README.md](../pi/README.md), Settings in config.txt), with one key for each feature:
+
+```
+[sp-pie]
+feature1=0x07
+feature2=0x00
+feature3=0x01
+feature255=0x01
+```
+
 ## Reset
 
-When the Spectrum is reset, every feature returns to its default and feature 0 is selected. The reset also clears both AY chips: every register becomes 0, register 0 is selected in each chip, and chip 0 is selected.
+When the Spectrum is reset, every feature returns to its default, the one from `config.txt` when it gives one, and feature 0 is selected. The reset also clears both AY chips: every register becomes 0, register 0 is selected in each chip, and chip 0 is selected.
 
 ## Attached devices
 
@@ -67,6 +78,23 @@ An 8-bit unsigned DAC on each enabled port: 0x80 is the centre, 0x00 the lowest 
 Bit 0 of feature 2 is the border extension. The Spectrum picture is 352 x 270 pixels in the middle of a 480 x 270 display, so there is an area left and right of it. With the extension on, each line of the left area has the colour of that line's leftmost picture pixel, and each line of the right area the colour of its rightmost one. The border then fills the 16:9 screen.
 
 The border feature applies from the Spectrum frame that holds the data write.
+
+## Display
+
+Feature 3 sets interlace mixing. Some programs show two pictures in turn, one in each frame, so that the eye mixes them on a CRT: more colours or finer detail than one frame holds. On HDMI the same program flickers, and a frame that SP-Pie skips or repeats shows one of the two pictures twice. Mixing shows the last two complete Spectrum frames together instead.
+
+With bit 0 set, SP-Pie mixes when it finds the alternation. A frame alternates when its picture is the same as the picture two frames before and differs from the one just before; the program can flip between the normal and the shadow screen (port 0x7FFD bit 3) or rewrite one screen. Mixing starts after 8 alternating frames in a row and stops after 4 frames in a row that do not alternate. A screen flip on its own is not taken as alternation: a game that draws into one screen while it shows the other flips every frame too, with a new picture each time, and must not be mixed. With bit 1 set, SP-Pie mixes all the time, whatever bit 0 says.
+
+Bits 3 and 2 give the mix:
+
+| Bits 3, 2 | Mode | What the display shows |
+|---|---|---|
+| 00 | Average | Each pixel half of the newest frame and half of the frame before. |
+| 01 | CRT-style | 5/8 of the newest frame and 3/8 of the frame before. On a CRT the eye sees the picture that the beam has just drawn brighter than the one before it, which has faded. This weight leans towards the newest frame while both stay clearly visible. It is a chosen weight, not a measurement. |
+| 10 | Line weave | Each Spectrum line is 4 HDMI lines: the newest frame on the upper 2 and the frame before on the lower 2. No colour is mixed. |
+| 11 | Reserved | A data write with this mode is ignored. |
+
+The display feature applies from the Spectrum frame that holds the data write. The splash screen is never mixed.
 
 ## Debug
 

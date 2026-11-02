@@ -29,3 +29,15 @@ hdmi_timings=1920 1 528 44 148 1080 1 4 5 36 0 0 0 50 0 148562661 3
 
 # HDMI mode, not DVI, so the link carries the Spectrum's sound.
 hdmi_drive=2
+
+# SP-Pie's own settings (README.md, Settings in config.txt). The firmware
+# does not use them. The value of each control-port feature at start-up
+# and after every Spectrum reset (docs/control-ports.md), and the model:
+# auto, auto128, 48, 128 or plus3. Keep this section last; settings for
+# the firmware after it need an [all] line first.
+[sp-pie]
+feature1=0x07
+feature2=0x00
+feature3=0x01
+feature255=0x01
+machine=auto

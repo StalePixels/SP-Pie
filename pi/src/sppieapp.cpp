@@ -5,13 +5,17 @@
 //
 #include "sppieapp.h"
 #include "borderextension.h"
+#include "interlace.h"
 #include "intake.h"
 #include "picture.h"
+#include "splash.h"
 #include "timebase.h"
+#include "version.h"
 #include "../fuseula/fuseula.h"
 #if SPPIE_OVERLAY
 #include "overlay.h"
 #endif
+#include <circle/font.h>
 #include <circle/util.h>
 
 namespace sppie {
@@ -53,12 +57,19 @@ static const uint32_t *FuseFrameTStates (void)
 
 CSpPieApp::CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffer,
 		      CSmiEventReader *pReader, CHDMISoundBaseDevice *pSound,
-		      unsigned nArmClockMHz, TMachineChoice Choice)
+		      unsigned nArmClockMHz, TMachineChoice Choice,
+		      unsigned nHdmiWidth, unsigned nHdmiHeight,
+		      const CControlPorts::TDefaults &rDefaults, const char *pConfigNote,
+		      boolean bConfigIgnored)
 :	CMultiCoreSupport (pMemorySystem),
 	m_pFrameBuffer (pFrameBuffer),
 	m_pReader (pReader),
 	m_pSound (pSound),
 	m_nArmClockMHz (nArmClockMHz),
+	m_nHdmiWidth (nHdmiWidth),
+	m_nHdmiHeight (nHdmiHeight),
+	m_pConfigNote (pConfigNote),
+	m_bConfigIgnored (bConfigIgnored),
 	m_FrameClock (&m_Log, FuseFrameTStates (), Choice),
 	m_UlaClock (&m_FrameClock, &m_FrameClock, TickFrequency ()),
 	m_TStateClock (&m_Queue, TickFrequency (), NominalClockHz),
@@ -67,6 +78,7 @@ CSpPieApp::CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffe
 	m_pDraw (0)
 {
 	memset (&m_Shared, 0, sizeof m_Shared);
+	m_Presenter.SetDefaults (rDefaults);
 	for (unsigned i = 0; i < MachineCount; i++)
 	{
 		m_pContention[i] = 0;
@@ -396,7 +408,8 @@ void CSpPieApp::RunRenderer (void)
 
 	// Both halves of the frame buffer start black. The frame buffer is
 	// device memory: aligned 64-bit stores, two pixels each.
-	for (unsigned y = 0; y < 2 * DisplayHeight; y++)
+	const unsigned nHalfLines = DisplayHeight * FrameBufferLines;
+	for (unsigned y = 0; y < 2 * nHalfLines; y++)
 	{
 		volatile u64 *pDest = (volatile u64 *) (nBuffer + y * nPitchBytes);
 		for (unsigned x = 0; x < DisplayWidth / 2; x++)
@@ -407,9 +420,8 @@ void CSpPieApp::RunRenderer (void)
 
 	// The border extension and the overlay change the side areas, so whole
 	// rows are copied, into both halves of the frame buffer in turn.
-	const unsigned nCopyX = 0, nCopyWidth = DisplayWidth;
-	const unsigned nCopyY = 0, nCopyHeight = DisplayHeight;
 	boolean bExtensionShown = FALSE;
+	u32 WeaveRow[DisplayWidth] __attribute__ ((aligned (8)));
 
 #if SPPIE_OVERLAY
 	COverlay Overlay;
@@ -423,6 +435,17 @@ void CSpPieApp::RunRenderer (void)
 	u64 nPrevFrameEnd = ReadTicks ();
 #endif
 
+	// The splash screen (splash.h), in Circle's 8 x 8 font.
+	const TSplashFont SplashFont =
+	{
+		(const u8 *) Font8x8.data, Font8x8.first_char, Font8x8.last_char
+	};
+	CSplashState Splash;
+	CRefreshMeter Refresh;
+	u64 nLastEmpty = 0;
+	unsigned nLinkIdleFrames = CSplashState::StopFrames;
+	const u64 nTickFrequency = TickFrequency ();
+
 	u32 nFrame = 0;
 	unsigned nHidden = 1;		// half 0 is shown after Initialize ()
 
@@ -432,8 +455,43 @@ void CSpPieApp::RunRenderer (void)
 		u64 nStart = ReadTicks ();
 #endif
 
+		// The splash decided on the HDMI frames before. The presenter
+		// writes the whole picture each time, so the splash leaves
+		// nothing behind.
+		boolean bSplash = Splash.Showing ();
+
 		// One complete Spectrum frame, or the last one again.
-		m_Presenter.Present ();
+		boolean bNewFrame = m_Presenter.Present ();
+		boolean bLocked = Fetch (&m_Shared.Locked) != 0;
+		Splash.Update (bNewFrame, bLocked);
+
+		u64 nEmpty = Fetch (&m_Shared.EmptyPairs);
+		if (nEmpty != nLastEmpty)
+		{
+			nLastEmpty = nEmpty;
+			nLinkIdleFrames = 0;
+		}
+		else if (nLinkIdleFrames < CSplashState::StopFrames)
+		{
+			nLinkIdleFrames++;
+		}
+
+		if (bSplash)
+		{
+			TSplashFacts Facts;
+			Facts.pVersion = SPPIE_VERSION;
+			Facts.nHdmiWidth = m_nHdmiWidth;
+			Facts.nHdmiHeight = m_nHdmiHeight;
+			Facts.nRefreshCentiHz = Refresh.CentiHz (nTickFrequency);
+			Facts.bLinkAlive = nLinkIdleFrames < CSplashState::StopFrames;
+			Facts.bClockSeen = Splash.FramesArriving ();
+			Facts.bLocked = bLocked;
+			Facts.Machine = (TMachine) m_Presenter.LastRecord ().Machine;
+			Facts.pConfigNote = m_pConfigNote;
+			Facts.bConfigIgnored = m_bConfigIgnored;
+			DrawSplash (Facts, SplashFont, pDraw + PictureTop * DisplayWidth + PictureLeft,
+				    DisplayWidth);
+		}
 
 		// The side areas (controlports.h): the border extension, or
 		// black, with the HUD over either.
@@ -461,15 +519,28 @@ void CSpPieApp::RunRenderer (void)
 		bHudShown = bHud;
 #endif
 
-		// Copy into the hidden half.
-		for (unsigned y = nCopyY; y < nCopyY + nCopyHeight; y++)
+		// Copy into the hidden half, two frame buffer lines for each
+		// display line. In the line weave the second takes the picture
+		// from the frame before (interlace.h).
+		const u32 *pWeave = bSplash ? 0 : m_Presenter.WeavePicture ();
+		for (unsigned y = 0; y < DisplayHeight; y++)
 		{
-			volatile u64 *pDest = (volatile u64 *) (nBuffer
-				+ (nHidden * DisplayHeight + y) * nPitchBytes + nCopyX * 4);
-			const u64 *pSrc = (const u64 *) (pDraw + y * DisplayWidth + nCopyX);
-			for (unsigned x = 0; x < nCopyWidth / 2; x++)
+			const u64 *pSrc = (const u64 *) (pDraw + y * DisplayWidth);
+			for (unsigned nSub = 0; nSub < FrameBufferLines; nSub++)
 			{
-				pDest[x] = pSrc[x];
+				if (nSub == 1 && pWeave != 0 && y >= PictureTop && y < PictureTop + PictureHeight)
+				{
+					WeaveLine (pDraw + y * DisplayWidth,
+						   pWeave + (y - PictureTop) * PictureWidth,
+						   PictureLeft, PictureWidth, DisplayWidth, 1, WeaveRow);
+					pSrc = (const u64 *) WeaveRow;
+				}
+				volatile u64 *pDest = (volatile u64 *) (nBuffer
+					+ (nHidden * nHalfLines + y * FrameBufferLines + nSub) * nPitchBytes);
+				for (unsigned x = 0; x < DisplayWidth / 2; x++)
+				{
+					pDest[x] = pSrc[x];
+				}
 			}
 		}
 
@@ -477,8 +548,9 @@ void CSpPieApp::RunRenderer (void)
 		u64 nDrawn = ReadTicks ();
 #endif
 
-		m_pFrameBuffer->SetVirtualOffset (0, nHidden * DisplayHeight);
+		m_pFrameBuffer->SetVirtualOffset (0, nHidden * nHalfLines);
 		m_pFrameBuffer->WaitForVerticalSync ();
+		Refresh.VerticalSync (ReadTicks ());
 
 		nHidden ^= 1;
 		nFrame++;
@@ -486,7 +558,6 @@ void CSpPieApp::RunRenderer (void)
 #if SPPIE_OVERLAY
 		u64 nFrameEnd = ReadTicks ();
 		u64 nEvents = Fetch (&m_Shared.Events);
-		u64 nEmpty = Fetch (&m_Shared.EmptyPairs);
 		u64 nFrameEvents = Fetch (&m_Shared.FrameEvents);
 		u64 nBusy = Fetch (&m_Shared.BusyTicks);
 		u64 nFrameTicks = nFrameEnd - nPrevFrameEnd;

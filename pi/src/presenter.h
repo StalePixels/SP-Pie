@@ -37,6 +37,7 @@
 #include "audiostream.h"
 #include "controlports.h"
 #include "eventlog.h"
+#include "interlace.h"
 #include "machine.h"
 #include <stdint.h>
 
@@ -50,17 +51,31 @@ public:
 	// pAudio receives each frame's samples; 0 drops them.
 	explicit CFramePresenter (CEventLog *pLog, CAudioFifo *pAudio = 0);
 
-	// Starts Fuse and its sound, drawing into the 352 x 270 picture at
-	// pPicture with nPitch pixels between rows. FALSE when Fuse does not
-	// start.
+	// Starts Fuse and its sound. Fuse draws into a picture of the
+	// presenter's own; each Present () writes the picture to show, mixed
+	// or not, into the 352 x 270 picture at pPicture with nPitch pixels
+	// between rows. FALSE when Fuse does not start or memory runs out.
 	bool Initialize (uint32_t *pPicture, unsigned nPitch);
+
+	// The feature defaults, from config.txt (bootconfig.h). They apply at
+	// once and at every reset. Call before Initialize ().
+	void SetDefaults (const CControlPorts::TDefaults &rDefaults);
 
 	// Clears the counters; the next frame shown is frame nFirstFrame.
 	void Reset (uint32_t nFirstFrame = 0);
 
-	// Runs the next Spectrum frame, and any skipped before it. FALSE when
-	// no frame was complete: the picture is not changed.
+	// Runs the next Spectrum frame, and any skipped before it, and writes
+	// the picture to show. FALSE when no frame was complete: the picture
+	// of the last frame is written again.
 	bool Present (void);
+
+	// Interlace mixing (interlace.h, control-port feature 3) of the
+	// picture written by the last Present (): the mode, or -1 when not
+	// mixing. In the line weave mode the picture written is the newest
+	// frame, and WeavePicture () is the frame before, for the other
+	// lines; otherwise WeavePicture () is 0.
+	int Mixing (void) const			{ return m_nMixing; }
+	const uint32_t *WeavePicture (void) const;
 
 	uint32_t LastFrame (void) const		{ return m_nLastFrame; }
 	const TFrameRecord &LastRecord (void) const { return m_LastRecord; }
@@ -75,11 +90,19 @@ public:
 
 private:
 	void RunFrame (uint32_t nFrame);
+	void WritePicture (void);
 
 private:
 	CEventLog	*m_pLog;
 	CAudioFifo	*m_pAudio;
 	CControlPorts	m_Control;
+
+	uint32_t	*m_pOutput;		// where the picture to show goes
+	unsigned	m_nOutputPitch;
+	uint32_t	*m_pFuse;		// Fuse's picture: the newest frame
+	uint32_t	*m_pPrevious;		// the frame before it
+	CInterlaceDetector m_Interlace;
+	int		m_nMixing;
 
 	uint32_t	m_nNext;		// next frame to run
 	uint32_t	m_nLastFrame;

@@ -22,6 +22,7 @@ static const unsigned FailFuse		= 5;
 CKernel::CKernel (void)
 :	m_Timer (&m_Interrupt),
 	m_Logger (m_Options.GetLogLevel (), &m_Timer),
+	m_EMMC (&m_Interrupt, &m_Timer, 0),
 	m_pFrameBuffer (0),
 	m_pReader (0),
 	m_pSound (0),
@@ -43,10 +44,28 @@ boolean CKernel::Initialize (void)
 		Fail (FailSystem);
 	}
 
-	// 480 x 270 at 32 bits per pixel, twice as high for the flip. The
-	// firmware scales it to the HDMI mode (x4 for 1080p).
-	m_pFrameBuffer = new CBcmFrameBuffer (DisplayWidth, DisplayHeight, 32,
-					      DisplayWidth, DisplayHeight * 2);
+	ReadBootConfig ();
+
+	// The HDMI mode's size, for the splash screen. Before a frame buffer
+	// is allocated, the firmware gives the size of the display mode here
+	// (Circle's CBcmFrameBuffer reads it the same way to choose its size
+	// when it is given none).
+	unsigned nHdmiWidth = 0, nHdmiHeight = 0;
+	{
+		CBcmPropertyTags Tags;
+		TPropertyTagDisplayDimensions Dimensions;
+		if (Tags.GetTag (PROPTAG_GET_DISPLAY_DIMENSIONS, &Dimensions, sizeof Dimensions))
+		{
+			nHdmiWidth = Dimensions.nWidth;
+			nHdmiHeight = Dimensions.nHeight;
+		}
+	}
+
+	// 480 x 540 at 32 bits per pixel, two lines for each display line,
+	// and twice as high for the flip. The firmware scales it to the HDMI
+	// mode (x4 across and x2 down for 1080p).
+	m_pFrameBuffer = new CBcmFrameBuffer (DisplayWidth, DisplayHeight * FrameBufferLines, 32,
+					      DisplayWidth, DisplayHeight * FrameBufferLines * 2);
 	if (   m_pFrameBuffer == 0
 	    || !m_pFrameBuffer->Initialize ()
 	    || m_pFrameBuffer->GetPitch () < DisplayWidth * 4)
@@ -75,7 +94,8 @@ boolean CKernel::Initialize (void)
 	unsigned nArmClockMHz = CMachineInfo::Get ()->GetClockRate (CLOCK_ID_ARM) / 1000000;
 
 	m_pApp = new CSpPieApp (CMemorySystem::Get (), m_pFrameBuffer, m_pReader, m_pSound,
-				nArmClockMHz, MachineChoice ());
+				nArmClockMHz, MachineChoice (), nHdmiWidth, nHdmiHeight,
+				m_BootConfig.Defaults, m_ConfigNote, m_BootConfig.nIgnored != 0);
 	if (m_pApp == 0 || !m_pApp->InitializeRenderer ())
 	{
 		Fail (FailFuse);
@@ -95,10 +115,16 @@ TShutdownMode CKernel::Run (void)
 	return ShutdownHalt;
 }
 
-// The "machine" option in cmdline.txt: auto (the default), auto128, 48, 128
-// or plus3. See machine.h, TMachineChoice.
+// machine= in the [sp-pie] section of config.txt, else the "machine"
+// option in cmdline.txt: auto (the default), auto128, 48, 128 or plus3.
+// See machine.h, TMachineChoice.
 TMachineChoice CKernel::MachineChoice (void) const
 {
+	if (m_BootConfig.bHaveMachine)
+	{
+		return m_BootConfig.Machine;
+	}
+
 	const char *pValue = m_Options.GetAppOptionString ("machine", "auto");
 
 	if (strcmp (pValue, "auto128") == 0)	return ChooseAuto128;
@@ -107,6 +133,63 @@ TMachineChoice CKernel::MachineChoice (void) const
 	if (strcmp (pValue, "plus3") == 0)	return ChoosePlus3;
 
 	return ChooseAuto;
+}
+
+// Appends pText to the splash note, as far as it fits.
+static void AppendNote (char *pNote, size_t nSize, const char *pText)
+{
+	size_t n = 0;
+	while (n < nSize - 1 && pNote[n] != '\0')
+	{
+		n++;
+	}
+	while (n < nSize - 1 && *pText != '\0')
+	{
+		pNote[n++] = *pText++;
+	}
+	pNote[n] = '\0';
+}
+
+void CKernel::ReadBootConfig (void)
+{
+	// config.txt is a small text file; a longer one has its tail ignored.
+	static char Buffer[16384];
+
+	DefaultBootConfig (m_BootConfig);
+	m_ConfigNote[0] = '\0';
+
+	FIL File;
+	UINT nRead = 0;
+	if (   !m_EMMC.Initialize ()
+	    || f_mount (&m_FileSystem, "SD:", 1) != FR_OK
+	    || f_open (&File, "SD:/config.txt", FA_READ) != FR_OK)
+	{
+		AppendNote (m_ConfigNote, sizeof m_ConfigNote, "config.txt: not read");
+		return;
+	}
+	FRESULT Result = f_read (&File, Buffer, sizeof Buffer, &nRead);
+	f_close (&File);
+	f_mount (0, "SD:", 0);
+	if (Result != FR_OK)
+	{
+		AppendNote (m_ConfigNote, sizeof m_ConfigNote, "config.txt: not read");
+		return;
+	}
+
+	ParseBootConfig (Buffer, nRead, m_BootConfig);
+	if (m_BootConfig.nIgnored != 0)
+	{
+		AppendNote (m_ConfigNote, sizeof m_ConfigNote, "config.txt ignored: ");
+		AppendNote (m_ConfigNote, sizeof m_ConfigNote, m_BootConfig.Ignored);
+	}
+	else if (m_BootConfig.bSection)
+	{
+		AppendNote (m_ConfigNote, sizeof m_ConfigNote, "config.txt: [sp-pie] read");
+	}
+	else
+	{
+		AppendNote (m_ConfigNote, sizeof m_ConfigNote, "config.txt: no [sp-pie] section");
+	}
 }
 
 void CKernel::Fail (unsigned nCount)

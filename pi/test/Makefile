@@ -1,8 +1,8 @@
 #
 # Host tests: decoder, intake, clock count, frame clock, event log,
 # presenter, the Fuse ULA model and sound generator with our layer, the
-# control ports and the audio resampler, built with the host compilers and
-# run on the build machine.
+# control ports, the audio resampler and the splash screen, built with the
+# host compilers and run on the build machine.
 #
 #   gmake           build and run
 #   gmake clean
@@ -21,7 +21,18 @@ include ../fuseula/fuseula.mk
 
 SRCDIR   = ../src
 SOURCES  = test_main.cpp $(SRCDIR)/intake.cpp $(SRCDIR)/tstateclock.cpp $(SRCDIR)/ulaclock.cpp \
-	   $(SRCDIR)/frameclock.cpp $(SRCDIR)/presenter.cpp $(SRCDIR)/audiostream.cpp
+	   $(SRCDIR)/frameclock.cpp $(SRCDIR)/presenter.cpp $(SRCDIR)/audiostream.cpp \
+	   $(SRCDIR)/splash.cpp $(SRCDIR)/bootconfig.cpp $(CIRCLE_FONT)
+
+# The splash screen's font: Circle's 8 x 8 font, from the Circle source in
+# the circle-libsdl2 submodule (no Circle build needed).
+CIRCLE_SOURCE ?= ../../circle-libsdl2/circle-stdlib-rpi3/libs/circle
+CIRCLE_FONT    = $(CIRCLE_SOURCE)/lib/font8x8.cpp
+CXXFLAGS      += -I$(CIRCLE_SOURCE)/include
+
+# The version the splash test draws, as the kernel build gets it.
+SPPIE_VERSION := $(shell git -C ../.. describe --tags --always --dirty 2>/dev/null || echo unknown)
+CXXFLAGS      += -DSPPIE_VERSION='"$(SPPIE_VERSION)"'
 HEADERS  = $(wildcard $(SRCDIR)/*.h) $(FUSEULA_DIR)/fuseula.h $(FUSEULA_DIR)/fusesound.h
 
 # Our own C files build with warnings as errors; Fuse's and libspectrum's
