@@ -68,8 +68,9 @@ public:
 	// has been taken by the DMA).
 	boolean TransferDone (void) const;
 
-	// Starts the next SMI transfer after TransferDone ().
-	void Restart (void);
+	// Starts the next SMI transfer, of nReads reads (even, at most
+	// SmiBatchTransfers), after TransferDone ().
+	void Restart (unsigned nReads = SmiBatchTransfers);
 
 	// After an H-bit mismatch: stops reads, holds SYNC high for at least
 	// 1 us with no reads, clears the SMI FIFO, discards every ring word up
@@ -87,7 +88,7 @@ public:
 
 private:
 	void StopReads (void);
-	void PrepareTransfer (void);
+	void PrepareTransfer (unsigned nReads = SmiBatchTransfers);
 	void GoTransfer (void);
 	void PulseSync (void);
 

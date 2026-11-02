@@ -21,6 +21,7 @@
 #include "../src/presenter.h"
 #include "../src/tstateclock.h"
 #include "../src/ulaclock.h"
+#include "../src/ulaqueue.h"
 #include "../fuseula/fuseula.h"
 
 #include <algorithm>
@@ -444,11 +445,15 @@ public:
 				nLoaded = w[0];
 			}
 
-			// Transfers end on pair boundaries.
+			// Transfers end on pair boundaries. The Pi times the start of
+			// the next transfer when it asks for it; the first read can
+			// come up to StartJitterNs later.
 			if (nStop < rStops.size () && nEnd >= rStops[nStop].AtNs)
 			{
 				nEnd += rStops[nStop].LengthNs;
 				Transfers.push_back ({ Words.size (), nEnd });
+				nJitterSeed = nJitterSeed * 1103515245u + 12345u;
+				nEnd += StartJitterNs * (double) ((nJitterSeed >> 16) % 1000) / 1000.0;
 				nStop++;
 			}
 		}
@@ -464,6 +469,9 @@ public:
 	// clock stops.
 	std::function<uint64_t (double)> CountAtNs = CountAt;
 
+	double			StartJitterNs = 0;
+	uint32_t		nJitterSeed = 1;
+
 	std::vector<uint32_t>	Words;
 	std::vector<double>	WordNs;		// when each read ended
 	std::vector<TTransfer>	Transfers;
@@ -474,7 +482,7 @@ public:
 // Feeds the simulated words to the intake core's code, in batches, with
 // each transfer start, as the Pi's intake loop does.
 static void Feed (const CCpldSim &rSim, CTStateClock &rClock, TIntakeCounters &rCounters,
-		  size_t nBatch = 97)
+		  size_t nBatch = 97, std::function<void (void)> AfterBatch = nullptr)
 {
 	TIntakeState State;
 	ResetIntake (State);
@@ -505,6 +513,10 @@ static void Feed (const CCpldSim &rSim, CTStateClock &rClock, TIntakeCounters &r
 		ProcessWords (&rSim.Words[nPos], nEnd - nPos, nPos, rClock, State, rCounters, bMismatch);
 		CHECK (!bMismatch);
 		nPos = nEnd;
+		if (AfterBatch)
+		{
+			AfterBatch ();
+		}
 	}
 }
 
@@ -750,8 +762,10 @@ static void TestMachineDetection (void)
 	// 48K frame length, then a +3's port 0x1FFD write in a 128K-class
 	// stream; and the cmdline choices.
 	{
+		// The class comes from the ULA clock's frame period.
 		std::unique_ptr<CEventLog> pLog (new CEventLog);
 		CFrameClock Frames (pLog.get (), FrameLengths (), ChooseAuto);
+		Frames.SetClockFacts (Machine48K, false);
 		for (unsigned n = 0; n < 12; n++)
 		{
 			uint64_t s = 1000000 + (uint64_t) n * 69888;
@@ -789,6 +803,18 @@ static void TestMachineDetection (void)
 		CFrameClock Frames (pLog.get (), FrameLengths (), Choose48K);
 		CHECK_EQ (Frames.Machine (), Machine48K);
 		CHECK_EQ (Frames.FrameTStates (), 69888u);
+	}
+	{
+		// A 128K whose clock stops: its own 0x1FFD write (the Bifrost* demo
+		// writes 0x04 there) does not make it a +2A/+3.
+		std::unique_ptr<CEventLog> pLog (new CEventLog);
+		CFrameClock Frames (pLog.get (), FrameLengths (), ChooseAuto);
+		Frames.SetClockFacts (Machine128K, false);
+		Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), 1000);
+		CHECK_EQ (Frames.Machine (), Machine128K);
+		Frames.SetClockFacts (Machine128K, true);	// after a reset, on a +3
+		Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), 2000);
+		CHECK_EQ (Frames.Machine (), MachinePlus3);
 	}
 	{
 		// A clock that stops during contention: frames shorter than both
@@ -1373,7 +1399,8 @@ private:
 	std::vector<std::pair<uint64_t, uint8_t>> m_Stalls;	// start, length
 };
 
-static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClockHz)
+static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClockHz,
+					double nStartJitterNs = 0, bool bStopsInBorder = true)
 {
 	// Each frame: the interrupt push 0 to 3 T-states after the start
 	// (HALT), then attribute writes for every line of 6 character rows and
@@ -1449,12 +1476,28 @@ static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClock
 	}
 
 	double nEndNs = ((double) (S + (uint64_t) nFrames * L) + 2000) * ClockNs;
+	// Restarts as the Pi plans them in stopped mode: each transfer ends in
+	// a border (PlanTransferReads), or every 65,534 reads.
 	std::vector<TSimStop> Stops;
-	for (double t = 13.1e6; t < nEndNs; t += 13.1e6)
+	for (double t = 0; ; )
 	{
-		Stops.push_back ({ t, 7000 });
+		uint32_t nReads = 65534;
+		if (bStopsInBorder)
+		{
+			double u = t / ClockNs - (double) S;
+			double nFrameT = u - (double) L * (double) (int64_t) (u / L);
+			nReads = PlanTransferReads (nFrameT, ReadNs / ClockNs, L, 65534);
+		}
+		t += nReads * ReadNs;
+		if (t >= nEndNs)
+		{
+			break;
+		}
+		Stops.push_back ({ t, 2000 });
+		t += 2000;
 	}
 	CCpldSim Sim;
+	Sim.StartJitterNs = nStartJitterNs;
 	Sim.CountAtNs = [&Z80] (double ns) { return Z80.CountAt (ns / ClockNs); };
 	Sim.Run (Writes, Stops, nEndNs);
 	CHECK_EQ (Sim.Stored.size (), Writes.size ());
@@ -1464,25 +1507,39 @@ static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClock
 	Frames.SetContention (Expect, Contention.data ());
 	CTeeSink Tee (&Frames);
 	CUlaClock Ula (&Tee, &Frames, TickHz);
-	CTStateClock Clock (&Ula, TickHz, 3546900);
+	// Core 1's part, then core 2's, through the queue between them.
+	std::unique_ptr<CUlaQueue> pQueue (new CUlaQueue);
+	CTStateClock Clock (pQueue.get (), TickHz, 3546900);
 	TIntakeCounters Counters;
+	double nCore2Ns = 0;
 	auto t0 = std::chrono::steady_clock::now ();
-	Feed (Sim, Clock, Counters);
+	Feed (Sim, Clock, Counters, 97, [&] (void)
+	{
+		pQueue->Publish ();
+		auto a = std::chrono::steady_clock::now ();
+		pQueue->Drain (Ula);
+		nCore2Ns += std::chrono::duration<double, std::nano> (std::chrono::steady_clock::now () - a).count ();
+	});
 	auto t1 = std::chrono::steady_clock::now ();
+	CHECK_EQ (pQueue->Dropped (), 0u);
 	pLog->Publish ();
 	if (Machine == FUSEULA_128K && ReadNs == 200.0)
 	{
-		double nNs = std::chrono::duration<double, std::nano> (t1 - t0).count ();
-		printf ("cost (host, stopped clock): core 1 %.1f ns per pair, %.0f us per frame\n",
-			nNs / (Sim.Words.size () / 2), nNs / 1000 / nFrames);
+		double nNs = std::chrono::duration<double, std::nano> (t1 - t0).count () - nCore2Ns;
+		double nPairs = (double) (Sim.Words.size () / 2);
+		printf ("cost (host, stopped clock): core 1 %.1f ns per pair, core 2 %.1f ns per pair\n",
+			nNs / nPairs, nCore2Ns / nPairs);
 	}
 
 	CHECK (Ula.Stopped ());
 	CHECK (Ula.LastFrameClocks () + 500 < L);
 	CHECK_EQ (Frames.Machine (), Expect);
-	CHECK_EQ (Ula.Ambiguous (), 0u);
+	// Only while the phase settles, in the first frames after the clock is
+	// found stopped.
+	CHECK (Ula.Ambiguous () <= 16);
 	CHECK (Frames.Acquisitions () <= 2);
-	CHECK_EQ (Ula.PhaseSlips (), 0u);
+	CHECK (Ula.PhaseSlips () <= 2);
+	CHECK (Ula.RestartsInDisplay () <= 8);	// before the frame start settles
 
 	// Every write from frame 10 on at its true ULA time, up to one constant.
 	CHECK_EQ (Tee.Counts.size (), True.size ());
@@ -1535,6 +1592,10 @@ static void TestStoppedClockMulticolour (void)
 	ReadNs = 200.04;
 	RunStoppedClockMulticolour (FUSEULA_128K, 3546900);
 	ReadNs = 200.0;
+
+	// The first read of a transfer up to 500 ns after the Pi times its
+	// start, with the restarts in the border.
+	RunStoppedClockMulticolour (FUSEULA_128K, 3546900, 500, true);
 	ClockNs = 1e9 / 3546900.0;
 }
 

@@ -24,6 +24,7 @@ void CFrameClock::Reset (void)
 {
 	m_Class = Machine128K;
 	m_bPort1FFDSeen = false;
+	m_bClockFree = true;
 	m_Machine = ResolveMachine (m_Class, m_Choice, false);
 	m_nFrameTStates = m_FrameTStates[m_Machine];
 
@@ -36,8 +37,6 @@ void CFrameClock::Reset (void)
 
 	m_bHaveFrameEvent = false;
 	m_nLastFrameEvent = 0;
-	m_nVotes = 0;
-	m_VoteClass = m_Class;
 
 	m_nLastClocks = 0;
 	m_nClocks = 0;
@@ -57,6 +56,17 @@ void CFrameClock::Reset (void)
 	ClearAlignment ();
 	m_nAlignments = 0;
 	m_bCheckContention = true;
+}
+
+void CFrameClock::SetClockFacts (TMachine Class, bool bClockFree)
+{
+	if (Class != m_Class)
+	{
+		m_bPort1FFDSeen = false;
+	}
+	m_Class = Class;
+	m_bClockFree = bClockFree;
+	UpdateMachine ();
 }
 
 void CFrameClock::EnableContentionCheck (bool bEnable)
@@ -83,6 +93,17 @@ int CFrameClock::ContentionAt (uint64_t nCount) const
 	uint32_t nFrame, nTState;
 	Locate (nCount, nFrame, nTState);
 	return pTable[nTState];
+}
+
+int64_t CFrameClock::TStateOf (uint64_t nCount) const
+{
+	if (!m_bHaveStart)
+	{
+		return -1;
+	}
+	uint32_t nFrame, nTState;
+	Locate (nCount, nFrame, nTState);
+	return nTState;
 }
 
 void CFrameClock::ClearAlignment (void)
@@ -208,7 +229,7 @@ void CFrameClock::SetStart (uint64_t nStart)
 
 void CFrameClock::UpdateMachine (void)
 {
-	TMachine Machine = ResolveMachine (m_Class, m_Choice, m_bPort1FFDSeen);
+	TMachine Machine = ResolveMachine (m_Class, m_Choice, m_bPort1FFDSeen && m_bClockFree);
 	if (Machine == m_Machine)
 	{
 		return;
@@ -271,35 +292,6 @@ void CFrameClock::FrameEvent (uint64_t nCount)
 			if (m_nClocks < StatsFrames)
 			{
 				m_nClocks++;
-			}
-
-			TMachine Vote = MachineCount;
-			if (nClocks + MaxAckDelayTStates > m_FrameTStates[Machine48K] &&
-			    nClocks < m_FrameTStates[Machine48K] + MaxAckDelayTStates)
-			{
-				Vote = Machine48K;
-			}
-			else if (nClocks + MaxAckDelayTStates > m_FrameTStates[Machine128K] &&
-				 nClocks < m_FrameTStates[Machine128K] + MaxAckDelayTStates)
-			{
-				Vote = Machine128K;
-			}
-
-			if (Vote == MachineCount || Vote == m_Class)
-			{
-				m_nVotes = 0;
-			}
-			else
-			{
-				m_nVotes = Vote == m_VoteClass ? m_nVotes + 1 : 1;
-				m_VoteClass = Vote;
-				if (m_nVotes >= ClassVotes)
-				{
-					m_Class = Vote;
-					m_nVotes = 0;
-					m_bPort1FFDSeen = false;
-					UpdateMachine ();
-				}
 			}
 		}
 	}
@@ -372,7 +364,6 @@ void CFrameClock::TimedEvent (const TEvent &rEvent, uint64_t nCount)
 		}
 		m_bInReset = true;
 		m_nResetEnd = nCount + ResetBurstTStates;
-		m_nVotes = 0;
 		if (m_bPort1FFDSeen)
 		{
 			m_bPort1FFDSeen = false;

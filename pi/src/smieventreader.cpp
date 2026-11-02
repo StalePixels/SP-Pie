@@ -220,9 +220,9 @@ boolean CSmiEventReader::TransferDone (void) const
 	return (nCS & SmiCSDone) != 0 && (nCS & SmiCSActive) == 0;
 }
 
-void CSmiEventReader::Restart (void)
+void CSmiEventReader::Restart (unsigned nReads)
 {
-	PrepareTransfer ();
+	PrepareTransfer (nReads);
 	GoTransfer ();
 }
 
@@ -275,12 +275,12 @@ void CSmiEventReader::StopReads (void)
 	PeripheralExit ();
 }
 
-void CSmiEventReader::PrepareTransfer (void)
+void CSmiEventReader::PrepareTransfer (unsigned nReads)
 {
 	StopReads ();
 
 	PeripheralEntry ();
-	write32 (SmiL, SmiBatchTransfers);
+	write32 (SmiL, nReads);
 	write32 (SmiCS, SmiCSEnable);
 	unsigned nPolls = 0;
 	while ((read32 (SmiCS) & SmiCSActive) && ++nPolls < PollLimit)

@@ -58,7 +58,7 @@ CSpPieApp::CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffe
 	m_nArmClockMHz (nArmClockMHz),
 	m_FrameClock (&m_Log, FuseFrameTStates (), Choice),
 	m_UlaClock (&m_FrameClock, &m_FrameClock, TickFrequency ()),
-	m_TStateClock (&m_UlaClock, TickFrequency (), NominalClockHz),
+	m_TStateClock (&m_Queue, TickFrequency (), NominalClockHz),
 	m_Presenter (&m_Log),
 	m_pDraw (0)
 {
@@ -118,6 +118,10 @@ void CSpPieApp::Run (unsigned nCore)
 		RunIntake ();
 		break;
 
+	case 2:
+		RunUla ();
+		break;
+
 	default:
 		break;
 	}
@@ -133,11 +137,97 @@ u64 CSpPieApp::Fetch (const u64 *pField)
 	return __atomic_load_n (pField, __ATOMIC_RELAXED);
 }
 
+static u64 DoubleBits (double nValue)
+{
+	u64 nBits;
+	memcpy (&nBits, &nValue, sizeof nBits);
+	return nBits;
+}
+
+static double BitsDouble (u64 nBits)
+{
+	double nValue;
+	memcpy (&nValue, &nBits, sizeof nValue);
+	return nValue;
+}
+
+// Core 2: the ULA clock and the frame clock, fed from core 1's queue. It
+// publishes its counters, and for core 1's restart planning where the next
+// frame starts in Pi time.
+void CSpPieApp::RunUla (void)
+{
+	const u64 nFrequency = TickFrequency ();
+	const u64 nPublishTicks = PublishNs * nFrequency / 1000000000;
+	u64 nLastPublish = 0;
+
+	while (1)
+	{
+		if (m_Queue.Drain (m_UlaClock) != 0)
+		{
+			m_Log.Publish ();
+		}
+
+		u64 nNow = ReadTicks ();
+		if (nNow - nLastPublish < nPublishTicks)
+		{
+			continue;
+		}
+		nLastPublish = nNow;
+
+		double nStart;
+		boolean bPlan = m_UlaClock.NextFrameStartTicks (nStart);
+		Publish (&m_Shared.PlanFrameStart, DoubleBits (bPlan ? nStart : 0.0));
+		Publish (&m_Shared.PlanRate, DoubleBits (m_UlaClock.Rate ()));
+		Publish (&m_Shared.PlanFrameTStates, m_FrameClock.FrameTStates ());
+		Publish (&m_Shared.PlanValid, bPlan ? 1 : 0);
+
+		Publish (&m_Shared.Port1FFDWrite, m_FrameClock.Port1FFDWrite ());
+		Publish (&m_Shared.ResetBursts, m_FrameClock.Resets ());
+		Publish (&m_Shared.LogDropped, m_Log.Dropped ());
+		Publish (&m_Shared.Clamped, m_FrameClock.Clamped ());
+		Publish (&m_Shared.Ambiguous, m_UlaClock.Ambiguous () + m_UlaClock.PhaseSlips ());
+		Publish (&m_Shared.ClockStopped, m_UlaClock.Stopped () ? 1 : 0);
+		Publish (&m_Shared.Acquisitions, m_FrameClock.Acquisitions ());
+		Publish (&m_Shared.Alignments, m_FrameClock.Alignments ());
+		Publish (&m_Shared.Aligned, m_FrameClock.Aligned () ? 1 : 0);
+		Publish (&m_Shared.Locked, m_FrameClock.Locked () ? 1 : 0);
+		Publish (&m_Shared.FrameClocks, m_UlaClock.LastFrameClocks ());
+		Publish (&m_Shared.MinFrameClocks, m_UlaClock.MinFrameClocks ());
+		Publish (&m_Shared.MaxFrameClocks, m_UlaClock.MaxFrameClocks ());
+	}
+}
+
+// Reads for the next SMI transfer, starting now. In stopped mode it ends
+// in the border, where the ULA clock can hold the stall across the
+// restart (PlanTransferReads); otherwise it is the longest transfer.
+unsigned CSpPieApp::PlanReads (void)
+{
+	if (Fetch (&m_Shared.PlanValid) == 0)
+	{
+		return SmiBatchTransfers;
+	}
+	double nStart = BitsDouble (Fetch (&m_Shared.PlanFrameStart));
+	double nRate = BitsDouble (Fetch (&m_Shared.PlanRate));
+	double nL = (double) Fetch (&m_Shared.PlanFrameTStates);
+	if (nRate <= 0 || nL <= 0)
+	{
+		return SmiBatchTransfers;
+	}
+
+	double t = ((double) ReadTicks () - nStart) * nRate;
+	t -= nL * (double) (int64_t) (t / nL);
+	if (t < 0)
+	{
+		t += nL;
+	}
+	return PlanTransferReads (t, m_TStateClock.ReadTicks () * nRate, (uint32_t) nL,
+				  SmiBatchTransfers);
+}
+
 void CSpPieApp::RunIntake (void)
 {
 	const u64 nFrequency = TickFrequency ();
-	const u64 nRestartGuardTicks = TransferNs / 2 * nFrequency / 1000000000;
-	const u64 nRestartDueTicks = (TransferNs - RestartLeadNs) * nFrequency / 1000000000;
+	const u64 nLeadTicks = RestartLeadNs * nFrequency / 1000000000;
 	const u64 nRestartSpinTicks = 2 * RestartLeadNs * nFrequency / 1000000000;
 	const u64 nPublishTicks = PublishNs * nFrequency / 1000000000;
 	u64 nLastPublish = 0;
@@ -163,6 +253,7 @@ void CSpPieApp::RunIntake (void)
 	u64 nWord = 0;
 	u64 nTransferWord = 0;		// first word of the running transfer
 	u64 nTransferWordsOff = 0;
+	unsigned nTransferReads = SmiBatchTransfers;	// reads of the running transfer
 	m_TStateClock.StartTransfer (nTransferWord, nTransferStart);
 	Publish (&m_Shared.Running, 1);
 
@@ -173,7 +264,9 @@ void CSpPieApp::RunIntake (void)
 
 		// Near the end of an SMI transfer, wait for it and start the next
 		// one at once.
-		if (!bSpun && nLoopStart - nTransferStart >= nRestartDueTicks)
+		// The running transfer lasts nTransferReads reads.
+		u64 nTransferTicks = (u64) (nTransferReads * m_TStateClock.ReadTicks ());
+		if (!bSpun && nLoopStart - nTransferStart + nLeadTicks >= nTransferTicks)
 		{
 			bSpun = TRUE;
 			u64 nSpinStart = ReadTicks ();
@@ -186,14 +279,14 @@ void CSpPieApp::RunIntake (void)
 		}
 
 		// End of an SMI transfer: start the next one.
-		if (nLoopStart - nTransferStart >= nRestartGuardTicks)
+		if (nLoopStart - nTransferStart >= nTransferTicks / 2)
 		{
 			if (m_pReader->TransferDone ())
 			{
 				// The next transfer's first word: a transfer is
 				// SmiTransferWords words. The DMA position must agree,
 				// allowing for words still on their way to memory.
-				u64 nExpected = nTransferWord + SmiTransferWords;
+				u64 nExpected = nTransferWord + nTransferReads;
 				u64 nFirst = nExpected;
 				unsigned nEnd = m_pReader->ProducerIndex ();
 				if (nEnd != RingWords)
@@ -206,7 +299,8 @@ void CSpPieApp::RunIntake (void)
 					}
 				}
 
-				m_pReader->Restart ();
+				nTransferReads = PlanReads ();
+				m_pReader->Restart (nTransferReads);
 				nTransferStart = ReadTicks ();
 				bSpun = FALSE;
 				nTransferWord = nFirst;
@@ -266,7 +360,7 @@ void CSpPieApp::RunIntake (void)
 				nRead = (unsigned) ((nRead + nUsed) % RingWords);
 				nWord += nUsed;
 			}
-			m_Log.Publish ();
+			m_Queue.Publish ();
 
 			if (bMismatch)
 			{
@@ -278,6 +372,7 @@ void CSpPieApp::RunIntake (void)
 				nTransferStart = ReadTicks ();
 				nLastNotDone = nTransferStart;
 				nTransferWord = nWord;
+				nTransferReads = SmiBatchTransfers;
 				m_TStateClock.StartTransfer (nTransferWord, nTransferStart);
 				ResetIntake (State);
 				bSpun = FALSE;
@@ -293,22 +388,9 @@ void CSpPieApp::RunIntake (void)
 			nLastPublish = nLoopStart;
 			Publish (&m_Shared.ReadPicoseconds,
 				 (u64) (m_TStateClock.ReadTicks () * 1e12 / (double) nFrequency));
-			Publish (&m_Shared.Port1FFDWrite, m_FrameClock.Port1FFDWrite ());
-			Publish (&m_Shared.ResetBursts, m_FrameClock.Resets ());
-
 			Publish (&m_Shared.FrameEvents, Counters.FrameEvents);
-			Publish (&m_Shared.LogDropped, m_Log.Dropped ());
-			Publish (&m_Shared.Clamped, m_FrameClock.Clamped ());
-			Publish (&m_Shared.Ambiguous, m_TStateClock.Ambiguous () + m_UlaClock.Ambiguous ()
-						      + m_UlaClock.PhaseSlips ());
-			Publish (&m_Shared.ClockStopped, m_UlaClock.Stopped () ? 1 : 0);
-			Publish (&m_Shared.Acquisitions, m_FrameClock.Acquisitions ());
-			Publish (&m_Shared.Alignments, m_FrameClock.Alignments ());
-			Publish (&m_Shared.Aligned, m_FrameClock.Aligned () ? 1 : 0);
-			Publish (&m_Shared.Locked, m_FrameClock.Locked () ? 1 : 0);
-			Publish (&m_Shared.FrameClocks, m_UlaClock.LastFrameClocks ());
-			Publish (&m_Shared.MinFrameClocks, m_UlaClock.MinFrameClocks ());
-			Publish (&m_Shared.MaxFrameClocks, m_UlaClock.MaxFrameClocks ());
+			Publish (&m_Shared.CountAmbiguous, m_TStateClock.Ambiguous ());
+			Publish (&m_Shared.QueueDropped, m_Queue.Dropped ());
 			Publish (&m_Shared.Events, Counters.Events);
 			Publish (&m_Shared.EmptyPairs, Counters.EmptyPairs);
 			Publish (&m_Shared.Overflows, Counters.Overflows);
@@ -425,9 +507,9 @@ void CSpPieApp::RunRenderer (void)
 		Report.MaxRestartGapUs = (unsigned) TicksToMicroseconds (
 			Fetch (&m_Shared.MaxRestartGapTicks), nFrequency);
 		Report.BadProducer = (unsigned) Fetch (&m_Shared.BadProducer);
-		Report.LogDropped = (unsigned) Fetch (&m_Shared.LogDropped);
+		Report.LogDropped = (unsigned) (Fetch (&m_Shared.LogDropped) + Fetch (&m_Shared.QueueDropped));
 		Report.Clamped = (unsigned) Fetch (&m_Shared.Clamped);
-		Report.Ambiguous = (unsigned) Fetch (&m_Shared.Ambiguous);
+		Report.Ambiguous = (unsigned) (Fetch (&m_Shared.Ambiguous) + Fetch (&m_Shared.CountAmbiguous));
 		Report.Acquisitions = (unsigned) Fetch (&m_Shared.Acquisitions);
 		Report.Alignments = (unsigned) Fetch (&m_Shared.Alignments);
 		Report.Aligned = Fetch (&m_Shared.Aligned) != 0;

@@ -44,6 +44,9 @@ CUlaClock::CUlaClock (ITimedEventSink *pSink, CFrameClock *pFrames, uint64_t nTi
 void CUlaClock::Reset (void)
 {
 	m_bStopped = false;
+	m_bStoppedSinceReset = false;
+	m_bHaveClass = false;
+	m_Class = Machine128K;
 	m_nStoppedVotes = 0;
 	m_nFreeVotes = 0;
 
@@ -69,11 +72,26 @@ void CUlaClock::Reset (void)
 	m_nPending = 0;
 	m_nPendingFrameCount = 0;
 	m_bRestarted = false;
+	m_bRestartInBorder = false;
+	m_nRestartsInDisplay = 0;
+	m_nLastCount = 0;
 	m_nPrevStall = 0;
 	m_nLastEvent = 0;
 	m_nHoldUntil = 0;
 
 	m_nAmbiguous = 0;
+}
+
+bool CUlaClock::NextFrameStartTicks (double &rTicks) const
+{
+	if (!m_bStopped || !m_bHavePhase || m_nRate <= 0)
+	{
+		return false;
+	}
+	// u(τ) = phase + rate × (τ - ref), so τ = ref + (u - phase) / rate.
+	uint64_t nStart = m_pFrames->FrameStart (m_pFrames->CompletedFrames () + 1);
+	rTicks = m_nTicksRef + ((double) nStart - m_nPhase) / m_nRate;
+	return true;
 }
 
 uint32_t CUlaClock::MinFrameClocks (void) const
@@ -134,6 +152,13 @@ void CUlaClock::FrameEvent (uint64_t nCount, double nTicks)
 			double nL = (nPeriod - n48K) * (nPeriod - n48K) < (nPeriod - n128K) * (nPeriod - n128K)
 				    ? Frame48K : Frame128K;
 			m_nRate = nL / nPeriod;
+			TMachine Class = nL == Frame48K ? Machine48K : Machine128K;
+			if (!m_bHaveClass || Class != m_Class)
+			{
+				m_Class = Class;
+				m_bHaveClass = true;
+				m_pFrames->SetClockFacts (m_Class, !m_bStoppedSinceReset);
+			}
 		}
 	}
 
@@ -157,6 +182,15 @@ void CUlaClock::FrameEvent (uint64_t nCount, double nTicks)
 
 			if (nClocks + MaxAckDelayTStates < nL)
 			{
+				if (!m_bStoppedSinceReset)
+				{
+					// A clock that stops: not a +2A/+3, until a reset.
+					m_bStoppedSinceReset = true;
+					if (m_bHaveClass)
+					{
+						m_pFrames->SetClockFacts (m_Class, false);
+					}
+				}
 				m_nFreeVotes = 0;
 				if (++m_nStoppedVotes >= StoppedFrames && !m_bStopped)
 				{
@@ -184,6 +218,16 @@ void CUlaClock::FrameEvent (uint64_t nCount, double nTicks)
 
 void CUlaClock::TimedEvent (const TEvent &rEvent, uint64_t nCount)
 {
+	if (rEvent.Kind == KindReset && m_bStoppedSinceReset)
+	{
+		// The board may sit on another Spectrum now.
+		m_bStoppedSinceReset = false;
+		if (m_bHaveClass)
+		{
+			m_pFrames->SetClockFacts (m_Class, true);
+		}
+	}
+
 	if (rEvent.Frame && !rEvent.Overflow)
 	{
 		// Its read time is that of the next empty pair, within a few reads.
@@ -211,6 +255,20 @@ void CUlaClock::TimedEvent (const TEvent &rEvent, uint64_t nCount)
 void CUlaClock::ReadsRestarted (void)
 {
 	m_bRestarted = true;
+
+	// A restart in the border: nothing stalls there, so the next pairs
+	// hold the stall and set the phase again, whatever the time the reads
+	// really started. A restart in the display keeps the phase, widened.
+	m_bRestartInBorder = false;
+	if (m_bStopped && m_bHavePhase)
+	{
+		int64_t nTState = m_pFrames->TStateOf (m_nLastCount + m_nStall);
+		m_bRestartInBorder = InBorder (nTState, m_pFrames->FrameTStates ());
+		if (!m_bRestartInBorder)
+		{
+			m_nRestartsInDisplay++;
+		}
+	}
 }
 
 void CUlaClock::Lock (uint64_t nCount, double nTicks)
@@ -243,10 +301,20 @@ void CUlaClock::Clock (uint64_t nCount, double nTicks)
 		else
 		{
 			double nElapsed = (nTicks - m_nLastTicks) * m_nRate;
-			double nWiden = (nElapsed < 0 ? -nElapsed : nElapsed) * DriftPerTState;
+			// Fewer frame periods measured, a less certain rate.
+			double nDrift = DriftPerTState * (double) RateFrames / (double) m_nFrameTicks;
+			double nWiden = (nElapsed < 0 ? -nElapsed : nElapsed) * nDrift;
 			if (m_bRestarted)
 			{
 				nWiden += RestartWiden;
+				if (m_bRestartInBorder)
+				{
+					double nHoldUntil = nTicks + RestartHoldTStates / m_nRate;
+					if (nHoldUntil > m_nHoldUntil)
+					{
+						m_nHoldUntil = nHoldUntil;
+					}
+				}
 			}
 			m_nLow -= nWiden;
 			m_nHigh += nWiden;
@@ -323,6 +391,7 @@ void CUlaClock::Clock (uint64_t nCount, double nTicks)
 		m_nLastTicks = nTicks;
 	}
 	m_bRestarted = false;
+	m_nLastCount = nCount;
 
 	if (bDecided)
 	{

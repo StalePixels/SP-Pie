@@ -40,15 +40,18 @@
 //
 // Frame length. The distance between the F events of two frames in a row
 // is the clock count of one frame, give or take the instruction time. It
-// is kept for the overlay (last, smallest and largest of the last
-// StatsFrames frames) and decides the model's frame-length class: 48K or
-// 128K, whichever frame length it is within MaxAckDelayTStates of, after
-// ClassVotes such frames in a row. A clock that stops during contention
-// gives shorter frames that match neither, and the class stays as it is.
+// is kept for the tests (last, smallest and largest of the last
+// StatsFrames frames). The class (48K or 128K) comes from the frame period
+// (SetClockFacts), never from the count: a clock that stops during
+// contention makes 128K frames look as short as a 48K's.
 //
 // Model. The class, the machine choice and whether a write to port 0x1FFD
 // (IsPort1FFD) has been seen since the last reset and the last class
-// change give the model (ResolveMachine).
+// change give the model (ResolveMachine), but only with a clock that has
+// not stopped since the last reset: a 128K program can write 0x1FFD (the
+// Bifrost* demo writes 0x04 there), and only the +2A/+3's clock never
+// stops. A 128K program that never touches contended memory and writes
+// 0x1FFD looks like a +2A/+3 until its first contended frame.
 //
 // Resets. Reset events within ResetBurstTStates of each other are one
 // reset: the burst of a press and the burst of its release. During a burst
@@ -86,7 +89,6 @@ class CFrameClock final : public ITimedEventSink
 {
 public:
 	static const unsigned RelockEvents	= 8;
-	static const unsigned ClassVotes	= 4;
 	static const unsigned StatsFrames	= 50;
 	static const unsigned AlignWrites	= 256;
 
@@ -99,6 +101,11 @@ public:
 	// Fuse's contention delay for each T-state of a model's frame
 	// (fuseula_contention). The table is kept, not copied.
 	void SetContention (TMachine Machine, const uint8_t *pTable);
+
+	// What the ULA clock knows: the class from the frame period, and
+	// whether the clock has run without stopping since the last reset. A
+	// +2A/+3 needs both a 128K-class frame and a clock that never stopped.
+	void SetClockFacts (TMachine Class, bool bClockFree);
 
 	// The contention check on or off (on after Reset ()).
 	void EnableContentionCheck (bool bEnable);
@@ -129,6 +136,9 @@ public:
 	// there is no table or no frame start yet.
 	int ContentionAt (uint64_t nCount) const;
 
+	// The T-state a count falls on, or -1 with no frame start yet.
+	int64_t TStateOf (uint64_t nCount) const;
+
 	// The count at which frame nFrame starts (for the tests).
 	uint64_t FrameStart (uint32_t nFrame) const;
 
@@ -147,6 +157,7 @@ private:
 
 	TMachine	m_Class;		// measured: Machine48K or Machine128K
 	bool		m_bPort1FFDSeen;
+	bool		m_bClockFree;		// no stopped frame since the last reset
 	TMachine	m_Machine;		// model of the frames being logged
 	uint32_t	m_nFrameTStates;
 
@@ -159,8 +170,6 @@ private:
 
 	bool		m_bHaveFrameEvent;
 	uint64_t	m_nLastFrameEvent;
-	unsigned	m_nVotes;
-	TMachine	m_VoteClass;
 
 	uint32_t	m_nLastClocks;
 	uint32_t	m_Clocks[StatsFrames];

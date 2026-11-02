@@ -24,7 +24,13 @@
 //    display line. From the interrupt to the first display line, over
 //    14,000 T-states, it stops it not at all: after each F event the stall
 //    is held and every pair narrows down the phase. In the display, every
-//    line still has about 100 T-states with no stall. The clock keeps the phase as
+//    line still has about 100 T-states with no stall.
+//  - A restart of the reads moves the read times by an amount the Pi only
+//    knows to its timer and the transfer's start latency. In the border,
+//    where nothing stalls, the stall is held for RestartHoldTStates after a
+//    restart and the pairs set the phase again; in stopped mode the intake
+//    core ends transfers only in the border (machine.h, InBorder). A
+//    restart in the display keeps the phase, widened, and is counted. The clock keeps the phase as
 //    the interval of values that fit every pair since the last stall
 //    (widened a little for drift and for each restart of the reads), and a
 //    pair that fits only with a larger stall is a stall. A pair that fits
@@ -48,6 +54,12 @@
 //    the I/O contention that follows (periph.c, writeport).
 //  - Any other write takes the stall after it. Either way the choice is
 //    counted as ambiguous.
+//
+// Model facts. The frame period gives the class: 19.968 ms is a 48K,
+// 19.9915 ms the 128K class; the count cannot, as a stopping clock makes
+// frames short. Any short frame since the last reset rules out the
+// +2A/+3, which has a clock that never stops. Both go to the frame clock
+// (CFrameClock::SetClockFacts).
 //
 // Clock behaviour. The clock watches the count between the F events of two
 // frames in a row. Two such frames more than MaxAckDelayTStates shorter
@@ -97,6 +109,7 @@ public:
 	bool Stopped (void) const		{ return m_bStopped; }
 	uint64_t Ambiguous (void) const		{ return m_nAmbiguous; }
 	uint64_t PhaseSlips (void) const	{ return m_nSlips; }
+	uint64_t RestartsInDisplay (void) const	{ return m_nRestartsInDisplay; }
 
 	// Counts between the F events of two frames in a row, in the CPLD's
 	// count: the last, and the smallest and largest of the last
@@ -107,6 +120,10 @@ public:
 
 	// ULA T-states per Pi timer tick in use.
 	double Rate (void) const		{ return m_nRate; }
+
+	// When the next frame starts, in Pi timer ticks, in stopped mode with
+	// the phase held; FALSE otherwise. For planning SMI restarts.
+	bool NextFrameStartTicks (double &rTicks) const;
 
 private:
 	void FrameEvent (uint64_t nCount, double nTicks);
@@ -121,6 +138,9 @@ private:
 	double		m_nTickFrequency;
 
 	bool		m_bStopped;
+	bool		m_bStoppedSinceReset;	// a frame was short since the last reset
+	bool		m_bHaveClass;
+	TMachine	m_Class;		// from the frame period
 	unsigned	m_nStoppedVotes;
 	unsigned	m_nFreeVotes;
 
@@ -145,6 +165,9 @@ private:
 	bool		m_bPendingFrame;	// an F event waits for its read time
 	uint64_t	m_nPendingFrameCount;
 	bool		m_bRestarted;		// reads restarted since the last empty pair
+	bool		m_bRestartInBorder;
+	uint64_t	m_nRestartsInDisplay;
+	uint64_t	m_nLastCount;		// count of the last empty pair
 	uint64_t	m_nPrevStall;		// stall at the last pair that decided it
 	uint64_t	m_nLastEvent;		// last count given on
 	double		m_nHoldUntil;		// no contention before this tick
