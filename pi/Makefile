@@ -2,7 +2,7 @@
 # SP-Pie video service for the Raspberry Pi Zero 2 W (Circle, AArch64).
 #
 #   gmake               build kernel8.img
-#   gmake OVERLAY=1     build with the on-screen instrumentation lines
+#   gmake OVERLAY=0     build without the on-screen instrumentation lines
 #   gmake test          build and run the host tests (no Circle world needed)
 #   gmake clean
 #
@@ -11,7 +11,7 @@
 #
 
 CIRCLE_WORLD ?= ../circle-libsdl2/circle-stdlib-rpi3
-OVERLAY      ?= 0
+OVERLAY      ?= 1
 
 ifneq ($(filter-out test test-clean,$(MAKECMDGOALS)),)
 NEED_WORLD = 1

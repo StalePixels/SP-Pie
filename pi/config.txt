@@ -10,6 +10,10 @@ kernel=kernel8.img
 kernel_address=0x80000
 initial_turbo=0
 
+# Run the ARM cores at their full clock (1000 MHz on the Zero 2 W) all the
+# time. Without it the firmware leaves them at 600 MHz.
+force_turbo=1
+
 # HDMI on even when no display is detected at start-up, in CEA mode 31
 # (1920 x 1080, 50 Hz). 50 Hz is the Spectrum frame rate.
 hdmi_force_hotplug=1

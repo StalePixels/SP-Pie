@@ -138,7 +138,7 @@ A Z80 writing as fast as it can (PUSH) makes about 640,000 writes a second, abou
 
 ### Renderer
 
-The frame buffer is 480 x 270 pixels at 32 bits per pixel, 16:9, which the firmware scales by exactly 4 to the HDMI mode. `config.txt` sets 1920 x 1080 at 50 Hz (CEA mode 31), with HDMI on even when no display is detected at start-up. The Spectrum picture is 352 x 270 pixels in the middle and fills the height: the 256 x 192 screen with 48 pixels of border left and right and 39 lines above and below. The World of Spectrum 48K reference gives the visible border as 48 pixels at each side, 48 lines above the screen and 56 below ("The border is 48 pixels wide at each side"; of the 64 lines before the screen "at least the last 48 of these are actual border-lines"; then "56 border lines"). The display shows all of the side border and the 39 lines nearest the screen above and below. The areas left and right of the picture are black.
+The frame buffer is 480 x 270 pixels at 32 bits per pixel, 16:9, which the firmware scales by exactly 4 to the HDMI mode. `config.txt` sets 1920 x 1080 at 50 Hz (CEA mode 31), with HDMI on even when no display is detected at start-up, and `force_turbo=1` keeps the ARM cores at their full 1000 MHz. The Spectrum picture is 352 x 270 pixels in the middle and fills the height: the 256 x 192 screen with 48 pixels of border left and right and 39 lines above and below. The World of Spectrum 48K reference gives the visible border as 48 pixels at each side, 48 lines above the screen and 56 below ("The border is 48 pixels wide at each side"; of the 64 lines before the screen "at least the last 48 of these are actual border-lines"; then "56 border lines"). The display shows all of the side border and the 39 lines nearest the screen above and below. The areas left and right of the picture are black.
 
 `src/renderer.cpp` draws a frame in 8-pixel blocks, 44 a line, in the order the ULA shows them. 1 T-state is two pixels, so each block has a T-state; the first screen byte of each line is at the line's first-pixel T-state. Before each block, the renderer applies every event of the frame before that T-state. A screen block then takes its pixel byte, attribute, screen bank (port 0x7FFD bit 3) and colours from the state, and a border block its border colour. The ULA changes the border only at these 8-pixel blocks, every 4 T-states (World of Spectrum: "you cannot change the border within a 'byte', an 8-pixel chunk"). After the last block, the rest of the frame's events are applied, which leaves the state at the start of the next frame.
 
@@ -193,7 +193,7 @@ The first build compiles newlib and libc++ and takes a long time. It also clones
 
 ```sh
 gmake                # kernel8.img
-gmake OVERLAY=1      # kernel8.img with the on-screen counters
+gmake OVERLAY=0      # kernel8.img without the on-screen counters
 ```
 
 `CIRCLE_WORLD=/path/to/circle-stdlib` uses a different rpi3 world.
@@ -214,7 +214,7 @@ The board has no serial console. When start-up fails, the ACT LED blinks a code 
 
 ## Instrumentation
 
-With `OVERLAY=1`, the counters are shown as text in the black areas left and right of the Spectrum picture. The overlay never draws over the picture or its border. Per-frame values are from the HDMI frame before; the others are since boot.
+With `OVERLAY=1` (the default), the counters are shown as text in the black areas left and right of the Spectrum picture. The overlay never draws over the picture or its border. Per-frame values are from the HDMI frame before; the others are since boot.
 
 Left side:
 
