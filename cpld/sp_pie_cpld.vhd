@@ -13,12 +13,13 @@
 --
 -- Clock domains
 --
---   Write side: clocked by wclk = /WR and /RESET. Each Z80 write ends with a
---   wclk rising edge, and that edge stores the event and advances the write
---   pointer. The end of a reset (/RESET rising, with /WR high) is one more
---   wclk rising edge, and that edge stores the reset event. The
---   edge-connector clock (pin 62) is not used, so the logic does not depend on
---   its phase (inverted on the +2A/+3) or on clock stretching.
+--   Write side: clocked by wclk = /WR and rst_n, where rst_n is /RESET after
+--   a filter. Each Z80 write ends with a wclk rising edge, and that edge
+--   stores the event and advances the write pointer. The end of a reset
+--   (rst_n rising, with /WR high) is one more wclk rising edge, and that edge
+--   stores the reset event. The edge-connector clock (pin 62) clocks only the
+--   /RESET filter, so the capture does not depend on its phase (inverted on
+--   the +2A/+3) or on clock stretching.
 --
 --   Read side: clocked by the rising edge of the Pi SMI read strobe SOE
 --   (GPIO 6). Each rising edge ends one SMI read and loads the next half-word.
@@ -47,7 +48,7 @@ entity sp_pie_cpld is
     BUS_RESET       : in  std_logic;  -- /RESET, input only
     BUS_ROMCS       : out std_logic;  -- /ROMCS, always high impedance
     M1              : in  std_logic;  -- /M1, for the interrupt acknowledge
-    CLK             : in  std_logic;  -- edge-connector clock, not used
+    CLK             : in  std_logic;  -- edge-connector clock, filters /RESET
 
     -- Raspberry Pi SMI and GPIO.
     PI_SA           : in  std_logic_vector(5 downto 0);  -- GPIO 0-5, ignored
@@ -116,6 +117,8 @@ architecture rtl of sp_pie_cpld is
   -- Write side (/WR domain)
   ---------------------------------------------------------------------------
   signal wclk      : std_logic;
+  signal rst_sr    : std_logic_vector(3 downto 0) := (others => '0');
+  signal rst_n     : std_logic := '0';  -- /RESET after the filter
   signal iorq_n    : std_logic;
   signal io_set    : std_logic;
   signal io_seen   : std_logic := '0';
@@ -162,11 +165,30 @@ begin
   -- Pins 98 and 76 both carry /IORQ. Either one low means /IORQ is low.
   iorq_n <= BUS_IORQ_i and BUS_IORQ_COPY_i;
 
-  -- Write-side clock. While /RESET is high it is /WR. While /RESET is low it
+  -- /RESET filter. The edge-connector /RESET line can carry pulses of a few
+  -- nanoseconds that are not resets. A real reset lasts milliseconds. /RESET
+  -- is sampled on each rising edge of the edge-connector clock, and rst_n
+  -- changes only when the last four samples agree (about 1.1 us at 3.5 MHz).
+  -- rst_n is a register output, so it has clean edges. The clock runs during
+  -- a reset. Its phase does not matter here.
+  p_rst_filter : process (CLK)
+  begin
+    if rising_edge(CLK) then
+      rst_sr <= rst_sr(2 downto 0) & BUS_RESET;
+      if rst_sr = "0000" then
+        rst_n <= '0';
+      elsif rst_sr = "1111" then
+        rst_n <= '1';
+      end if;
+    end if;
+  end process;
+
+  -- Write-side clock. While rst_n is high it is /WR. While rst_n is low it
   -- is low, so /WR edges during a reset are ignored. The Z80 holds /WR high
-  -- while /RESET is low and after it, so the end of a reset gives one rising
-  -- edge of its own and does not merge with the next write.
-  wclk <= BUS_WR and BUS_RESET;
+  -- while /RESET is low and for some microseconds after it, so the end of a
+  -- reset gives one rising edge of its own and does not merge with the next
+  -- write.
+  wclk <= BUS_WR and rst_n;
 
   ---------------------------------------------------------------------------
   -- Write capture
@@ -189,9 +211,9 @@ begin
   --   /WR are both low (about 2.5 T-states on an I/O write). It holds its value
   --   through the wclk rising edge.
   --
-  -- Reset detection: rst_seen is set asynchronously while /RESET is low and
+  -- Reset detection: rst_seen is set asynchronously while rst_n is low and
   -- cleared at the next wclk falling edge, which is the /WR falling edge of
-  -- the first write after the reset. At the wclk rising edge made by /RESET
+  -- the first write after the reset. At the wclk rising edge made by rst_n
   -- going high, rst_seen is 1 and a reset event is stored. At the end of
   -- every later write it is 0. rst_seen does not change at that edge (it was
   -- set before and stays set), so the edge needs no synchronizer.
@@ -226,9 +248,9 @@ begin
     end if;
   end process;
 
-  p_rst_seen : process (wclk, BUS_RESET)
+  p_rst_seen : process (wclk, rst_n)
   begin
-    if BUS_RESET = '0' then
+    if rst_n = '0' then
       rst_seen <= '1';
     elsif falling_edge(wclk) then
       rst_seen <= '0';
@@ -241,7 +263,7 @@ begin
   -- or the new pointer, never a mix. The sample has the whole wclk low time
   -- (at least one T-state, about 280 ns at 3.5 MHz) to settle from
   -- metastability before it is used. For the reset event, the sample is the
-  -- one taken when /RESET went low (or the last /WR falling edge before it).
+  -- one taken when rst_n went low (or the last /WR falling edge before it).
   -- A stale read pointer only makes the queue look fuller than it is; it can
   -- never let a write overrun an entry the Pi has not read.
   p_rp_wsync : process (wclk, PI_SYNC)
@@ -285,9 +307,9 @@ begin
              else '0';
 
   -- ULAplus registers for read-back. Cleared while /RESET is low.
-  p_ulaplus : process (wclk, BUS_RESET)
+  p_ulaplus : process (wclk, rst_n)
   begin
-    if BUS_RESET = '0' then
+    if rst_n = '0' then
       ulap_modegrp <= '0';
       ulap_mode    <= (others => '0');
       ulap_last    <= (others => '0');

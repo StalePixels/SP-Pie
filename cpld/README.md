@@ -74,13 +74,21 @@ registers. Writes to both ports are also ordinary I/O events.
 
 ## Reset event
 
-The write side is clocked by `wclk = /WR and /RESET`. While /RESET is high,
-`wclk` is /WR. While /RESET is low, `wclk` is low, so /WR edges during a reset
-have no effect. The Z80 holds /WR high while /RESET is low and after it, so
-the end of a reset is a `wclk` rising edge of its own, separate from the next
-write.
+/RESET goes through a filter first. The edge-connector /RESET line can carry
+pulses of a few nanoseconds that are not resets, and a real reset lasts
+milliseconds. The CPLD samples /RESET on each rising edge of the
+edge-connector clock (pin 62), and the filtered signal `rst_n` changes only
+when the last four samples agree, about 1.1 µs at 3.5 MHz. `rst_n` is a
+register output, so it has clean edges. The filter does not depend on the
+clock's phase.
 
-- `rst_seen` is set asynchronously while /RESET is low and cleared at the next
+The write side is clocked by `wclk = /WR and rst_n`. While `rst_n` is high,
+`wclk` is /WR. While `rst_n` is low, `wclk` is low, so /WR edges during a
+reset have no effect. The Z80 holds /WR high while /RESET is low and for some
+microseconds after it, so the end of a reset is a `wclk` rising edge of its
+own, separate from the next write.
+
+- `rst_seen` is set asynchronously while `rst_n` is low and cleared at the next
   `wclk` falling edge, which is the /WR falling edge of the first write after
   the reset.
 - At the `wclk` rising edge made by /RESET going high, `rst_seen` is 1, so the
@@ -103,7 +111,8 @@ write.
 ## Write capture
 
 The event is stored on the rising edge of `wclk` (/WR while /RESET is high),
-at the end of the write. The edge-connector clock is not used.
+at the end of the write. The edge-connector clock is used only by the /RESET
+filter.
 
 - At the /WR rising edge, D0 to D7 are valid for memory writes and for I/O
   writes. Memory write data is valid before /WR falls. I/O write data can
@@ -217,7 +226,7 @@ give one transition only.
 | `BUS_RESET` | /RESET, input only | 1 |
 | `BUS_ROMCS` | /ROMCS, high impedance | 6 |
 | `M1` | /M1, for the interrupt acknowledge | 18 |
-| `CLK` | Edge-connector clock, not used | 62 |
+| `CLK` | Edge-connector clock, for the /RESET filter | 62 |
 | `PI_SA(0)` | GPIO 5 (SA0), ignored | 49 |
 | `PI_SA(1)` | GPIO 4 (SA1), ignored | 72 |
 | `PI_SA(2)` | GPIO 3 (SA2), ignored | 74 |
@@ -335,12 +344,12 @@ From the Quartus 13.0sp1 fitter report. A MAX II logic element (LE) has one 4-in
 | Design | Logic elements | Pins |
 |---|---|---|
 | Upstream TK-Pie CPLD | 37 | 63 |
-| This design, DEPTH 4 | 190 | 61 |
-| This design, DEPTH 2 | 120 | 61 |
+| This design, DEPTH 4 | 195 | 61 |
+| This design, DEPTH 2 | 125 | 61 |
 
 DEPTH 4 is the default. Each queue entry costs about 35 LEs.
 
-The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures (DEPTH 4) are 57.5 MHz for the write clock and 98.0 MHz for the SOE clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
+The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures (DEPTH 4) are 53.1 MHz for the write clock, 94.1 MHz for the SOE clock and 303 MHz for the edge-connector clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
 
 ## Not verified
 
@@ -349,7 +358,7 @@ The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses 
 - The /IORQ flag and the frame flag use an asynchronous set driven by logic
   (/IORQ and /WR both low; /M1 and /IORQ both low). How Quartus implements
   them on MAX II is not known.
-- The write-side clock `wclk` is made by logic (/WR and /RESET). Quartus
+- The write-side clock `wclk` is made by logic (/WR and `rst_n`). Quartus
   puts it on a global clock; its skew against the bus inputs is not known.
 - The rise time of /RESET on each Spectrum model, and whether a slow or
   bouncing edge gives more than one reset event.

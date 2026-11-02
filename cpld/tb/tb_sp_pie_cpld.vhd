@@ -442,9 +442,9 @@ begin
       reset_n <= '0';
       a       <= x"DA5A";
       d       <= x"A5";
-      wait for 3 * TCPU;
+      wait for 8 * TCPU;
       reset_n <= '1';
-      wait for TCPU;
+      wait for 8 * TCPU;
       a       <= (others => 'X');
       d       <= (others => 'Z');
     end procedure;
@@ -475,9 +475,9 @@ begin
     report "testbench DEPTH = " & integer'image(DEPTH);
 
     -- Power-up with /RESET low.
-    wait for 1 us;
+    wait for 3 us;
     reset_n <= '1';
-    wait for 1 us;
+    wait for 3 us;
 
     -- Static outputs.
     if romcs /= 'Z' then fail("/ROMCS is not high impedance"); end if;
@@ -764,6 +764,25 @@ begin
     io_read(16#FF3B#, rb);
     if rb /= x"00" then fail("ULAplus: mode after reset " & to_hstring(rb) & ", expected 00"); end if;
     check("ULAplus registers cleared by /RESET");
+
+    -- /RESET filter: low pulses shorter than four edge-connector clocks are
+    -- not resets. No reset event, and writes before and after them arrive.
+    reader_on;
+    mw(16#4123#, 16#5A#);
+    for i in 1 to 5 loop
+      wait until rising_edge(cpu_clk);
+      reset_n <= '0';
+      wait for 50 ns * i;
+      reset_n <= '1';
+      wait for 6 * TCPU;
+    end loop;
+    wait until rising_edge(cpu_clk);
+    reset_n <= '0';
+    wait for 2 * TCPU;
+    reset_n <= '1';
+    wait for 2 * TCPU;
+    mw(16#4124#, 16#A5#);
+    check("/RESET filter: short pulses give no reset event");
 
     -------------------------------------------------------------------------
     -- Results.
