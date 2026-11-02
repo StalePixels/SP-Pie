@@ -296,11 +296,28 @@ Quartus II 13.0sp1 Web Edition runs only on x86-64 Linux or Windows. On an Apple
 
 `QUARTUS_HOME` selects another installation and `QUARTUS_IMAGE` another container image.
 
-To make an `.svf` for openFPGALoader:
+## Programming
+
+Programming uses openFPGALoader (Homebrew) and an Altera USB-Blaster on the JTAG header CN3, which has the standard Altera 10-pin layout (1 TCK, 2 GND, 3 TDO, 4 VCC, 5 TMS, 9 TDI, 10 GND). The board must have power: the blaster only senses VCC on pin 4. A Pi on the board, powered from its own USB, gives the board power.
+
+`quartus_cpf` makes a programming `.svf` (`-n p`) and a verify `.svf` (`-n v`) from the `.pof`. Run it inside the `quartus13-env` container, as `quartus.sh` runs Quartus:
 
 ```sh
 quartus_cpf -c -q 10MHz -g 3.3 -n p output_files/sp_pie_cpld.pof output_files/sp_pie_cpld.svf
+quartus_cpf -c -q 10MHz -g 3.3 -n v output_files/sp_pie_cpld.pof output_files/sp_pie_cpld_verify.svf
 ```
+
+Then, on the Mac:
+
+```sh
+openFPGALoader --detect -c usb-blaster          # finds EPM240T100C5N, IDCODE 0x20A10DD
+openFPGALoader -c usb-blaster output_files/sp_pie_cpld.svf
+openFPGALoader -c usb-blaster output_files/sp_pie_cpld_verify.svf
+```
+
+openFPGALoader compares the TDO values in the verify `.svf`, so a device that holds a different design fails with "TDO value ... isn't the one expected". "TDO is stuck at 0" in the scan means the blaster gets no VCC on pin 4, no ground, or no answer from the board.
+
+The upstream TK-Pie design can be put back the same way from `upstream/CPLD/EPM240.pof`.
 
 ## Logic elements
 
@@ -329,4 +346,4 @@ The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses 
 - The SOE low and high times the read side needs. They depend on the Quartus
   timing report.
 - The Z80A (NMOS) data hold time after /WR rises.
-- Behaviour on hardware.
+- Behaviour on hardware. The design is programmed and verified in a board, but not yet run with the Pi software on a Spectrum.
