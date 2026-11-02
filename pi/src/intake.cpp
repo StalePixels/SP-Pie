@@ -7,22 +7,48 @@
 
 namespace sppie {
 
-size_t ProcessWords (const volatile uint32_t *pWords, size_t nCount,
-		     IEventSink &rSink, TIntakeCounters &rCounters,
+size_t ProcessWords (const volatile uint32_t *pWords, size_t nCount, uint64_t nFirstWord,
+		     IEventSink &rSink, TIntakeState &rState, TIntakeCounters &rCounters,
 		     bool &bMismatch)
 {
 	bMismatch = false;
 
 	for (size_t i = 0; i < nCount; i++)
 	{
-		TEvent Event;
-		switch (DecodeWord (pWords[i], Event))
+		uint32_t nWord = pWords[i];
+
+		if (!rState.HaveR0)
 		{
-		case WordEmpty:
+			if (!IsR0 (nWord))
+			{
+				rCounters.Mismatches++;
+				bMismatch = true;
+				return i + 1;
+			}
+			rState.R0 = nWord;
+			rState.R0Word = nFirstWord + i;
+			rState.HaveR0 = true;
+			continue;
+		}
+		rState.HaveR0 = false;
+
+		TEvent Event;
+		TPairKind Kind = DecodePair (rState.R0, nWord, Event);
+
+		if (rState.SkipPair && Kind != PairMismatch)
+		{
+			rState.SkipPair = false;
+			continue;
+		}
+
+		switch (Kind)
+		{
+		case PairEmpty:
 			rCounters.EmptyPairs++;
+			rSink.Empty (Event.Count, rState.R0Word);
 			break;
 
-		case WordEvent:
+		case PairEvent:
 			if (Event.Overflow)
 			{
 				rCounters.Overflows++;
@@ -35,15 +61,15 @@ size_t ProcessWords (const volatile uint32_t *pWords, size_t nCount,
 			{
 				rCounters.FrameEvents++;
 			}
-			rSink.Event (Event, i);
 			rCounters.Events++;
+			rSink.Event (Event, rState.R0Word);
 			break;
 
-		case WordMalformed:
+		case PairMalformed:
 			rCounters.Malformed++;
 			break;
 
-		case WordMismatch:
+		case PairMismatch:
 		default:
 			rCounters.Mismatches++;
 			bMismatch = true;

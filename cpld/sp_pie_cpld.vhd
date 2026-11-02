@@ -1,8 +1,8 @@
 -- SP-Pie CPLD logic for the TK-Pie board (Altera EPM240T100C5, MAX II).
 --
 -- The CPLD watches the Spectrum bus and stores every Z80 memory write and
--- every I/O write as one event: the full address, the data byte and the
--- event kind. It does no address decode for events and keeps no paging
+-- every I/O write as one event: the full address, the data byte, the
+-- event kind and the time count of the write. It does no address decode for events and keeps no paging
 -- state. It queues the events and hands them to the Raspberry Pi through SMI
 -- reads. The contract with the Pi is docs/protocol.md.
 --
@@ -17,15 +17,19 @@
 --   a filter. Each Z80 write ends with a wclk rising edge, and that edge
 --   stores the event and advances the write pointer. The end of a reset
 --   (rst_n rising, with /WR high) is one more wclk rising edge, and that edge
---   stores the reset event. The edge-connector clock (pin 62) clocks only the
---   /RESET filter, so the capture does not depend on its phase (inverted on
---   the +2A/+3) or on clock stretching.
+--   stores the reset event. The capture of address, data and kind does not
+--   depend on the phase of the edge-connector clock (inverted on the
+--   +2A/+3) or on clock stretching.
+--
+--   Time base: clocked by the rising edge of the edge-connector clock CLK
+--   (pin 62). It runs the free-running time counter and the /RESET filter.
 --
 --   Read side: clocked by the rising edge of the Pi SMI read strobe SOE
---   (GPIO 6). Each rising edge ends one SMI read and loads the next half-word.
+--   (GPIO 6). Each rising edge ends one SMI read and loads the next read word.
 --
 --   The two sides share the queue storage and exchange the queue pointers in
---   Gray code. See the "Clock-domain crossing" notes below.
+--   Gray code. The time count goes to both sides in Gray code. See the
+--   "Clock-domain crossing" notes below.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -48,15 +52,15 @@ entity sp_pie_cpld is
     BUS_RESET       : in  std_logic;  -- /RESET, input only
     BUS_ROMCS       : out std_logic;  -- /ROMCS, always high impedance
     M1              : in  std_logic;  -- /M1, for the interrupt acknowledge
-    CLK             : in  std_logic;  -- edge-connector clock, filters /RESET
+    CLK             : in  std_logic;  -- edge-connector clock: time count, /RESET filter
 
     -- Raspberry Pi SMI and GPIO.
     PI_SA           : in  std_logic_vector(5 downto 0);  -- GPIO 0-5, ignored
     PI_SOE          : in  std_logic;                     -- GPIO 6, read strobe, active low
     PI_SWE          : in  std_logic;                     -- GPIO 7, ignored
     PI_SD           : out std_logic_vector(15 downto 0); -- GPIO 8-23, read data
-    PI_SD16         : out std_logic;                     -- GPIO 24, driven low
-    PI_SD17         : out std_logic;                     -- GPIO 25, driven low
+    PI_SD16         : out std_logic;                     -- GPIO 24, read data bit 16
+    PI_SD17         : out std_logic;                     -- GPIO 25, read data bit 17
     PI_SYNC         : in  std_logic;                     -- GPIO 26, high resets the queue
     PI_NOT_EMPTY    : out std_logic                      -- GPIO 27, high when queued
   );
@@ -96,22 +100,30 @@ architecture rtl of sp_pie_cpld is
     return b;
   end function;
 
-  -- Event KIND codes, as sent in half-word 0. Code 11 is never sent.
+  -- Event KIND codes, as sent in read word 0. Code 11 is never sent.
   constant K_MEM   : std_logic_vector(1 downto 0) := "00";
   constant K_IO    : std_logic_vector(1 downto 0) := "01";
   constant K_RESET : std_logic_vector(1 downto 0) := "10";
 
-  -- Queue storage. Each entry holds the address, DATA, KIND, the OVF mark
-  -- and the F mark. V is not stored: an entry is valid when it lies between
-  -- the pointers.
+  -- Queue storage. Each entry holds the address, DATA, KIND, the time count
+  -- T4..T0 (Gray code), the OVF mark and the F mark. V is not stored: an
+  -- entry is valid when it lies between the pointers.
   type adr_arr_t  is array (0 to DEPTH - 1) of std_logic_vector(15 downto 0);
   type dat_arr_t  is array (0 to DEPTH - 1) of std_logic_vector(7 downto 0);
   type kind_arr_t is array (0 to DEPTH - 1) of std_logic_vector(1 downto 0);
+  type time_arr_t is array (0 to DEPTH - 1) of std_logic_vector(4 downto 0);
   signal q_adr  : adr_arr_t;
   signal q_dat  : dat_arr_t;
   signal q_kind : kind_arr_t;
+  signal q_time : time_arr_t;
   signal q_ovf  : std_logic_vector(DEPTH - 1 downto 0);
   signal q_frm  : std_logic_vector(DEPTH - 1 downto 0);
+
+  ---------------------------------------------------------------------------
+  -- Time base (CLK domain)
+  ---------------------------------------------------------------------------
+  signal cnt_bin  : unsigned(4 downto 0) := (others => '0');
+  signal cnt_gray : std_logic_vector(4 downto 0) := (others => '0');
 
   ---------------------------------------------------------------------------
   -- Write side (/WR domain)
@@ -152,18 +164,32 @@ architecture rtl of sp_pie_cpld is
   signal rp_gray   : ptr_t := (others => '0');
   signal wp_rsync1 : ptr_t := (others => '0');
   signal wp_rsync2 : ptr_t := (others => '0');  -- write pointer seen by the read side
-  signal sd_r      : std_logic_vector(14 downto 0) := (others => '0');
-  signal hw1       : std_logic := '0';  -- 1 while PI_SD holds half-word 1
+  signal sd_r      : std_logic_vector(14 downto 0) := (others => '0');  -- SD14..SD0
+  signal sd_t      : std_logic_vector(1 downto 0)  := (others => '0');  -- SD17, SD16
+  signal hw1       : std_logic := '0';  -- 1 while the output register holds R1
   signal cur_valid : std_logic := '0';  -- the pair on PI_SD is an event, not empty
 
 begin
 
   BUS_ROMCS <= 'Z';
-  PI_SD16   <= '0';
-  PI_SD17   <= '0';
 
   -- Pins 98 and 76 both carry /IORQ. Either one low means /IORQ is low.
   iorq_n <= BUS_IORQ_i and BUS_IORQ_COPY_i;
+
+  -- Time counter. A free-running 5-bit binary counter counts the rising
+  -- edges of the edge-connector clock. Neither SYNC nor /RESET resets it.
+  -- cnt_gray is a register that holds the reflected binary Gray code of the
+  -- counter (one clock behind it), so exactly one bit of cnt_gray changes at
+  -- each rising edge of CLK, and it changes without glitches. The write side
+  -- and the read side sample cnt_gray at edges that have no fixed relation
+  -- to CLK; a sample taken while it changes is the old or the new count.
+  p_count : process (CLK)
+  begin
+    if rising_edge(CLK) then
+      cnt_bin  <= cnt_bin + 1;
+      cnt_gray <= std_logic_vector(cnt_bin xor shift_right(cnt_bin, 1));
+    end if;
+  end process;
 
   -- /RESET filter. The edge-connector /RESET line can carry pulses of a few
   -- nanoseconds that are not resets. A real reset lasts milliseconds. /RESET
@@ -193,11 +219,18 @@ begin
   ---------------------------------------------------------------------------
   -- Write capture
   --
-  -- The event is stored on the wclk rising edge at the end of the write. At that
-  -- edge D0-D7 are valid for memory writes (valid before /WR falls) and for
-  -- I/O writes (valid shortly after /WR falls), and the Z80 holds address and
-  -- data for about half a T-state after /WR rises. Capture at the falling
+  -- The event is stored on the wclk rising edge at the end of the write. At
+  -- that edge D0-D7 are valid for memory writes (valid before /WR falls) and
+  -- for I/O writes (valid shortly after /WR falls), and the Z80 holds address
+  -- and data for about half a T-state after /WR rises. Capture at the falling
   -- edge would miss late I/O data, so it is not used.
+  --
+  -- Clock-domain crossing, time count into the write side: the same wclk
+  -- rising edge stores cnt_gray as the event's T4..T0. Gray code makes the
+  -- sample the old or the new count when the edge comes as cnt_gray changes.
+  -- The stored value is read at least two SOE edges later, so it has time to
+  -- settle. The wclk edge at the end of a reset is made by rst_n, a CLK
+  -- register, so it always comes just after a CLK rising edge.
   --
   -- /MREQ and /IORQ rise at the same clock edge as /WR, so they cannot be read
   -- at the /WR rising edge. They are remembered while /WR is low:
@@ -366,6 +399,7 @@ begin
         q_adr(idx)  <= st_adr;
         q_dat(idx)  <= st_dat;
         q_kind(idx) <= st_kind;
+        q_time(idx) <= cnt_gray;
         q_ovf(idx)  <= ovf_flag;
         q_frm(idx)  <= frm_flag;
       end if;
@@ -392,16 +426,24 @@ begin
   ---------------------------------------------------------------------------
   -- SMI read side
   --
-  -- PI_SD changes only on the SOE rising edge, the end of a read, so each read
-  -- sees data that has been stable since the previous read ended.
+  -- SD0..SD17 change only on the SOE rising edge, the end of a read, so each
+  -- read sees data that has been stable since the previous read ended.
   --
-  -- Half-word 0: H = 0, V, OVF, F, KIND, 0, A15, DATA.
-  -- Half-word 1: H = 1, A14..A0.
+  -- Event R0: T4, T3, H = 0, V = 1, OVF, F, KIND, T2, A15, DATA.
+  -- Event R1: T1, T0, H = 1, A14..A0.
+  -- Empty R0: all 0 except C4..C0 in bits 4..0, the live count cnt_gray
+  --           sampled at the SOE rising edge that loads this R0.
+  -- Empty R1: H = 1, all other bits 0.
   --
-  -- After half-word 0 is read, PI_SD is loaded with half-word 1 of the same
-  -- entry. After half-word 1 is read, the entry is removed (if the pair was an
-  -- event) and the next entry is loaded as half-word 0, or an empty pair when
-  -- the queue is empty.
+  -- After R0 is read, the output register is loaded with R1 of the same
+  -- entry. After R1 is read, the entry is removed (if the pair was an event)
+  -- and the next entry is loaded as R0, or an empty pair when the queue is
+  -- empty.
+  --
+  -- Clock-domain crossing, time count into the read side: cnt_gray is
+  -- sampled once, into the output register, at the SOE edge that loads an
+  -- empty R0. Gray code makes the sample the old or the new count. The Pi
+  -- reads it a full read later, so the register has that read to settle.
   --
   -- Clock-domain crossing, write pointer into the read side: wp_gray passes
   -- through two registers clocked by SOE. Gray code makes each sample the old
@@ -422,6 +464,7 @@ begin
       wp_rsync1 <= (others => '0');
       wp_rsync2 <= (others => '0');
       sd_r      <= (others => '0');
+      sd_t      <= (others => '0');
       hw1       <= '0';
       cur_valid <= '0';
     elsif rising_edge(PI_SOE) then
@@ -432,14 +475,16 @@ begin
       ridx   := to_integer(rp_bin(IW - 1 downto 0));
 
       if hw1 = '0' then
-        -- Half-word 0 was read. Present half-word 1: H = 1, A14..A0.
+        -- R0 was read. Present R1: T1, T0, H = 1, A14..A0, or the empty R1.
         sd_r <= (others => '0');
+        sd_t <= (others => '0');
         if cur_valid = '1' then
           sd_r <= q_adr(ridx)(14 downto 0);
+          sd_t <= q_time(ridx)(1 downto 0);
         end if;
         hw1 <= '1';
       else
-        -- Half-word 1 was read. Finish the pair and present the next half-word 0.
+        -- R1 was read. Finish the pair and present the next R0.
         if cur_valid = '1' then
           rp_n := rp_bin + 1;
         else
@@ -448,17 +493,21 @@ begin
         nidx := to_integer(rp_n(IW - 1 downto 0));
 
         sd_r <= (others => '0');
+        sd_t <= (others => '0');
         if bin2gray(rp_n) /= wp_rsync2 then
+          sd_t               <= q_time(nidx)(4 downto 3);
           sd_r(14)           <= '1';
           sd_r(13)           <= q_ovf(nidx);
           sd_r(12)           <= q_frm(nidx);
           sd_r(11 downto 10) <= q_kind(nidx);
+          sd_r(9)            <= q_time(nidx)(2);
           sd_r(8)            <= q_adr(nidx)(15);
           sd_r(7 downto 0)   <= q_dat(nidx);
           cur_valid          <= '1';
         else
-          -- Queue empty: empty pair, half-word 0 is all zero.
-          cur_valid <= '0';
+          -- Queue empty: empty pair, R0 carries the live count.
+          sd_r(4 downto 0) <= cnt_gray;
+          cur_valid        <= '0';
         end if;
         rp_gray <= bin2gray(rp_n);
         hw1     <= '0';
@@ -466,7 +515,9 @@ begin
     end if;
   end process;
 
-  PI_SD <= hw1 & sd_r;
+  PI_SD   <= hw1 & sd_r;
+  PI_SD16 <= sd_t(0);
+  PI_SD17 <= sd_t(1);
 
   -- NOT_EMPTY compares the two pointers directly, across the clock domains.
   -- It can glitch for a moment when a pointer changes. The protocol marks it

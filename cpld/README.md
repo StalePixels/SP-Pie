@@ -26,21 +26,44 @@ The queue depth is the generic `DEPTH` (default 4, a power of two, at least 2).
 ## What the logic does
 
 Every Z80 memory write and every I/O write is one event. The event holds the
-full address A15 to A0, the data byte and the event kind (KIND 00 for a
-memory write, 01 for an I/O write). The CPLD does no address decode for
+full address A15 to A0, the data byte, the event kind (KIND 00 for a
+memory write, 01 for an I/O write) and the time count T4 to T0 at the end of
+the write (see [Time base](#time-base)). The CPLD does no address decode for
 events and keeps no paging state. The Pi decides what each write means.
 
 When /RESET goes high, the logic queues a reset event (KIND 10, address 0,
 DATA 0). It goes into the queue after every event from before the reset and
 before every event from after it. See [Reset event](#reset-event).
 
-Each event goes into the queue with its address, DATA, KIND, an OVF mark and
-an F mark. When the queue is full, the event is dropped and an overflow flag
+Each event goes into the queue with its address, DATA, KIND, time count, an
+OVF mark and an F mark. When the queue is full, the event is dropped and an overflow flag
 is set. The next event that is stored carries OVF = 1 and clears the flag. So
 OVF = 1 marks the first event after one or more drops. A reset event follows
 the same rule: if the queue is full at the end of a reset, the reset event is
 dropped, and the first event stored after it carries OVF = 1. The Pi then
 gets no reset event for that reset.
+
+### Time base
+
+A free-running 5-bit counter counts the rising edges of the edge-connector
+clock (`CLK`, pin 62). Neither SYNC nor /RESET resets it. A second 5-bit
+register holds the counter's value in reflected binary Gray code
+(`g = b xor (b >> 1)`), one clock behind the counter. Exactly one bit of this
+register changes at each clock edge, and it is a register output, so it has
+no glitches. The count wraps every 32 clocks.
+
+- The `wclk` rising edge that stores an event also stores the Gray count as
+  the event's T4 to T0. For a write this is the /WR rising edge. For a reset
+  event it is the edge made by the filtered /RESET going high, which comes
+  just after a clock edge.
+- The SOE rising edge that loads the R0 of an empty pair samples the Gray
+  count into C4 to C0 of that R0. The R1 that follows is a constant and does
+  not sample it again.
+
+Both sides sample the count at edges that have no fixed relation to `CLK`.
+When a sample is taken as the count changes, Gray code makes it the old count
+or the new one, never a mix. The Pi reads an empty R0 one full read after
+it was loaded, so the sample has that read to settle.
 
 ### Frame flag
 
@@ -111,8 +134,8 @@ own, separate from the next write.
 ## Write capture
 
 The event is stored on the rising edge of `wclk` (/WR while /RESET is high),
-at the end of the write. The edge-connector clock is used only by the /RESET
-filter.
+at the end of the write. The capture of the address, data and kind does not
+use the edge-connector clock.
 
 - At the /WR rising edge, D0 to D7 are valid for memory writes and for I/O
   writes. Memory write data is valid before /WR falls. I/O write data can
@@ -131,16 +154,25 @@ filter.
     while /IORQ and /WR are both low. The flag is still set at the /WR rising
     edge.
 - The edge-connector clock is inverted relative to the CPU clock on the
-  +2A/+3, and may be stretched by contention. The capture uses only /WR,
-  /MREQ, /IORQ, the address and the data, so neither matters.
+  +2A/+3, and may be stretched by contention. The capture of the address,
+  data and kind uses only /WR, /MREQ, /IORQ, the address and the data, so
+  neither matters for those fields. The time count does depend on the clock
+  (see [Time base](#time-base)).
 
 ## Clock domains
 
-There are two clock domains. The write side is clocked by `wclk`, which is
-/WR while /RESET is high, plus one rising edge at the end of a reset. The read side
-is clocked by the rising edge of SOE (Pi GPIO 6). The two edges have no fixed
-relation. The queue pointers cross between them in Gray code, so a pointer
-sampled while it changes is either the old value or the new one.
+There are three clock domains:
+
+- The write side is clocked by `wclk`, which is /WR while /RESET is high,
+  plus one rising edge at the end of a reset.
+- The read side is clocked by the rising edge of SOE (Pi GPIO 6).
+- The time base is clocked by the rising edge of the edge-connector clock
+  `CLK`. It runs the time counter and the /RESET filter.
+
+The edges of the three clocks have no fixed relation. The queue pointers
+cross between the write and read sides in Gray code, and the time count goes
+to both sides in Gray code. A value sampled while it changes is either the
+old value or the new one.
 
 - Read pointer into the write side: one register samples it at the `wclk`
   falling edge. The write side first uses it at the next `wclk` rising edge,
@@ -164,33 +196,41 @@ It can glitch for a moment when a pointer changes. The protocol marks it as
 information only.
 
 SYNC (GPIO 26) is an asynchronous reset of both pointers, the pointer copies,
-the overflow flag, the half-word pointer and the output register. It does not
-touch the frame flag or the ULAplus registers. A write that ends while SYNC is
+the overflow flag, the read-word pointer and the output register. It does not
+touch the time counter, the frame flag or the ULAplus registers. A write that ends while SYNC is
 high is not queued.
 
 ## SMI read side
 
-The output register PI_SD changes only on the SOE rising edge. Half-word 0
-is H = 0, V, OVF, F, KIND, 0, A15 and DATA. Half-word 1 is H = 1 and A14 to
-A0. After
-half-word 0 is read, it loads half-word 1 of the same entry. After half-word 1
-is read, it removes the entry (if the pair was an event) and loads half-word 0
-of the next entry, or an empty pair if the queue looks empty. An empty pair
-reads as 0x0000 then 0x8000. After power-up and after SYNC, the output
-register holds an empty half-word 0, so the first pair is always an empty
-pair.
+The read word is 18 bits wide, SD0 to SD17 (GPIO 8 to 25). The output
+register changes only on the SOE rising edge, all 18 bits together.
 
-PI_SD drives GPIO 8 to 23 all the time, not only during SOE. SD16 and SD17
-(GPIO 24, 25) are driven low. The Pi must not drive these GPIOs.
+| Read word | Bits 17, 16 | Bit 15 | Bits 14 to 0 |
+|---|---|---|---|
+| Event R0 | T4, T3 | H = 0 | V = 1, OVF, F, KIND, T2 (bit 9), A15, DATA |
+| Event R1 | T1, T0 | H = 1 | A14 to A0 |
+| Empty R0 | 0 | H = 0 | 0, except C4 to C0 in bits 4 to 0 |
+| Empty R1 | 0 | H = 1 | 0 |
+
+After R0 is read, the register loads R1 of the same entry. After R1 is read,
+it removes the entry (if the pair was an event) and loads R0 of the next
+entry, or an empty R0 if the queue looks empty. An empty R1 is always
+0x08000. SYNC and power-up clear the output register to an empty R0 with
+C4 to C0 = 0, which no SOE edge has loaded, so the first pair after power-up
+or SYNC does not carry the time count.
+
+SD0 to SD17 drive GPIO 8 to 25 all the time, not only during SOE. The Pi must
+not drive these GPIOs.
 
 ## Pin map
 
 The pin numbers come from the upstream TK-Pie pin assignments
 (`CPLD/EPM240/CPLD_TK-Pie.qsf`). Pins 17 and 21 have no PCB track and are not
-used. Unused pins are reserved as tri-stated inputs. Every input-only pin uses
-the 3.3V Schmitt-trigger input standard. The write side is clocked by /WR and
-/RESET and the read side by SOE, so a slow or noisy edge on those pins must
-give one transition only.
+used. Unused pins are reserved as tri-stated inputs. Every input the logic
+uses has the 3.3V Schmitt-trigger input standard. The write side is clocked by
+/WR and /RESET, the read side by SOE and the time count by CLK, so a slow or
+noisy edge on those pins must give one transition only. The Pi inputs the
+logic ignores (SA0 to SA5, SWE) keep the default standard.
 
 | Port | Signal | CPLD pin |
 |---|---|---|
@@ -226,7 +266,7 @@ give one transition only.
 | `BUS_RESET` | /RESET, input only | 1 |
 | `BUS_ROMCS` | /ROMCS, high impedance | 6 |
 | `M1` | /M1, for the interrupt acknowledge | 18 |
-| `CLK` | Edge-connector clock, for the /RESET filter | 62 |
+| `CLK` | Edge-connector clock, for the time count and the /RESET filter | 62 |
 | `PI_SA(0)` | GPIO 5 (SA0), ignored | 49 |
 | `PI_SA(1)` | GPIO 4 (SA1), ignored | 72 |
 | `PI_SA(2)` | GPIO 3 (SA2), ignored | 74 |
@@ -251,8 +291,8 @@ give one transition only.
 | `PI_SD(13)` | GPIO 21 (SD13) | 39 |
 | `PI_SD(14)` | GPIO 22 (SD14) | 66 |
 | `PI_SD(15)` | GPIO 23 (SD15) | 67 |
-| `PI_SD16` | GPIO 24, SD16, driven low | 58 |
-| `PI_SD17` | GPIO 25, SD17, driven low | 56 |
+| `PI_SD16` | GPIO 24 (SD16) | 58 |
+| `PI_SD17` | GPIO 25 (SD17) | 56 |
 | `PI_SYNC` | GPIO 26, SYNC | 40 |
 | `PI_NOT_EMPTY` | GPIO 27, NOT_EMPTY | 68 |
 
@@ -277,11 +317,16 @@ The testbench has a Z80 bus model and a Pi reader model:
   bus goes to `X` after 60 ns. A design that captures too early or too late
   fails.
 - I/O writes can move /IORQ before or after /WR.
-- The edge-connector clock can be inverted.
+- The edge-connector clock is the Z80 clock, and it can be inverted. /WR
+  rises 40 ns after the falling edge of T3 of the Z80 clock, for memory
+  writes and for I/O writes. The testbench counts the rising edges of the
+  edge-connector clock itself and notes the count at each /WR rising edge
+  and at the end of each reset.
 - The Pi reader reads pairs back to back. SOE low and high times vary
   pseudo-randomly, with no fixed relation to the bus clock. It checks the H
-  bit of every half-word, checks that empty pairs are exactly 0x0000 and
-  0x8000, rejects malformed events, and records every event.
+  bit of every read word, checks that an empty R0 has only C4 to C0 set and
+  that an empty R1 is exactly 0x08000, rejects malformed events, and records
+  every event.
 
 The tests cover:
 
@@ -296,11 +341,32 @@ The tests cover:
 - The F mark: on the first event after an acknowledge only, one F for two
   acknowledges, F on a reset event, and F kept across dropped events.
 - Back-to-back writes three T-states apart (stack pushes) while the Pi reads.
-- Overflow and OVF, and SYNC (queue emptied, overflow cleared, half-word
+- Overflow and OVF, and SYNC (queue emptied, overflow cleared, read-word
   pointer reset).
 - ULAplus read-back: the mode register in the mode group, the last byte
   otherwise, no drive on other ports or between reads, and all three
   registers cleared by /RESET.
+- The time count:
+  - Every event's T4 to T0 is the Gray code of the testbench count at its
+    /WR rising edge, or at the end of the reset for a reset event. This also
+    checks the bit positions: T4, T3 in SD17, SD16 and T2 in bit 9 of R0,
+    and T1, T0 in SD17, SD16 of R1.
+  - Every empty pair's C4 to C0 is the Gray code of the testbench count at
+    the SOE rising edge that loaded its R0. Between two empty pairs in one
+    run of reads, the step of C modulo 32 equals the number of clock edges
+    modulo 32. A difference of one is accepted only when the SOE edge comes
+    at the same time as a clock edge. The first pair of each run of reads is
+    not checked, because the reader did not see the edge that loaded it.
+  - For each event written while the reader runs, the next empty pair has a
+    count at or above the event's and less than 32 above it. The count the
+    Pi rebuilds from T4 to T0 and that empty pair (the latest count at or
+    below the empty pair's count that matches T4 to T0) is the true count of
+    the write.
+  - The count is not reset by SYNC or by /RESET: empty pairs after two SYNCs
+    and after two resets a few clocks apart still carry the testbench count.
+
+Each time check was shown to fail on a copy of the design with that feature
+broken.
 
 Simulation checks function only. It does not check timing or metastability.
 
@@ -344,12 +410,12 @@ From the Quartus 13.0sp1 fitter report. A MAX II logic element (LE) has one 4-in
 | Design | Logic elements | Pins |
 |---|---|---|
 | Upstream TK-Pie CPLD | 37 | 63 |
-| This design, DEPTH 4 | 195 | 61 |
-| This design, DEPTH 2 | 125 | 61 |
+| This design, DEPTH 4 | 206 | 61 |
+| This design, DEPTH 2 | 147 | 61 |
 
-DEPTH 4 is the default. Each queue entry costs about 35 LEs.
+DEPTH 4 is the default.
 
-The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures (DEPTH 4) are 53.1 MHz for the write clock, 94.1 MHz for the SOE clock and 303 MHz for the edge-connector clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
+The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures (DEPTH 4) are 49.1 MHz for the write clock, 76.7 MHz for the SOE clock and 209.2 MHz for the edge-connector clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
 
 ## Not verified
 
@@ -365,4 +431,15 @@ The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses 
 - The SOE low and high times the read side needs. They depend on the Quartus
   timing report.
 - The Z80A (NMOS) data hold time after /WR rises.
+- Whether the edge-connector clock keeps running while the ULA holds the Z80
+  clock during contention, on each Spectrum model. If it stops, the count
+  is not the ULA's T-state count.
+- Whether the /WR rising edge can come at the same time as a rising edge of
+  the edge-connector clock. On the +2A/+3 the edge-connector clock is
+  inverted, so its rising edge is the Z80 clock's falling edge, the edge
+  that /WR rises after. When the two edges meet, Gray code gives the count
+  before or after that clock edge, so the event's count can be one clock
+  off. The same holds for a reset event, whose edge comes just after a
+  clock edge on every model.
+- Metastability of the count samples. The simulation does not model it.
 - Behaviour on hardware. The design is programmed and verified in a board, but not yet run with the Pi software on a Spectrum.

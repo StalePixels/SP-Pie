@@ -6,3 +6,5 @@
 *.map
 .overlay-*
 /test/build/
+/fuseula/gen/
+/fuseula/obj/

@@ -1,3 +1,9 @@
 [submodule "circle-libsdl2"]
 	path = circle-libsdl2
 	url = git@github.com:Xalior/circle-libsdl2.git
+[submodule "fuse"]
+	path = fuse
+	url = https://git.code.sf.net/p/fuse-emulator/fuse
+[submodule "libspectrum"]
+	path = libspectrum
+	url = https://git.code.sf.net/p/fuse-emulator/libspectrum

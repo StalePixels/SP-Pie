@@ -26,7 +26,7 @@
 #ifndef _sppie_eventlog_h
 #define _sppie_eventlog_h
 
-#include "machinetiming.h"
+#include "machine.h"
 #include <stdint.h>
 
 namespace sppie {
@@ -35,7 +35,7 @@ namespace sppie {
 struct TTimedEvent
 {
 	uint32_t	Frame;
-	uint32_t	TState;		// 0 to FrameTStates - 1, from the frame interrupt
+	uint32_t	TState;		// Fuse T-state in the frame, 0 to frame length - 1
 	uint16_t	Address;
 	uint8_t		Kind;		// EventKind
 	uint8_t		Data;
@@ -45,7 +45,7 @@ struct TTimedEvent
 struct TFrameRecord
 {
 	uint32_t	Frame;
-	uint8_t		Machine;	// TMachine: timing of this frame's T-states and decode
+	uint8_t		Machine;	// TMachine: the Fuse machine for this frame
 	uint8_t		Locked;		// 1 when the frame lock was locked
 };
 

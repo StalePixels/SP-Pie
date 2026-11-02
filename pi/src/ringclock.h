@@ -3,12 +3,12 @@
 //
 // Read times of ring words from their position in the ring.
 //
-// SMI reads one event pair every SmiPairNs at a fixed rate, and every pair
-// lands in the ring, empty pairs included. So within one SMI transfer the
-// word number is a clock: word w of a transfer that started at time T0 with
-// word w0 was read at
+// SMI does one read every SmiReadNs at a fixed rate, and every read lands
+// in the ring as one word, empty pairs included. So within one SMI transfer
+// the word number is a clock: word w of a transfer that started at time T0
+// with word w0 was read at
 //
-//     T0 + (w - w0 + 1) * SmiPairNs
+//     T0 + (w - w0 + 1) * SmiReadNs
 //
 // Reads stop between transfers, so each transfer has its own start: the
 // intake core calls StartTransfer () with the first word number and the
@@ -41,7 +41,7 @@ public:
 	static const unsigned MaxStarts = 16;
 
 	explicit CRingClock (uint64_t nTickFrequency)
-	:	m_nPairQ (  (uint64_t) SmiPairNs * nTickFrequency * 65536 / 1000000000)
+	:	m_nReadQ ((uint64_t) SmiReadNs * nTickFrequency * 65536 / 1000000000)
 	{
 		Reset ();
 	}
@@ -85,7 +85,7 @@ public:
 			const TStart &rStart = m_Starts[m_nFirst];
 			if (nWord >= rStart.nWord)
 			{
-				nStamp = rStart.nTicks + (((nWord - rStart.nWord + 1) * m_nPairQ) >> 16);
+				nStamp = rStart.nTicks + (((nWord - rStart.nWord + 1) * m_nReadQ) >> 16);
 			}
 			if (nStamp > nSeen)
 			{
@@ -109,7 +109,7 @@ private:
 		uint64_t	nTicks;
 	};
 
-	const uint64_t	m_nPairQ;	// ticks per pair, Q16
+	const uint64_t	m_nReadQ;	// ticks per read, Q16
 	TStart		m_Starts[MaxStarts];
 	unsigned	m_nFirst;
 	unsigned	m_nCount;

@@ -1,19 +1,22 @@
 //
 // event.h
 //
-// Event words from the CPLD, as defined in docs/protocol.md.
+// Read words from the CPLD, as defined in docs/protocol.md.
 //
 // The CPLD sends every Z80 memory write and every I/O write as one event,
-// with the full address and the data byte. It does no decode; the Pi decides
-// what each write means (see spectrumstate.h).
+// with the full address, the data byte and its time count. It does no
+// decode; Fuse decides what each write means (see presenter.h).
 //
-// One event is two 16-bit SMI reads. With 16-bit SMI and DMA packing, the
-// pair arrives as one 32-bit word: half-word 0 in bits 15..0, half-word 1 in
-// bits 31..16.
+// SMI runs in 18-bit mode. Each read is one ring word, with the read word
+// in bits 17..0. A pair is two reads, R0 then R1.
 //
-// Half-word 0:  bit 15 H = 0, bit 14 V, bit 13 OVF, bit 12 F,
-//               bits 11..10 KIND, bit 9 zero, bit 8 A15, bits 7..0 DATA
-// Half-word 1:  bit 15 H = 1, bits 14..0 A14..A0
+// Event R0:   bit 17 T4, bit 16 T3, bit 15 H = 0, bit 14 V = 1, bit 13 OVF,
+//             bit 12 F, bits 11..10 KIND, bit 9 T2, bit 8 A15, bits 7..0 DATA
+// Event R1:   bit 17 T1, bit 16 T0, bit 15 H = 1, bits 14..0 A14..A0
+// Empty R0:   bit 15 H = 0, bit 14 V = 0, bits 4..0 C4..C0, all else 0
+// Empty R1:   0x08000
+//
+// T4..T0 and C4..C0 are 5-bit Gray codes of the CPLD's clock count.
 //
 // This file has no platform dependencies so that it builds on the host.
 //
@@ -41,93 +44,146 @@ struct TEvent
 	uint16_t	Address;
 	bool		Overflow;	// OVF: first event stored after the CPLD dropped events
 	bool		Frame;		// F: first event stored after an interrupt acknowledge
+	uint8_t		Count;		// clock count at the end of the write, mod 32 (binary)
 };
 
-enum TWordKind
+enum TPairKind
 {
-	WordEmpty,		// the empty pair: half-word 0 = 0x0000, half-word 1 = 0x8000
-	WordEvent,		// V = 1, H bits correct, fields valid
-	WordMismatch,		// an H bit is wrong: Pi and CPLD disagree on the half
-	WordMalformed		// H bits correct, but the word is neither the exact
+	PairEmpty,		// an empty pair; Count holds its clock count
+	PairEvent,		// V = 1, H bits correct, fields valid
+	PairMismatch,		// an H bit is wrong: Pi and CPLD disagree on the word
+	PairMalformed		// H bits correct, but the pair is neither a valid
 				// empty pair nor a valid event
 };
 
-// Bit positions in the packed 32-bit word.
-static const uint32_t HalfH		= 1u << 15;
-static const uint32_t Hw0V		= 1u << 14;
-static const uint32_t Hw0Ovf		= 1u << 13;
-static const uint32_t Hw0Frame		= 1u << 12;
-static const unsigned Hw0KindShift	= 10;
-static const uint32_t Hw0KindMask	= 3u << Hw0KindShift;
-static const uint32_t Hw0Reserved	= 1u << 9;
-static const uint32_t Hw0A15		= 1u << 8;
-static const uint32_t Hw0DataMask	= 0xFFu;
-static const uint32_t Hw1AddressMask	= 0x7FFFu;
+static const unsigned CountBits		= 5;
+static const uint32_t CountModulus	= 1u << CountBits;	// 32
+static const uint32_t CountMask		= CountModulus - 1;
 
-// The empty pair, sent when the queue is empty: 0x0000 then 0x8000.
-static const uint32_t EmptyPairWord	= HalfH << 16;
+// Bit positions in a read word.
+static const uint32_t WordH		= 1u << 15;
+static const uint32_t R0V		= 1u << 14;
+static const uint32_t R0Ovf		= 1u << 13;
+static const uint32_t R0Frame		= 1u << 12;
+static const unsigned R0KindShift	= 10;
+static const uint32_t R0KindMask	= 3u << R0KindShift;
+static const uint32_t R0T2		= 1u << 9;
+static const uint32_t R0A15		= 1u << 8;
+static const uint32_t R0DataMask	= 0xFFu;
+static const uint32_t WordT4T1		= 1u << 17;	// T4 in R0, T1 in R1
+static const uint32_t WordT3T0		= 1u << 16;	// T3 in R0, T0 in R1
+static const uint32_t R1AddressMask	= 0x7FFFu;
+static const uint32_t EmptyR0CountMask	= CountMask;
+static const uint32_t EmptyR1		= WordH;
+static const uint32_t WordMask		= 0x3FFFFu;	// 18 bits
 
-// Classifies one packed word. Fills rEvent only for WordEvent.
+// 5-bit reflected binary Gray code.
+static inline uint8_t GrayToBinary (uint8_t nGray)
+{
+	uint8_t nBinary = nGray;
+	for (unsigned nShift = 1; nShift < CountBits; nShift <<= 1)
+	{
+		nBinary ^= nBinary >> nShift;
+	}
+	return nBinary & CountMask;
+}
+
+static inline uint8_t BinaryToGray (uint8_t nBinary)
+{
+	return (nBinary ^ (nBinary >> 1)) & CountMask;
+}
+
+// TRUE when a read word can be R0 (H = 0).
+static inline bool IsR0 (uint32_t nWord)
+{
+	return (nWord & WordH) == 0;
+}
+
+// Classifies one pair. Fills rEvent for PairEvent; for PairEmpty only
+// rEvent.Count is set.
 //
 // Checks, in order:
-//  - half-word 0 must have H = 0 and half-word 1 must have H = 1 (any pair,
-//    empty or not), otherwise WordMismatch;
-//  - V = 0 gives WordEmpty only for the exact empty pair (0x0000, 0x8000);
-//    any other V = 0 word is WordMalformed;
-//  - for V = 1: KIND 11, a set bit 9, or a reset event with a non-zero
-//    address or DATA give WordMalformed. OVF and F may be set on any event.
-static inline TWordKind DecodeWord (uint32_t nWord, TEvent &rEvent)
+//  - R0 must have H = 0 and R1 must have H = 1, otherwise PairMismatch;
+//  - V = 0 gives PairEmpty only when R0 has no bit set outside H and
+//    C4..C0 and R1 is exactly 0x08000; otherwise PairMalformed;
+//  - for V = 1: KIND 11, or a reset event with a non-zero address or DATA,
+//    give PairMalformed. OVF and F may be set on any event.
+// Bits above bit 17 are ignored.
+static inline TPairKind DecodePair (uint32_t nR0, uint32_t nR1, TEvent &rEvent)
 {
-	uint32_t nHw0 = nWord & 0xFFFFu;
-	uint32_t nHw1 = nWord >> 16;
+	nR0 &= WordMask;
+	nR1 &= WordMask;
 
-	if ((nHw0 & HalfH) != 0 || (nHw1 & HalfH) == 0)
+	if ((nR0 & WordH) != 0 || (nR1 & WordH) == 0)
 	{
-		return WordMismatch;
+		return PairMismatch;
 	}
 
-	if ((nHw0 & Hw0V) == 0)
+	if ((nR0 & R0V) == 0)
 	{
-		return nWord == EmptyPairWord ? WordEmpty : WordMalformed;
+		if ((nR0 & ~EmptyR0CountMask) != 0 || nR1 != EmptyR1)
+		{
+			return PairMalformed;
+		}
+		rEvent.Count = GrayToBinary ((uint8_t) (nR0 & EmptyR0CountMask));
+		return PairEmpty;
 	}
 
-	uint8_t nKind = (uint8_t) ((nHw0 & Hw0KindMask) >> Hw0KindShift);
-	uint16_t nAddress = (uint16_t) (((nHw0 & Hw0A15) << 7) | (nHw1 & Hw1AddressMask));
-	uint8_t nData = (uint8_t) (nHw0 & Hw0DataMask);
+	uint8_t nKind = (uint8_t) ((nR0 & R0KindMask) >> R0KindShift);
+	uint16_t nAddress = (uint16_t) (((nR0 & R0A15) << 7) | (nR1 & R1AddressMask));
+	uint8_t nData = (uint8_t) (nR0 & R0DataMask);
 
 	if (   nKind == KindReserved
-	    || (nHw0 & Hw0Reserved) != 0
 	    || (nKind == KindReset && (nAddress != 0 || nData != 0)))
 	{
-		return WordMalformed;
+		return PairMalformed;
 	}
+
+	uint8_t nGray =   ((nR0 & WordT4T1) ? 0x10 : 0)
+			| ((nR0 & WordT3T0) ? 0x08 : 0)
+			| ((nR0 & R0T2) ? 0x04 : 0)
+			| ((nR1 & WordT4T1) ? 0x02 : 0)
+			| ((nR1 & WordT3T0) ? 0x01 : 0);
 
 	rEvent.Kind = nKind;
 	rEvent.Data = nData;
 	rEvent.Address = nAddress;
-	rEvent.Overflow = (nHw0 & Hw0Ovf) != 0;
-	rEvent.Frame = (nHw0 & Hw0Frame) != 0;
+	rEvent.Overflow = (nR0 & R0Ovf) != 0;
+	rEvent.Frame = (nR0 & R0Frame) != 0;
+	rEvent.Count = GrayToBinary (nGray);
 
-	return WordEvent;
+	return PairEvent;
 }
 
-// Builds a packed word. Used by the host tests to make synthetic streams.
-static inline uint32_t EncodeEvent (uint8_t nKind, uint16_t nAddress, uint8_t nData,
-				    bool bOverflow = false, bool bFrame = false)
+// Builds the two read words of an event, with nCount the clock count mod
+// 32 (binary). Used by the host tests to make synthetic streams.
+static inline void EncodeEvent (uint32_t *pWords, uint8_t nKind, uint16_t nAddress,
+				uint8_t nData, uint8_t nCount, bool bOverflow = false,
+				bool bFrame = false)
 {
-	uint32_t nHw0 =   Hw0V | ((uint32_t) (nKind & 3) << Hw0KindShift)
-			| ((uint32_t) (nAddress >> 15) << 8) | nData;
-	if (bOverflow)
-	{
-		nHw0 |= Hw0Ovf;
-	}
-	if (bFrame)
-	{
-		nHw0 |= Hw0Frame;
-	}
-	uint32_t nHw1 = HalfH | (nAddress & Hw1AddressMask);
+	uint8_t nGray = BinaryToGray (nCount & CountMask);
 
-	return nHw0 | (nHw1 << 16);
+	uint32_t nR0 =   R0V | ((uint32_t) (nKind & 3) << R0KindShift)
+		       | ((uint32_t) (nAddress >> 15) << 8) | nData;
+	if (bOverflow)		nR0 |= R0Ovf;
+	if (bFrame)		nR0 |= R0Frame;
+	if (nGray & 0x10)	nR0 |= WordT4T1;
+	if (nGray & 0x08)	nR0 |= WordT3T0;
+	if (nGray & 0x04)	nR0 |= R0T2;
+
+	uint32_t nR1 = WordH | (nAddress & R1AddressMask);
+	if (nGray & 0x02)	nR1 |= WordT4T1;
+	if (nGray & 0x01)	nR1 |= WordT3T0;
+
+	pWords[0] = nR0;
+	pWords[1] = nR1;
+}
+
+// The two read words of an empty pair with clock count nCount mod 32.
+static inline void EncodeEmpty (uint32_t *pWords, uint8_t nCount)
+{
+	pWords[0] = BinaryToGray (nCount & CountMask);
+	pWords[1] = EmptyR1;
 }
 
 }

@@ -2,7 +2,7 @@
 // smitiming.h
 //
 // SMI read timing and transfer size. Used by the SMI reader on the Pi and,
-// for the pair period, by the ring clock (ringclock.h). No platform
+// for the read period, by the ring clock (ringclock.h). No platform
 // dependencies.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -17,7 +17,8 @@ namespace sppie {
 //
 // One read = (setup + strobe + hold + pace) clocks
 //          = (3 + 4 + 3 + 0) x 20 ns = 200 ns, SOE low for 80 ns.
-// One event pair = two reads = 400 ns, so 2.5 million pairs per second.
+// One pair (an event or an empty pair) = two reads = 400 ns, so 2.5 million
+// pairs per second. In 18-bit mode each read is one ring word.
 static const unsigned SmiCycleNs	= 20;
 static const unsigned SmiSetup		= 3;
 static const unsigned SmiStrobe		= 4;
@@ -32,7 +33,7 @@ static const unsigned SmiPairNs		= 2 * SmiReadNs;
 // documented; this value fits in 16 bits. At 200 ns per read one transfer
 // lasts about 13.1 ms.
 static const unsigned SmiBatchTransfers	= 65534;
-static const unsigned SmiTransferWords	= SmiBatchTransfers / 2;	// ring words per transfer
+static const unsigned SmiTransferWords	= SmiBatchTransfers;	// ring words per transfer
 
 }
 

@@ -32,7 +32,6 @@ static const u32 SmiCSDone		= 1u << 1;
 static const u32 SmiCSActive		= 1u << 2;
 static const u32 SmiCSStart		= 1u << 3;
 static const u32 SmiCSClear		= 1u << 4;
-static const u32 SmiCSPxlDat		= 1u << 14;
 static const u32 SmiCSAxiFifoError	= 1u << 25;
 
 // SMI DMA control: DREQ when the read FIFO holds at least one word (the
@@ -51,7 +50,7 @@ static const u32 SmiDCValue		=   (SmiDCWriteThreshold << 0)
 static const unsigned PollLimit		= 100000;
 
 CSmiEventReader::CSmiEventReader (void)
-:	m_SMIMaster ((1u << 16) - 1, FALSE),	// SD0..SD15 only, no address pins
+:	m_SMIMaster ((1u << 18) - 1, FALSE),	// SD0..SD17, no address pins
 	m_SOEPin (SoePin, GPIOModeAlternateFunction1),
 	m_SyncPin (SyncPin, GPIOModeOutput),
 	m_NotEmptyPin (NotEmptyPin, GPIOModeInput),
@@ -149,10 +148,10 @@ boolean CSmiEventReader::Initialize (void)
 
 	// SMI clock, width and timing for device 0 (also resets the SMI
 	// registers).
-	m_SMIMaster.SetupTiming (SMI16Bits, SmiCycleNs, SmiSetup, SmiStrobe, SmiHold, SmiPace, 0);
+	m_SMIMaster.SetupTiming (SMI18Bits, SmiCycleNs, SmiSetup, SmiStrobe, SmiHold, SmiPace, 0);
 
 	PeripheralEntry ();
-	write32 (SmiCS, SmiCSPxlDat);		// disabled, read direction, packing on
+	write32 (SmiCS, 0);			// disabled, read direction, no packing
 	write32 (SmiA, 0);			// device 0, address 0
 	write32 (SmiDC, SmiDCValue);
 	PeripheralExit ();
@@ -267,7 +266,7 @@ boolean CSmiEventReader::NotEmpty (void)
 void CSmiEventReader::StopReads (void)
 {
 	PeripheralEntry ();
-	write32 (SmiCS, SmiCSPxlDat);
+	write32 (SmiCS, 0);
 	unsigned nPolls = 0;
 	while ((read32 (SmiCS) & SmiCSEnable) && ++nPolls < PollLimit)
 	{
@@ -282,20 +281,20 @@ void CSmiEventReader::PrepareTransfer (void)
 
 	PeripheralEntry ();
 	write32 (SmiL, SmiBatchTransfers);
-	write32 (SmiCS, SmiCSEnable | SmiCSPxlDat);
+	write32 (SmiCS, SmiCSEnable);
 	unsigned nPolls = 0;
 	while ((read32 (SmiCS) & SmiCSActive) && ++nPolls < PollLimit)
 	{
 		// wait
 	}
-	write32 (SmiCS, SmiCSEnable | SmiCSPxlDat | SmiCSClear | SmiCSAxiFifoError);
+	write32 (SmiCS, SmiCSEnable | SmiCSClear | SmiCSAxiFifoError);
 	PeripheralExit ();
 }
 
 void CSmiEventReader::GoTransfer (void)
 {
 	PeripheralEntry ();
-	write32 (SmiCS, SmiCSEnable | SmiCSPxlDat | SmiCSStart);
+	write32 (SmiCS, SmiCSEnable | SmiCSStart);
 	PeripheralExit ();
 }
 

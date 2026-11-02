@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 #include "overlay.h"
-#include "machinetiming.h"
-#include "renderer.h"
+#include "machine.h"
+#include "picture.h"
 #include <circle/font.h>
 #include <circle/string.h>
 
@@ -54,13 +54,16 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 	const TItem Right[] =
 	{
 		{ "LOCK", rReport.Locked ? 1u : 0u },
-		{ "PER",  rReport.PeriodNs },
 		{ "ACQ",  rReport.Acquisitions },
+		{ "CPF",  rReport.FrameClocks },
+		{ "CMIN", rReport.MinFrameClocks },
+		{ "CMAX", rReport.MaxFrameClocks },
 		{ "SF",   rReport.SpectrumFrame },
 		{ "SKIP", rReport.Skipped },
 		{ "REP",  rReport.Repeated },
 		{ "LD",   rReport.LogDropped },
 		{ "CLMP", rReport.Clamped },
+		{ "TAMB", rReport.Ambiguous },
 		{ "F",    rReport.Frames },
 		{ "C",    rReport.ArmClockMHz },
 	};

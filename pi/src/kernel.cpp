@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 #include "kernel.h"
-#include "renderer.h"
+#include "picture.h"
 #include <circle/bcmpropertytags.h>
 #include <circle/machineinfo.h>
 #include <circle/memory.h>
@@ -17,6 +17,7 @@ static const unsigned FailSystem	= 1;
 static const unsigned FailFrameBuffer	= 2;
 static const unsigned FailReader	= 3;
 static const unsigned FailCores		= 4;
+static const unsigned FailFuse		= 5;
 
 CKernel::CKernel (void)
 :	m_Timer (&m_Interrupt),
@@ -42,7 +43,7 @@ boolean CKernel::Initialize (void)
 	}
 
 	// 480 x 270 at 32 bits per pixel, twice as high for the flip. The
-	// firmware scales it to the HDMI mode (x3 for 1080p).
+	// firmware scales it to the HDMI mode (x4 for 1080p).
 	m_pFrameBuffer = new CBcmFrameBuffer (DisplayWidth, DisplayHeight, 32,
 					      DisplayWidth, DisplayHeight * 2);
 	if (   m_pFrameBuffer == 0
@@ -63,7 +64,11 @@ boolean CKernel::Initialize (void)
 
 	m_pApp = new CSpPieApp (CMemorySystem::Get (), m_pFrameBuffer, m_pReader, nArmClockMHz,
 				MachineChoice ());
-	if (m_pApp == 0 || !m_pApp->Initialize ())	// starts cores 1 to 3; must be last
+	if (m_pApp == 0 || !m_pApp->InitializeRenderer ())
+	{
+		Fail (FailFuse);
+	}
+	if (!m_pApp->Initialize ())	// starts cores 1 to 3; must be last
 	{
 		Fail (FailCores);
 	}
@@ -79,7 +84,7 @@ TShutdownMode CKernel::Run (void)
 }
 
 // The "machine" option in cmdline.txt: auto (the default), auto128, 48, 128
-// or plus3. See machinetiming.h, TMachineChoice.
+// or plus3. See machine.h, TMachineChoice.
 TMachineChoice CKernel::MachineChoice (void) const
 {
 	const char *pValue = m_Options.GetAppOptionString ("machine", "auto");

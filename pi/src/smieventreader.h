@@ -7,9 +7,9 @@
 // DMA reads, so this class programs the SMI read transfer and one DMA
 // channel itself:
 //
-//  - SMI runs programmed read transfers of SmiBatchTransfers 16-bit reads.
-//    With pixel packing (CS PXLDAT) two reads fill one 32-bit FIFO word, so
-//    one CPLD event pair lands as one ring word.
+//  - SMI runs programmed read transfers of SmiBatchTransfers 18-bit reads.
+//    Each read fills one 32-bit FIFO word, with the read word in bits 17
+//    to 0, so one CPLD pair lands as two ring words.
 //  - One DMA control block covers the whole ring and names itself as the
 //    next block, so the DMA loops over the ring for ever, paced by the SMI
 //    DREQ.
@@ -19,10 +19,10 @@
 //    Restart() starts the next one. Reads stop between the two; that gap is
 //    measured by the caller.
 //
-// Pins: GPIO 6 (SOE) and GPIO 8 to 23 (SD0 to SD15) are switched to SMI.
+// Pins: GPIO 6 (SOE) and GPIO 8 to 25 (SD0 to SD17) are switched to SMI.
 // SMI only ever does read transfers here, so the Pi does not drive SD0 to
-// SD15. GPIO 0 to 5, 7, 24 and 25 are not touched. GPIO 26 is the SYNC
-// output and GPIO 27 (NOT_EMPTY) an input.
+// SD17. GPIO 0 to 5 and 7 are not touched. GPIO 26 is the SYNC output and
+// GPIO 27 (NOT_EMPTY) an input.
 //
 // Initialize () runs on core 0. Everything else runs on the intake core only.
 //
@@ -39,8 +39,8 @@
 
 namespace sppie {
 
-// Ring size in 32-bit words: 1 MiB, about 105 ms of reads at 2.5 M pairs/s.
-static const unsigned RingWords		= 256 * 1024;
+// Ring size in 32-bit words: 2 MiB, about 105 ms of reads at 5 M reads/s.
+static const unsigned RingWords		= 512 * 1024;
 
 static const unsigned SyncPin		= 26;
 static const unsigned NotEmptyPin	= 27;

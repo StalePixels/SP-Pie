@@ -40,12 +40,15 @@ struct TFrameReport
 	unsigned	BadProducer;
 	unsigned	LogDropped;	// events lost because the event log was full
 	unsigned	Clamped;	// events moved to keep log positions in order
-	unsigned	Acquisitions;	// frame lock acquisitions
+	unsigned	Ambiguous;	// events whose clock count the 5 bits did not fix
+	unsigned	Acquisitions;	// times the frame start was set
 	unsigned	Skipped;	// Spectrum frames not shown
 	unsigned	Repeated;	// HDMI frames that repeated the last Spectrum frame
 	unsigned	Frames;		// HDMI frames
 	unsigned	SpectrumFrame;	// number of the Spectrum frame shown
-	unsigned	PeriodNs;	// measured Spectrum frame period
+	unsigned	FrameClocks;	// clocks between the F events of two frames in a row
+	unsigned	MinFrameClocks;	// ... smallest and largest of the last 50
+	unsigned	MaxFrameClocks;
 	unsigned	Machine;	// TMachine of the frame shown
 	boolean		Locked;
 	unsigned	ArmClockMHz;
