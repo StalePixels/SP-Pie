@@ -4,9 +4,10 @@
 
 ; Clear the screen and open the upper screen channel for printing.
 snd_init:
-        call ROM_CLS
+        ROMCALL ROM_CLS
         ld a,2
-        jp ROM_CHAN_OPEN
+        ROMCALL ROM_CHAN_OPEN
+        ret
 
 ; Print the zero-terminated string at HL. Returns HL after the zero.
 print_str:
@@ -17,7 +18,7 @@ print_str:
         or a
         ret z
         push hl
-        rst 0x10
+        ROMPRINT
         pop hl
         jr print_str
 
@@ -35,7 +36,7 @@ print_hex8:
         cp '9'+1
         jr c,.out
         add a,'A'-'9'-1
-.out:   rst 0x10
+.out:   ROMPRINT
         ret
 
 ; Wait A frames (50 Hz). Turns interrupts on.

@@ -47,6 +47,31 @@ CHIP_SELECT     EQU 0xF0
 CHIP0           EQU 0xFE
 CHIP1           EQU 0xFF
 
+; Call a routine in the 48K ROM. A tape program runs with the 48K ROM paged
+; in, so it calls the routine directly. While a dot command runs, ESXDOS has
+; its own ROM paged in at 0x0000-0x1FFF. ESXDOS provides RST 0x18 followed by
+; the routine address for a ROM call (z88dk 2.4,
+; libsrc/_DEVELOPMENT/target/zx/config/config_zxn_nextos.m4:
+; __ESX_RST_ROM = 0x18, "zx rom call, address follows rst").
+        MACRO ROMCALL addr
+        IFDEF TAP
+        call addr
+        ELSE
+        rst 0x18
+        DW addr
+        ENDIF
+        ENDM
+
+; Print the character in A through the ROM (RST 0x10, the ROM routine at 0x0010).
+        MACRO ROMPRINT
+        IFDEF TAP
+        rst 0x10
+        ELSE
+        rst 0x18
+        DW 0x0010
+        ENDIF
+        ENDM
+
 ; Write a feature value: select the feature (port 0x043B), then write the
 ; value (port 0x053B).
         MACRO FEAT num, val

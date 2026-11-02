@@ -44,7 +44,7 @@
         ld a,(par)
         call print_hex8
         ld a,13
-        rst 0x10
+        ROMPRINT
         SND_RETURN
 
 show:   ld bc,PORT_FEAT_SEL
@@ -55,7 +55,7 @@ show:   ld bc,PORT_FEAT_SEL
         ld a,(sel)
         call print_hex8
         ld a,13
-        rst 0x10
+        ROMPRINT
         SND_RETURN
 
 usage:  ld hl,txt_usage

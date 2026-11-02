@@ -42,7 +42,7 @@ This needs `sjasmplus`. The script looks first at `/u/GIT/ZX/bin/sjasmplus`, the
 
 **Tape.** Play the `.tap` file into the tape input, or give it to a tape emulator. Type `LOAD ""` and press Enter. On a 128K, +2, +2A or +3, choose Tape Loader from the menu. The 48K ROM must be paged in, because the programs print with it. A one-line BASIC loader runs `CLEAR 32767`, loads the code at 32768 and starts it.
 
-**ESXDOS.** Copy the files from `build/dot/` to the `BIN` folder of the SD card. Type the name, for example `.ay`. The dot commands run at 0x2000. They print with the ROM and leave interrupts on.
+**ESXDOS.** Copy the files from `build/dot/` to the `BIN` folder of the SD card. Type the name, for example `.ay`. The dot commands run at 0x2000 and leave interrupts on. While a dot command runs, ESXDOS has its own ROM at 0x0000 to 0x1FFF. So the dot builds call every 48K ROM routine (printing, clear screen) with `RST 0x18` followed by the routine address, the ESXDOS ROM call. The tape builds call the ROM directly.
 
 Every test clears the screen, prints its title and one line for each sound, and returns to BASIC when it is done. Interrupts are off while a beeper or Covox wave plays, so the keyboard does not respond for that time. Each test sets the features to their defaults at the start and the end.
 
@@ -66,6 +66,34 @@ From BASIC, without `spctl`, write the ports directly. Port 0x043B is 1083 and p
 ```
 OUT 1083,255: OUT 1339,0
 ```
+
+## panel
+
+A control panel for the board, drawn like the Spectrum 128K boot menu: a black title bar with a rainbow at the right end, a white menu box, and a cyan bar on the selected row. Every change goes to the board at once, as the feature number to port 0x043B and then the value to port 0x053B.
+
+| Row | Feature | Key |
+| --- | --- | --- |
+| AY chip | 1, bit 0 | 1 |
+| TurboSound | 1, bit 1 | 2 |
+| Beeper | 1, bit 2 | 3 |
+| Covox 0xFB | 1, bit 3 | 4 |
+| Covox 0xDD | 1, bit 4 | 5 |
+| Covox 0xDF | 1, bit 5 | 6 |
+| Extend to 16:9 | 2, bit 0 | 7 |
+| Auto interlace | 3, bit 0 | 8 |
+| Mixing always on | 3, bit 1 | 9 |
+| Mode: 50/50 mix, CRT-style mix, line weave | 3, bits 2 and 3 | M |
+| HUD | 0xFF, bit 0 | H |
+
+- Cursor up and down (CAPS SHIFT with 7 and 6) move the cyan bar, and repeat while held. ENTER toggles the selected row, or steps the display mode.
+- A row key moves the bar to that row and acts at once.
+- S sends every value again. R restores the documented defaults and sends them. Q quits.
+
+The ports are write-only, so the panel cannot read the board. It keeps its own copy of each value, starting at the documented defaults, and shows that copy. A panel that started after another program changed a feature, or after a board that did not reset, can differ from the board. Press R or S to make them agree.
+
+The panel reads the keyboard itself, by reading port 0xFE with each half-row address, once per frame. A key must read the same on two scans in a row. It needs no interrupt and no ROM keyboard routine, so it works the same in the tape and dot builds.
+
+The panel writes only to ports 0x043B, 0x053B and 0xFE, so none of its writes can page a 128K or reach the AY. It draws with the attribute memory, a few pixel bytes for the rainbow, and the 48K ROM print routine. It needs the 48K ROM paged in, as the other tests do. The tape version loads from the Tape Loader entry on a 128K, +2 or +3.
 
 ## ay
 
@@ -140,6 +168,8 @@ Draws eight horizontal stripes in the border, then switches the border extension
 - With the extension off, the stripes show around the 352 by 270 picture only.
 - With the extension on, each line of the areas left and right of the picture takes the colour of that line's edge pixel, so the stripes fill the 16:9 screen.
 - The extension is off at the end.
+
+The `mame/panel_keys.lua` script runs the panel in MAME and presses CAPS SHIFT with 6 and 7, and ENTER, through the emulated keyboard matrix. Use it with `-autoboot_script`.
 
 ## Reference sounds from MAME
 
