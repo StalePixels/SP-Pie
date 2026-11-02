@@ -114,8 +114,8 @@ The first build compiles newlib and libc++ and takes a long time. It also clones
 ### 2. Build the kernel
 
 ```sh
-gmake                # kernel8.img, with the on-screen counters
-gmake OVERLAY=0      # kernel8.img without them
+gmake                # kernel8.img
+gmake OVERLAY=1      # kernel8.img with the on-screen counters
 ```
 
 `CIRCLE_WORLD=/path/to/circle-stdlib` uses a different rpi3 world.
@@ -134,7 +134,7 @@ The board has no serial console. When start-up fails, the ACT LED blinks a code 
 
 ## Instrumentation
 
-With `OVERLAY=1` (the default), three lines of text in the bottom border show the counters. Each value is from the frame before, or since boot where marked.
+With `OVERLAY=1`, three lines of text in the bottom border show the counters. Each value is from the frame before, or since boot where marked.
 
 | Label | Meaning |
 |---|---|
