@@ -1,22 +1,22 @@
-; hud: switches the HUD off and on through the control port
-; (select 0x043B = 0, parameter 0x053B bit 0). Three rounds of two seconds
+; hud: switches the HUD off and on through feature 0xFF
+; (debug, bit 0). Three rounds of two seconds
 ; off and two seconds on. The HUD is on again at the end.
         INCLUDE "sound.inc"
         SND_BEGIN
         call snd_init
-        CTL_DEFAULTS
+        FEAT_DEFAULTS
         ld hl,txt_title
         call print_str
         ld d,3
 .round: push de
         ld hl,txt_off
         call print_str
-        CTL 0, 0
+        FEAT FEAT_DEBUG, 0
         ld a,100
         call wait_frames
         ld hl,txt_on
         call print_str
-        CTL 0, 1
+        FEAT FEAT_DEBUG, 1
         ld a,100
         call wait_frames
         pop de

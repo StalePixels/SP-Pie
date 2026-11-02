@@ -12,7 +12,7 @@ if [ ! -x "$asm" ]; then
 fi
 cd "$here"
 mkdir -p build/tap build/dot build/lst
-for src in ay turbosound beeper covox hud; do
+for src in ay turbosound beeper covox hud border; do
     rm -f "build/tap/$src.tap" "build/dot/$src"
     "$asm" --nologo -DTAP --lst="build/lst/$src-tap.lst" "$src.asm"
     "$asm" --nologo -DDOT --lst="build/lst/$src-dot.lst" "$src.asm"

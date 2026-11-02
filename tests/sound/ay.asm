@@ -5,12 +5,12 @@
         INCLUDE "sound.inc"
         SND_BEGIN
         call snd_init
-        CTL_DEFAULTS
+        FEAT_DEFAULTS
         ld hl,txt_title
         call print_str
         ld hl,steps
         call run_steps
-        CTL_DEFAULTS
+        FEAT_DEFAULTS
         SND_RETURN
 
 txt_title:

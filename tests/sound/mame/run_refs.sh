@@ -35,7 +35,7 @@ run() {
     python3 "$here/analyse.py" "$out/$tag.wav" > "$out/$tag.freq.txt"
 }
 
-for t in ay turbosound beeper hud; do
+for t in ay turbosound beeper hud border; do
     run $t spec128 80 70 '\r' -ay_slot ay_turbosound
 done
 run covox spec128 90 80 '\r' -ay_slot ay_turbosound

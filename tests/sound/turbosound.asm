@@ -1,16 +1,17 @@
-; turbosound: tests TurboSound (NedoPC). Writing 0xFF to port 0xFFFD
-; selects chip 0 and 0xFE selects chip 1. Different tones on each chip.
+; turbosound: tests TurboSound (NedoPC order). Writing 0xFE to port 0xFFFD
+; selects chip 0, the chip a reset selects, and 0xFF
+; selects chip 1. Different tones on each chip.
 ; Tone frequency = AY clock / (16 * period). The 128K AY clock is
 ; 1.7734475 MHz.
         INCLUDE "sound.inc"
         SND_BEGIN
         call snd_init
-        CTL_DEFAULTS
+        FEAT_DEFAULTS
         ld hl,txt_title
         call print_str
         ld hl,steps
         call run_steps
-        CTL_DEFAULTS
+        FEAT_DEFAULTS
         SND_RETURN
 
 txt_title:

@@ -1,9 +1,10 @@
-; spctl: sets or shows the SP-Pie control ports. ESXDOS dot command only.
+; spctl: sets the SP-Pie features. ESXDOS dot command only.
 ;   .spctl              prints the usage
-;   .spctl SEL          reads the parameter port after writing SEL to the
-;                       select port, and prints the value
-;   .spctl SEL PAR      writes SEL to the select port (0x043B) and PAR to
-;                       the parameter port (0x053B)
+;   .spctl NUM          writes the feature number NUM to the feature select
+;                       port (0x043B)
+;   .spctl NUM VAL      writes NUM to the feature select port (0x043B) and
+;                       VAL to the feature data port (0x053B)
+; The ports are write-only, so spctl cannot read a feature back.
 ; Numbers are decimal, or hex with a $ or 0x prefix.
         IFNDEF DOT
         DISPLAY "spctl is a dot command: assemble with -DDOT"
@@ -28,10 +29,10 @@
         ld a,e
         ld (par),a
         ; set
-        ld bc,PORT_CTL_SEL
+        ld bc,PORT_FEAT_SEL
         ld a,(sel)
         out (c),a
-        ld bc,PORT_CTL_PAR
+        ld bc,PORT_FEAT_DATA
         ld a,(par)
         out (c),a
         ld hl,txt_set
@@ -46,19 +47,12 @@
         rst 0x10
         SND_RETURN
 
-show:   ld bc,PORT_CTL_SEL
+show:   ld bc,PORT_FEAT_SEL
         ld a,(sel)
         out (c),a
-        ld bc,PORT_CTL_PAR
-        in a,(c)
-        ld (par),a
-        ld hl,txt_read
+        ld hl,txt_selected
         call print_str
         ld a,(sel)
-        call print_hex8
-        ld hl,txt_par
-        call print_str
-        ld a,(par)
         call print_hex8
         ld a,13
         rst 0x10
@@ -150,22 +144,23 @@ parse_num:
 sel:    DB 0
 par:    DB 0
 txt_usage:
-        DB "spctl SEL [PAR]",13
-        DB "Write SEL to port 0x043B and PAR",13
-        DB "to port 0x053B. With only SEL, read",13
-        DB "the parameter port.",13
+        DB "spctl NUM [VAL]",13
+        DB "Write feature NUM to the feature",13
+        DB "select port 0x043B and VAL to the",13
+        DB "feature data port 0x053B.",13
         DB "Numbers: decimal, $hex or 0xhex.",13
-        DB "SEL 0, bit 0: HUD on.",13
-        DB "SEL 1: bit 0 AY, 1 TurboSound,",13
+        DB "1: devices. Bit 0 AY, 1 TurboSound,",13
         DB " 2 beeper, 3 Covox 0xFB,",13
         DB " 4 Covox 0xDD, 5 Covox 0xDF.",13
+        DB "2: border. Bit 0 16:9 extension.",13
+        DB "255: debug. Bit 0 HUD.",13
         DB "Reset restores the defaults.",13,0
 txt_set:
-        DB "Wrote select 0x",0
-txt_read:
-        DB "Read select 0x",0
+        DB "Wrote feature 0x",0
+txt_selected:
+        DB "Selected feature 0x",0
 txt_par:
-        DB " parameter 0x",0
+        DB " value 0x",0
 txt_range:
         DB "Values must be 0 to 255",13,0
 

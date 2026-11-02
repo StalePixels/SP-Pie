@@ -4,7 +4,7 @@
         INCLUDE "sound.inc"
         SND_BEGIN
         call snd_init
-        CTL_DEFAULTS
+        FEAT_DEFAULTS
         ld hl,txt_title
         call print_str
 

@@ -22,14 +22,14 @@
 
         ld hl,txt_fb
         call print_str
-        CTL 1, 0
+        FEAT FEAT_DEVICES, 0
         ld bc,PORT_COVOX_FB
         ld a,5                          ; N = 5, about 919 Hz
         ld de,1378
         call wave
         ld hl,txt_on
         call print_str
-        CTL 1, FEAT_COVOX_FB
+        FEAT FEAT_DEVICES, FEAT_COVOX_FB
         ld bc,PORT_COVOX_FB
         ld a,5
         ld de,1378
@@ -37,7 +37,7 @@
 
         ld hl,txt_dd
         call print_str
-        CTL 1, 0
+        FEAT FEAT_DEVICES, 0
         AYW 15, 0
         ld bc,PORT_COVOX_DD_AYDATA
         ld a,10                         ; N = 10, about 595 Hz
@@ -45,7 +45,7 @@
         call wave
         ld hl,txt_on
         call print_str
-        CTL 1, FEAT_COVOX_DD
+        FEAT FEAT_DEVICES, FEAT_COVOX_DD
         ld bc,PORT_COVOX_DD_AYDATA
         ld a,10
         ld de,892
@@ -53,14 +53,14 @@
 
         ld hl,txt_df
         call print_str
-        CTL 1, 0
+        FEAT FEAT_DEVICES, 0
         ld bc,PORT_COVOX_DF
         ld a,2                          ; N = 2, about 1368 Hz
         ld de,2052
         call wave
         ld hl,txt_on
         call print_str
-        CTL 1, FEAT_COVOX_DF
+        FEAT FEAT_DEVICES, FEAT_COVOX_DF
         ld bc,PORT_COVOX_DF
         ld a,2
         ld de,2052
@@ -74,7 +74,7 @@
         out (c),a
         ld bc,PORT_COVOX_DF
         out (c),a
-        CTL_DEFAULTS
+        FEAT_DEFAULTS
         ld hl,txt_done
         call print_str
         SND_RETURN

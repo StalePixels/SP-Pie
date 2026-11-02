@@ -2,18 +2,27 @@
 
 Small Z80 programs that test the sound and control ports of the SP-Pie board. Each program prints on the screen what it plays, so you can follow along by ear.
 
-The ports under test:
+The ports under test. The control ports are write-only. [docs/control-ports.md](../../docs/control-ports.md) defines them.
 
 | Port | Use |
 | --- | --- |
 | 0xFFFD, 0xBFFD | AY register select and data. |
-| 0xFFFD with value 0xFF or 0xFE | TurboSound chip select. 0xFF selects chip 0, 0xFE selects chip 1. |
+| 0xFFFD with value 0xFE or 0xFF | TurboSound chip select. 0xFE selects chip 0, the chip a reset selects. 0xFF selects chip 1. |
 | 0xFE bit 4 | Beeper. |
 | 0xFB, 0xDD, 0xDF | Covox DACs. 8-bit unsigned samples, 0x80 is the centre. |
-| 0x043B | Control select. |
-| 0x053B | Control parameter. |
+| 0x043B | Feature select. |
+| 0x053B | Feature data. |
 
-Control select 0, bit 0: HUD on. Control select 1: bit 0 AY, bit 1 TurboSound, bit 2 beeper, bit 3 Covox 0xFB, bit 4 Covox 0xDD, bit 5 Covox 0xDF. The defaults are HUD on, AY, TurboSound and beeper on, and Covox off. A Spectrum reset restores the defaults.
+Write the feature number to the select port, then the value to the data port. The features:
+
+| Feature | Use | Default |
+| --- | --- | --- |
+| 0x00 | Reserved. | |
+| 0x01 | Attached devices. Bit 0 AY, bit 1 TurboSound, bit 2 beeper, bit 3 Covox 0xFB, bit 4 Covox 0xDD, bit 5 Covox 0xDF. | 0x07 |
+| 0x02 | Border. Bit 0 extends the border to 16:9. | 0x00 |
+| 0xFF | Debug. Bit 0 shows the HUD. | 0x01 |
+
+A Spectrum reset restores the defaults.
 
 ## Build
 
@@ -35,26 +44,27 @@ This needs `sjasmplus`. The script looks first at `/u/GIT/ZX/bin/sjasmplus`, the
 
 **ESXDOS.** Copy the files from `build/dot/` to the `BIN` folder of the SD card. Type the name, for example `.ay`. The dot commands run at 0x2000. They print with the ROM and leave interrupts on.
 
-Every test clears the screen, prints its title and one line for each sound, and returns to BASIC when it is done. Interrupts are off while a beeper or Covox wave plays, so the keyboard does not respond for that time. Each test sets the control ports to their defaults at the start and the end.
+Every test clears the screen, prints its title and one line for each sound, and returns to BASIC when it is done. Interrupts are off while a beeper or Covox wave plays, so the keyboard does not respond for that time. Each test sets the features to their defaults at the start and the end.
 
 ## spctl
 
-ESXDOS dot command only. It sets or reads the control ports.
+ESXDOS dot command only. It sets the features.
 
 ```
 .spctl              print the usage
-.spctl 1 7          select 1, parameter 7: AY, TurboSound and beeper on
-.spctl 1 $38        Covox on all three ports, the others off
-.spctl 0 0          HUD off
-.spctl 1            read the parameter port for select 1
+.spctl 1 7          devices: AY, TurboSound and beeper on
+.spctl 1 $38        devices: Covox on all three ports, the others off
+.spctl 255 0        HUD off
+.spctl 2 1          border extension on
+.spctl 1            select feature 1 only
 ```
 
-Numbers are decimal, or hex with a `$` or `0x` prefix. With only a select value, `spctl` writes the select and prints what the parameter port returns. The parameter port must return a value for this to show anything useful.
+Numbers are decimal, or hex with a `$` or `0x` prefix. The ports are write-only, so `spctl` cannot read a feature back.
 
 From BASIC, without `spctl`, write the ports directly. Port 0x043B is 1083 and port 0x053B is 1339.
 
 ```
-OUT 1083,1: OUT 1339,7
+OUT 1083,255: OUT 1339,0
 ```
 
 ## ay
@@ -80,7 +90,7 @@ Plays the AY chip. A tone has the frequency of the AY clock divided by 16 times 
 
 ## turbosound
 
-Plays a different tone on each TurboSound chip. Chip 0 plays 440 Hz and chip 1 plays 880 Hz.
+Plays a different tone on each TurboSound chip. Chip 0 plays 440 Hz and chip 1 plays 880 Hz. The test selects chip 0 with 0xFE and chip 1 with 0xFF, the NedoPC order. A reset selects chip 0.
 
 1. Silence on both chips.
 2. Chip 0 alone: 440 Hz.
@@ -106,7 +116,7 @@ Each wave plays for 1.5 seconds, with a short pause between them. The 128K CPU c
 
 ## covox
 
-Plays a sine wave of 32 samples on each Covox port. The samples run from 13 to 243 around the centre 0x80. For each port the test plays the wave twice. First the Covox is disabled in control select 1, and you must hear nothing. Then it is enabled, and you hear the wave. Only the Covox under test is enabled. AY, TurboSound and the beeper are off while it plays.
+Plays a sine wave of 32 samples on each Covox port. The samples run from 13 to 243 around the centre 0x80. For each port the test plays the wave twice. First the Covox is disabled in feature 1, and you must hear nothing. Then it is enabled, and you hear the wave. Only the Covox under test is enabled. AY, TurboSound and the beeper are off while it plays.
 
 | Port | N | Frequency on a 48K |
 | --- | --- | --- |
@@ -116,11 +126,20 @@ Plays a sine wave of 32 samples on each Covox port. The samples run from 13 to 2
 
 One sample takes 53 plus 13 times N T-states. One wave cycle is 32 samples plus 31 T-states. Each wave plays for 1.5 seconds.
 
-Port 0xDD needs care on a 128K. The 128K decodes the low byte 0xDD with address line A15 low as the memory paging port, and with A15 high as the AY. The test writes to port 0xBFDD, which is an AY data write, and first selects AY register 15. That register has no function on an AY-3-8912, so the samples change nothing. A write to 0x00DD instead pages RAM and ROM and crashes the program.
+Port 0xDD needs care on a 128K. The 128K decodes the low byte 0xDD with address line A15 low as the memory paging port, and with A15 high as the AY. The test writes to port 0xBFDD, which is an AY data write, and first selects AY register 15. That register has no function on an AY-3-8912, so the samples change nothing. A write to 0x00DD instead pages RAM and ROM on a 128K and crashes the program. The AY is off while the Covox plays, so the board ignores the AY write.
 
 ## hud
 
-Switches the HUD off and on through control select 0. It shows three rounds of "HUD off" for 2 seconds and "HUD on" for 2 seconds. The HUD on the HDMI picture must follow the printed text. The HUD is on at the end.
+Switches the HUD off and on through feature 0xFF. It shows three rounds of "HUD off" for 2 seconds and "HUD on" for 2 seconds. The HUD on the HDMI picture must follow the printed text. The HUD is on at the end.
+
+## border
+
+Draws eight horizontal stripes in the border, then switches the border extension (feature 2, bit 0) off and on. Three rounds of four seconds off and four seconds on.
+
+- The stripes run from the top: black, blue, red, magenta, green, cyan, yellow, white. They are not exact, because the program counts T-states and a 128K line is slightly longer than a 48K line.
+- With the extension off, the stripes show around the 352 by 270 picture only.
+- With the extension on, each line of the areas left and right of the picture takes the colour of that line's edge pixel, so the stripes fill the 16:9 screen.
+- The extension is off at the end.
 
 ## Reference sounds from MAME
 
@@ -135,5 +154,5 @@ The output folder gets a WAV file, a frequency list and a final screenshot for e
 Facts about MAME to keep in mind:
 
 - MAME has no Spectrum Covox device. Its Covox run is silent. `mame/covox_expected.py` writes the expected sound from the test's own table and timing.
-- MAME selects the TurboSound chips the other way round. It treats 0xFF as the second chip and 0xFE as the first. Compare the turbosound test against the board, not against MAME, for the order of the two pitches.
+- MAME selects the TurboSound chips in the same order as the test: 0xFE is the first chip and 0xFF the second.
 - `mame/analyse.py FILE.wav` prints the strongest frequency over time for any WAV.
