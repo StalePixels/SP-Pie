@@ -80,3 +80,6 @@ set_location_assignment PIN_68 -to PI_NOT_EMPTY
 # Weak pull-ups on the two /IORQ pins, as upstream.
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to BUS_IORQ_i
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to BUS_IORQ_COPY_i
+
+set_global_assignment -name LAST_QUARTUS_VERSION "13.0 SP1"
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_NO_OUTPUT_GND "AS INPUT TRI-STATED"

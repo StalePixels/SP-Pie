@@ -286,42 +286,44 @@ queue is dropped and the next event carries OVF = 1.
 
 Simulation checks function only. It does not check timing or metastability.
 
-## Logic element estimate
+## Building with Quartus
 
-This is a hand estimate. The real figure comes from the Quartus fitter
-report, and the design has not been compiled in Quartus yet. A MAX II logic
-element (LE) has one 4-input look-up table and one register.
+Quartus II 13.0sp1 Web Edition runs only on x86-64 Linux or Windows. On an Apple Silicon Mac it runs in an amd64 container under OrbStack.
 
-| Block | Estimate at DEPTH 4 |
-|---|---|
-| Queue storage: 4 entries of 25 bits (TYPE 3, OFFSET 13, DATA 8, OVF 1), plus write enables | 100 to 106 |
-| Write capture flags, event decode, paging copies | 25 to 35 |
-| Reset event: `wclk` gate, `rst_seen`, decode, DATA forced to 0 | 3 to 11 |
-| Write pointer, read-pointer sample, full test, overflow flag | 10 to 14 |
-| Read pointer, write-pointer synchronizer, empty test, read state | 20 to 26 |
-| Double-entry marker: OFFSET bit 0 test, `dbl`, OFFSET bit 0 mask | 3 to 5 |
-| Output multiplexers and the PI_SD register | 55 to 75 |
-| NOT_EMPTY | 2 to 3 |
-| Total | 218 to 275 |
+1. Install OrbStack and check that `docker` works.
+2. Download "Quartus II Web Edition 13.0sp1 for Linux" (`Quartus-web-13.0.1.232-linux.tar`) from Altera. The download needs a free Altera account. Extract it, then install the Linux edition into `/u/toolchains/quartus` from a directory that holds only `QuartusSetupWeb-13.0.1.232.run` and `max_web-13.0.1.232.qdz`. Hard links work there; symbolic links make the installer fail with "payload initialization failed". Run the installer in the `quartus13-env` container with `--mode unattended --unattendedmodeui none`.
+3. Run `public/cpld/quartus.sh public/cpld`. The `.pof` goes to `public/cpld/output_files/`. The script builds the `quartus13-env` container image the first time.
 
-Forcing DATA to 0 can fit in the look-up tables in front of the DATA
-storage registers. If it does not, it costs 8 LEs. A fourth stored TYPE bit
-in place of the marker would cost about 6 to 7 LEs at DEPTH 4 (4 storage
-registers and a wider TYPE multiplexer), and more at larger depths.
+`QUARTUS_HOME` selects another installation and `QUARTUS_IMAGE` another container image.
 
-At DEPTH 4 the design may not fit in 240 LEs. Storage and the output
-multiplexers grow with the depth. At DEPTH 2 the estimate is about 135 to
-175 LEs.
+To make an `.svf` for openFPGALoader:
+
+```sh
+quartus_cpf -c -q 10MHz -g 3.3 -n p output_files/sp_pie_cpld.pof output_files/sp_pie_cpld.svf
+```
+
+## Logic elements
+
+From the Quartus 13.0sp1 fitter report. A MAX II logic element (LE) has one 4-input look-up table and one register. The EPM240 has 240.
+
+| Design | Logic elements | Pins |
+|---|---|---|
+| Upstream TK-Pie CPLD | 37 | 63 |
+| This design, DEPTH 4 | 195 | 61 |
+| This design, DEPTH 2 | 125 | 61 |
+
+DEPTH 4 is the default. Each step of depth costs about 35 LEs.
+
+The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures are 54.6 MHz for the write clock and 84.9 MHz (DEPTH 4) for the SOE clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
 
 ## Not verified
 
-- Quartus synthesis and fit, the LE count, and timing. /WR and SOE clock
-  registers but are not global clock pins. How the fitter routes them is not
-  known.
+- Timing against real constraints. An `.sdc` with the /WR and SOE clocks and
+  the input and output delays is needed for real slack figures.
 - The /IORQ flag uses an asynchronous set driven by logic (/IORQ and /WR both
   low). How Quartus implements it on MAX II is not known.
-- The write-side clock `wclk` is made by logic (/WR and /RESET). How the
-  fitter routes it, and its skew against the bus inputs, is not known.
+- The write-side clock `wclk` is made by logic (/WR and /RESET). Quartus
+  puts it on a global clock; its skew against the bus inputs is not known.
 - The rise time of /RESET on each Spectrum model, and whether a slow or
   bouncing edge gives more than one reset event.
 - The SOE low and high times the read side needs. They depend on the Quartus

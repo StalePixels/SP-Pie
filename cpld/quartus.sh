@@ -8,11 +8,13 @@
 # Environment:
 #   QUARTUS_HOME   Host path of the Quartus install (the directory that holds
 #                  the "quartus" folder). Default: /u/toolchains/quartus
-#   QUARTUS_IMAGE  Container image. Default: ubuntu:22.04
+#   QUARTUS_IMAGE  Container image name. Default: quartus13-env. If it does not
+#                  exist, it is built from ubuntu:22.04 plus the 32-bit and
+#                  64-bit runtime libraries Quartus 13.0sp1 needs.
 set -eu
 
 QUARTUS_HOME="${QUARTUS_HOME:-/u/toolchains/quartus}"
-QUARTUS_IMAGE="${QUARTUS_IMAGE:-ubuntu:22.04}"
+QUARTUS_IMAGE="${QUARTUS_IMAGE:-quartus13-env}"
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
     echo "usage: $0 <project-dir> [revision]" >&2
@@ -43,6 +45,16 @@ fi
 if ! command -v docker >/dev/null 2>&1; then
     echo "error: docker (OrbStack) not found in PATH" >&2
     exit 2
+fi
+
+if ! docker image inspect "$QUARTUS_IMAGE" >/dev/null 2>&1; then
+    docker build --platform linux/amd64 -t "$QUARTUS_IMAGE" - <<'DOCKERFILE'
+FROM ubuntu:22.04
+RUN dpkg --add-architecture i386 && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libc6:i386 libstdc++6:i386 libx11-6:i386 libxext6:i386 libxft2:i386 libfreetype6:i386 libsm6:i386 libxrender1:i386 libfontconfig1:i386 libxi6:i386 libxtst6:i386 libglib2.0-0:i386 libzstd1:i386 \
+    libstdc++6 libx11-6 libxext6 libxft2 libfreetype6 libsm6 libxrender1 libfontconfig1 libtinfo5 libncurses5 libpng16-16 locales ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
 fi
 
 # The project is mounted at the same path inside the container so that
