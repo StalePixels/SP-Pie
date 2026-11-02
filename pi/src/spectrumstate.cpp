@@ -73,6 +73,15 @@ void CSpectrumState::Apply (const TEvent &rEvent)
 		Port1FFD = rEvent.Data;
 		break;
 
+	case EventReset:
+		// The Spectrum was reset: paging back to 0 and ULAplus off. The
+		// screen banks, the border and the ULAplus palette stay.
+		Port7FFD = 0;
+		Port1FFD = 0;
+		UlaPlusRegister = 0;
+		UlaPlusMode = 0;
+		break;
+
 	default:
 		break;
 	}

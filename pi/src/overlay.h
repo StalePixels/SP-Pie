@@ -31,6 +31,7 @@ struct TFrameReport
 	unsigned	Overflows;
 	unsigned	Mismatches;	// equals the number of SYNC pulses after start
 	unsigned	Malformed;
+	unsigned	Resets;		// reset events
 	unsigned	MaxBacklogWords;
 	unsigned	Restarts;
 	unsigned	MaxRestartGapUs;

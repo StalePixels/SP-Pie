@@ -24,7 +24,7 @@ namespace sppie {
 
 enum EventType : uint8_t
 {
-	EventUnused	= 0,
+	EventReset	= 0,	// /RESET went high; DATA and OFFSET are 0
 	EventBank5	= 1,	// write to RAM bank 5, OFFSET < 0x1B00
 	EventBank7	= 2,	// write to RAM bank 7, OFFSET < 0x1B00
 	EventPortFE	= 3,	// write to port 0xFE
@@ -74,8 +74,9 @@ static const uint32_t EmptyPairWord	= HalfH << 16;
 //    empty or not), otherwise WordMismatch;
 //  - V = 0 gives WordEmpty only for the exact empty pair (0x0000, 0x8000);
 //    any other V = 0 word is WordMalformed;
-//  - for V = 1: TYPE 0, a set reserved bit, an OFFSET at or above 0x1B00 for
-//    TYPE 1 and 2, or a non-zero OFFSET for other types give WordMalformed.
+//  - for V = 1: a set reserved bit, an OFFSET at or above 0x1B00 for TYPE 1
+//    and 2, a non-zero OFFSET for other types, or a non-zero DATA for TYPE 0
+//    give WordMalformed.
 static inline TWordKind DecodeWord (uint32_t nWord, TEvent &rEvent)
 {
 	uint32_t nHw0 = nWord & 0xFFFFu;
@@ -94,9 +95,9 @@ static inline TWordKind DecodeWord (uint32_t nWord, TEvent &rEvent)
 	uint8_t nType = (uint8_t) ((nHw0 & Hw0TypeMask) >> Hw0TypeShift);
 	uint16_t nOffset = (uint16_t) (nHw1 & Hw1OffsetMask);
 
-	if (   nType == EventUnused
-	    || (nHw0 & Hw0Reserved) != 0
-	    || (nHw1 & Hw1Reserved) != 0)
+	if (   (nHw0 & Hw0Reserved) != 0
+	    || (nHw1 & Hw1Reserved) != 0
+	    || (nType == EventReset && (nHw0 & Hw0DataMask) != 0))
 	{
 		return WordMalformed;
 	}

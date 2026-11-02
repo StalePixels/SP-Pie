@@ -27,6 +27,10 @@ size_t ProcessWords (const volatile uint32_t *pWords, size_t nCount,
 			{
 				rCounters.Overflows++;
 			}
+			if (Event.Type == EventReset)
+			{
+				rCounters.Resets++;
+			}
 			rState.Apply (Event);
 			rCounters.Events++;
 			break;

@@ -9,8 +9,10 @@
 --
 -- Clock domains
 --
---   Write side: clocked by /WR. Each Z80 write ends with a /WR rising edge,
---   and that edge stores the event and advances the write pointer. The
+--   Write side: clocked by wclk = /WR and /RESET. Each Z80 write ends with a
+--   wclk rising edge, and that edge stores the event and advances the write
+--   pointer. The end of a reset (/RESET rising, with /WR high) is one more
+--   wclk rising edge, and that edge stores the reset event. The
 --   edge-connector clock (pin 62) is not used, so the logic does not depend on
 --   its phase (inverted on the +2A/+3) or on clock stretching.
 --
@@ -89,12 +91,16 @@ architecture rtl of sp_pie_cpld is
     return b;
   end function;
 
-  -- Stored TYPE code. Codes 1 to 7 are the protocol TYPE values. Code 0 is
-  -- protocol "not used", so the queue uses it for one I/O write that matches
-  -- both the 0xFE and the 0x1FFD decodes. The read side sends such an entry as
-  -- two events, TYPE 3 then TYPE 7, with the same DATA. Storing one entry
-  -- keeps the write pointer to single steps, which the Gray-code crossing needs.
-  constant T_DOUBLE : std_logic_vector(2 downto 0) := "000";
+  -- Stored TYPE code. The codes are the protocol TYPE values, 0 to 7.
+  --
+  -- One I/O write that matches both the 0xFE and the 0x1FFD decodes is stored
+  -- as one entry with code 0 and OFFSET bit 0 set. A reset entry is code 0
+  -- with OFFSET 0. I/O and reset events always send OFFSET 0, so OFFSET bit 0
+  -- of a code 0 entry is free to tell the two apart, and no bit is added to
+  -- each entry. The read side sends the double entry as two events, TYPE 3
+  -- then TYPE 7, with the same DATA and OFFSET 0. Storing one entry keeps the
+  -- write pointer to single steps, which the Gray-code crossing needs.
+  constant T_RESET  : std_logic_vector(2 downto 0) := "000";
   constant T_BANK5  : std_logic_vector(2 downto 0) := "001";
   constant T_BANK7  : std_logic_vector(2 downto 0) := "010";
   constant T_FE     : std_logic_vector(2 downto 0) := "011";
@@ -116,10 +122,12 @@ architecture rtl of sp_pie_cpld is
   ---------------------------------------------------------------------------
   -- Write side (/WR domain)
   ---------------------------------------------------------------------------
+  signal wclk      : std_logic;
   signal iorq_n    : std_logic;
   signal io_set    : std_logic;
   signal io_seen   : std_logic := '0';
   signal mreq_seen : std_logic := '0';
+  signal rst_seen  : std_logic := '0';
 
   -- Paging state: port 0x7FFD bits 5 (lock) and 2..0 (bank at 0xC000), and
   -- port 0x1FFD bits 2..0 (layout and special-paging enable).
@@ -130,6 +138,7 @@ architecture rtl of sp_pie_cpld is
   signal ev_hit  : std_logic;
   signal ev_type : std_logic_vector(2 downto 0);
   signal ev_off  : std_logic_vector(12 downto 0);
+  signal ev_dat  : std_logic_vector(7 downto 0);
   signal wr_7ffd : std_logic;
   signal wr_1ffd : std_logic;
 
@@ -148,6 +157,7 @@ architecture rtl of sp_pie_cpld is
   signal hw1       : std_logic := '0';  -- 1 while PI_SD holds half-word 1
   signal cur_valid : std_logic := '0';  -- the pair on PI_SD is an event, not empty
   signal pend2     : std_logic := '0';  -- the current entry still owes its TYPE 7 event
+  signal dbl       : std_logic := '0';  -- the pair on PI_SD comes from a double entry
 
 begin
 
@@ -158,10 +168,16 @@ begin
   -- Pins 98 and 76 both carry /IORQ. Either one low means /IORQ is low.
   iorq_n <= BUS_IORQ_i and BUS_IORQ_COPY_i;
 
+  -- Write-side clock. While /RESET is high it is /WR. While /RESET is low it
+  -- is low, so /WR edges during a reset are ignored. The Z80 holds /WR high
+  -- while /RESET is low and after it, so the end of a reset gives one rising
+  -- edge of its own and does not merge with the next write.
+  wclk <= BUS_WR and BUS_RESET;
+
   ---------------------------------------------------------------------------
   -- Write capture
   --
-  -- The event is stored on the /WR rising edge, the end of the write. At that
+  -- The event is stored on the wclk rising edge at the end of the write. At that
   -- edge D0-D7 are valid for memory writes (valid before /WR falls) and for
   -- I/O writes (valid shortly after /WR falls), and the Z80 holds address and
   -- data for about half a T-state after /WR rises. Capture at the falling
@@ -170,53 +186,72 @@ begin
   -- /MREQ and /IORQ rise at the same clock edge as /WR, so they cannot be read
   -- at the /WR rising edge. They are remembered while /WR is low:
   --
-  --   mreq_seen: /MREQ sampled at the /WR falling edge. On a memory write
+  --   mreq_seen: /MREQ sampled at the wclk falling edge. On a memory write
   --   /MREQ is low one T-state before /WR falls.
   --
   --   io_seen: on an I/O write /IORQ and /WR fall at the same clock edge, in no
   --   fixed order, so a falling-edge sample of /IORQ could miss it. io_seen is
-  --   cleared at the /WR falling edge and set asynchronously while /IORQ and
+  --   cleared at the wclk falling edge and set asynchronously while /IORQ and
   --   /WR are both low (about 2.5 T-states on an I/O write). It holds its value
-  --   through the /WR rising edge.
+  --   through the wclk rising edge.
+  --
+  -- Reset detection: rst_seen is set asynchronously while /RESET is low and
+  -- cleared at the next wclk falling edge, which is the /WR falling edge of
+  -- the first write after the reset. At the wclk rising edge made by /RESET
+  -- going high, rst_seen is 1 and the decode queues a reset event. At the
+  -- end of every later write it is 0. rst_seen does not change at that edge
+  -- (it was set before and stays set), so the edge needs no synchronizer.
   ---------------------------------------------------------------------------
   io_set <= (not iorq_n) and (not BUS_WR);
 
-  p_io_seen : process (BUS_WR, io_set)
+  p_io_seen : process (wclk, io_set)
   begin
     if io_set = '1' then
       io_seen <= '1';
-    elsif falling_edge(BUS_WR) then
+    elsif falling_edge(wclk) then
       io_seen <= '0';
     end if;
   end process;
 
+  p_rst_seen : process (wclk, BUS_RESET)
+  begin
+    if BUS_RESET = '0' then
+      rst_seen <= '1';
+    elsif falling_edge(wclk) then
+      rst_seen <= '0';
+    end if;
+  end process;
+
   -- Clock-domain crossing, read pointer into the write side: rp_gray is
-  -- sampled at the /WR falling edge and first used at the /WR rising edge of
-  -- the same write. Gray code changes one bit per step, so the sample is
-  -- either the old or the new pointer, never a mix. The sample has the whole
-  -- /WR low time (at least one T-state, about 280 ns at 3.5 MHz) to settle
-  -- from metastability before it is used. A stale read pointer only makes the
-  -- queue look fuller than it is; it can never let a write overrun an entry
-  -- the Pi has not read.
-  p_rp_wsync : process (BUS_WR, PI_SYNC)
+  -- sampled at the wclk falling edge and first used at the next wclk rising
+  -- edge. Gray code changes one bit per step, so the sample is either the old
+  -- or the new pointer, never a mix. The sample has the whole wclk low time
+  -- (at least one T-state, about 280 ns at 3.5 MHz) to settle from
+  -- metastability before it is used. For the reset event, the sample is the
+  -- one taken when /RESET went low (or the last /WR falling edge before it).
+  -- A stale read pointer only makes the queue look fuller than it is; it can
+  -- never let a write overrun an entry the Pi has not read.
+  p_rp_wsync : process (wclk, PI_SYNC)
   begin
     if PI_SYNC = '1' then
       rp_wsync <= (others => '0');
-    elsif falling_edge(BUS_WR) then
+    elsif falling_edge(wclk) then
       rp_wsync <= rp_gray;
     end if;
   end process;
 
-  p_mreq_seen : process (BUS_WR)
+  p_mreq_seen : process (wclk)
   begin
-    if falling_edge(BUS_WR) then
+    if falling_edge(wclk) then
       mreq_seen <= not BUS_MRQ;
     end if;
   end process;
 
-  -- Event decode, from the address held at the /WR rising edge and the
-  -- paging state left by earlier writes.
-  p_decode : process (BUS_A, mreq_seen, io_seen, r7ffd_lock, r7ffd_bank, r1ffd)
+  -- Event decode, from the address held at the wclk rising edge and the
+  -- paging state left by earlier writes. At the end of a reset, the event is
+  -- a reset event with DATA 0 and OFFSET 0, whatever the bus holds.
+  p_decode : process (BUS_A, BUS_D, mreq_seen, io_seen, rst_seen,
+                      r7ffd_lock, r7ffd_bank, r1ffd)
     variable a          : std_logic_vector(15 downto 0);
     variable in_screen  : boolean;
     variable bank5      : boolean;
@@ -254,12 +289,16 @@ begin
     p_1ffd := a(15 downto 13) = "000" and a(12) = '1' and a(1) = '0' and r7ffd_lock = '0';
 
     ev_hit  <= '0';
-    ev_type <= T_DOUBLE;
+    ev_type <= T_RESET;
     ev_off  <= (others => '0');
+    ev_dat  <= BUS_D;
     wr_7ffd <= '0';
     wr_1ffd <= '0';
 
-    if mreq_seen = '1' then
+    if rst_seen = '1' then
+      ev_hit <= '1';
+      ev_dat <= (others => '0');
+    elsif mreq_seen = '1' then
       if in_screen and bank5 then
         ev_hit  <= '1';
         ev_type <= T_BANK5;
@@ -275,7 +314,9 @@ begin
         ev_hit <= '1';
       end if;
       if p_fe and p_1ffd then
-        ev_type <= T_DOUBLE;
+        -- Double entry: code 0 with OFFSET bit 0 set.
+        ev_type   <= T_RESET;
+        ev_off(0) <= '1';
       elsif p_fe then
         ev_type <= T_FE;
       elsif p_bf3b then
@@ -298,13 +339,13 @@ begin
 
   -- Paging registers. Cleared while /RESET is low. A write is accepted only
   -- while 0x7FFD bit 5 is clear (the decode above already includes the lock).
-  p_paging : process (BUS_WR, BUS_RESET)
+  p_paging : process (wclk, BUS_RESET)
   begin
     if BUS_RESET = '0' then
       r7ffd_lock <= '0';
       r7ffd_bank <= (others => '0');
       r1ffd      <= (others => '0');
-    elsif rising_edge(BUS_WR) then
+    elsif rising_edge(wclk) then
       if wr_7ffd = '1' then
         r7ffd_lock <= BUS_D(5);
         r7ffd_bank <= BUS_D(2 downto 0);
@@ -325,29 +366,31 @@ begin
 
   -- Queue write. An event that finds the queue full is dropped and sets the
   -- overflow flag. The next stored event carries OVF = 1 and clears the flag,
-  -- so OVF marks the first event after the gap.
-  p_store : process (BUS_WR)
+  -- so OVF marks the first event after the gap. A reset event follows the
+  -- same rule: when the queue is full it is dropped, and the first event
+  -- stored after it carries OVF = 1.
+  p_store : process (wclk)
     variable wp_bin : ptr_t;
     variable idx    : natural range 0 to DEPTH - 1;
   begin
-    if rising_edge(BUS_WR) then
+    if rising_edge(wclk) then
       if ev_hit = '1' and q_full = '0' then
         wp_bin := gray2bin(wp_gray);
         idx    := to_integer(wp_bin(IW - 1 downto 0));
         q_type(idx) <= ev_type;
         q_off(idx)  <= ev_off;
-        q_dat(idx)  <= BUS_D;
+        q_dat(idx)  <= ev_dat;
         q_ovf(idx)  <= ovf_flag;
       end if;
     end if;
   end process;
 
-  p_wptr : process (BUS_WR, PI_SYNC)
+  p_wptr : process (wclk, PI_SYNC)
   begin
     if PI_SYNC = '1' then
       wp_gray  <= (others => '0');
       ovf_flag <= '0';
-    elsif rising_edge(BUS_WR) then
+    elsif rising_edge(wclk) then
       if ev_hit = '1' then
         if q_full = '0' then
           wp_gray  <= bin2gray(gray2bin(wp_gray) + 1);
@@ -368,15 +411,16 @@ begin
   -- After half-word 0 is read, PI_SD is loaded with half-word 1 of the same
   -- entry. After half-word 1 is read, the entry is removed (if the pair was an
   -- event) and the next entry is loaded as half-word 0, or an empty pair when
-  -- the queue is empty. A stored T_DOUBLE entry is sent as a TYPE 3 pair, then
-  -- a TYPE 7 pair, and removed after the second.
+  -- the queue is empty. A double entry (code 0, OFFSET bit 0 set) is sent as a
+  -- TYPE 3 pair, then a TYPE 7 pair, both with OFFSET 0, and removed after the
+  -- second. dbl is 1 for both pairs and clears OFFSET bit 0 in half-word 1.
   --
   -- Clock-domain crossing, write pointer into the read side: wp_gray passes
   -- through two registers clocked by SOE. Gray code makes each sample the old
   -- or the new pointer, and the second register gives the first a full SOE
   -- period to settle. A stale write pointer only hides new entries for a few
   -- reads (the Pi gets empty pairs); it can never expose an entry before its
-  -- storage is written. An entry is written at the same /WR edge that advances
+  -- storage is written. An entry is written at the same wclk edge that advances
   -- wp_gray, and it is read at least two SOE edges after that.
   ---------------------------------------------------------------------------
   p_read : process (PI_SOE, PI_SYNC)
@@ -394,6 +438,7 @@ begin
       hw1       <= '0';
       cur_valid <= '0';
       pend2     <= '0';
+      dbl       <= '0';
     elsif rising_edge(PI_SOE) then
       wp_rsync1 <= wp_gray;
       wp_rsync2 <= wp_rsync1;
@@ -405,7 +450,8 @@ begin
         -- Half-word 0 was read. Present half-word 1: H = 1, OFFSET.
         sd_r <= (others => '0');
         if cur_valid = '1' then
-          sd_r(12 downto 0) <= q_off(ridx);
+          sd_r(12 downto 1) <= q_off(ridx)(12 downto 1);
+          sd_r(0)           <= q_off(ridx)(0) and not dbl;
         end if;
         hw1 <= '1';
       else
@@ -420,7 +466,7 @@ begin
 
         sd_r <= (others => '0');
         if pend2 = '1' then
-          -- Second event of a T_DOUBLE entry: TYPE 7, OVF = 0.
+          -- Second event of a double entry: TYPE 7, OVF = 0.
           sd_r(14)           <= '1';
           sd_r(12 downto 10) <= T_1FFD;
           sd_r(7 downto 0)   <= q_dat(nidx);
@@ -429,12 +475,14 @@ begin
         elsif bin2gray(rp_n) /= wp_rsync2 then
           sd_r(14) <= '1';
           sd_r(13) <= q_ovf(nidx);
-          if t = T_DOUBLE then
+          if t = T_RESET and q_off(nidx)(0) = '1' then
             sd_r(12 downto 10) <= T_FE;
             pend2              <= '1';
+            dbl                <= '1';
           else
             sd_r(12 downto 10) <= t;
             pend2              <= '0';
+            dbl                <= '0';
           end if;
           sd_r(7 downto 0) <= q_dat(nidx);
           cur_valid        <= '1';
@@ -442,6 +490,7 @@ begin
           -- Queue empty: empty pair, half-word 0 is all zero.
           cur_valid <= '0';
           pend2     <= '0';
+          dbl       <= '0';
         end if;
         rp_gray <= bin2gray(rp_n);
         hw1     <= '0';

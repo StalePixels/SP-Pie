@@ -336,13 +336,20 @@ begin
       wait for 200 ns;
     end procedure;
 
+    -- A Spectrum reset. The address and data buses carry a screen address and
+    -- a nonzero byte while /RESET is low, so a reset event that took them
+    -- from the bus would fail the DATA 0 and OFFSET 0 checks.
     procedure pulse_reset is
     begin
       wait until rising_edge(cpu_clk);
       reset_n <= '0';
+      a       <= x"5A5A";
+      d       <= x"A5";
       wait for 3 * TCPU;
       reset_n <= '1';
       wait for TCPU;
+      a       <= (others => 'X');
+      d       <= (others => 'X');
     end procedure;
 
     -- One SMI read driven by the main process, for the desync test.
@@ -370,9 +377,15 @@ begin
     if sd16 /= '0' or sd17 /= '0' then fail("SD16/SD17 not low"); end if;
 
     -------------------------------------------------------------------------
-    -- Empty queue: only clean empty pairs.
+    -- Power-up: /RESET going high queued one reset event.
     -------------------------------------------------------------------------
     reader_on;
+    expect(0, 0, 0);
+    check("power-up /RESET high queues one reset event");
+
+    -------------------------------------------------------------------------
+    -- Empty queue: only clean empty pairs.
+    -------------------------------------------------------------------------
     e0 := rd_empties;
     wait for 3 us;
     e1 := rd_empties;
@@ -456,15 +469,60 @@ begin
     -------------------------------------------------------------------------
     -- /RESET clears paging and the lock.
     -------------------------------------------------------------------------
-    pulse_reset;
+    pulse_reset;                  expect(0, 0, 0);
     mem_write(16#C005#, 16#61#);                         -- bank 0: no event
     io_write(16#7FFD#, 16#07#);   expect(6, 0, 16#07#);  -- unlocked again
     mem_write(16#C006#, 16#62#);  expect(2, 16#0006#, 16#62#);
     io_write(16#1FFD#, 16#07#);   expect(7, 0, 16#07#);
-    pulse_reset;
+    pulse_reset;                  expect(0, 0, 0);
     mem_write(16#4007#, 16#63#);  expect(1, 16#0007#, 16#63#);  -- normal paging again
     mem_write(16#C007#, 16#64#);                         -- bank 0: no event
-    check("/RESET clears paging and lock");
+    check("/RESET clears paging and lock, one reset event per reset");
+
+    -------------------------------------------------------------------------
+    -- Reset event order: after every event from before the reset, before
+    -- every event after it. The reader is off, so all of them wait in the
+    -- queue together.
+    -------------------------------------------------------------------------
+    io_write(16#7FFD#, 16#07#);   expect(6, 0, 16#07#);
+    check("reset order setup");
+    reader_off;
+    mem_write(16#C00B#, 16#65#);  expect(2, 16#000B#, 16#65#);  -- bank 7
+    pulse_reset;                  expect(0, 0, 0);
+    if DEPTH >= 4 then
+      mem_write(16#C00C#, 16#66#);                       -- bank 0 after reset: no event
+      io_write(16#00FE#, 16#04#); expect(3, 0, 16#04#);
+    end if;
+    reader_on;
+    check("reset event comes after earlier events and before later ones");
+
+    -------------------------------------------------------------------------
+    -- Double match after a reset: still TYPE 3 then TYPE 7, OFFSET 0.
+    -------------------------------------------------------------------------
+    pulse_reset;                  expect(0, 0, 0);
+    io_write(16#1FFC#, 16#05#);   expect(3, 0, 16#05#); expect(7, 0, 16#05#);
+    mem_write(16#4009#, 16#67#);  expect(1, 16#0009#, 16#67#);  -- layout 10: bank 5 at 0x4000
+    io_write(16#1FFD#, 16#00#);   expect(7, 0, 16#00#);
+    check("double match after reset: TYPE 3 then TYPE 7");
+
+    -------------------------------------------------------------------------
+    -- Reset while the queue is full: the reset event is dropped like any
+    -- other event, and the next stored event carries OVF = 1. Paging is
+    -- still cleared.
+    -------------------------------------------------------------------------
+    io_write(16#7FFD#, 16#07#);   expect(6, 0, 16#07#);
+    check("reset while full setup");
+    reader_off;
+    for i in 0 to DEPTH - 1 loop
+      mem_write(16#4600# + i, 16#E0# + i);  expect(1, 16#0600# + i, 16#E0# + i);
+    end loop;
+    pulse_reset;                                         -- queue full: dropped
+    reader_on;
+    check("reset while full: the DEPTH earlier events arrive");
+    mem_write(16#C00D#, 16#68#);                         -- bank 0: paging was cleared
+    io_write(16#00FE#, 16#01#);   expect(3, 0, 16#01#, '1');
+    io_write(16#00FE#, 16#02#);   expect(3, 0, 16#02#, '0');
+    check("reset while full: OVF on the next event, paging cleared");
 
     -------------------------------------------------------------------------
     -- Every I/O event TYPE, late I/O data, /IORQ skew both ways.

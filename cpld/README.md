@@ -36,26 +36,78 @@ Writes to 0x7FFD and 0x1FFD also update the paging copies. Bit 5 of 0x7FFD
 locks both ports until /RESET. Locked writes change nothing and queue no
 event. /RESET low clears both copies.
 
+When /RESET goes high, the logic queues a reset event (TYPE 0, DATA 0,
+OFFSET 0). It goes into the queue after every event from before the reset
+and before every event from after it. See [Reset event](#reset-event).
+
 Each event goes into the queue with its TYPE, OFFSET, DATA and an OVF mark.
 When the queue is full, the event is dropped and an overflow flag is set. The
 next event that is stored carries OVF = 1 and clears the flag. So OVF = 1
-marks the first event after one or more drops.
+marks the first event after one or more drops. A reset event follows the
+same rule: if the queue is full at the end of a reset, the reset event is
+dropped, and the first event stored after it carries OVF = 1. The Pi then
+gets no reset event for that reset.
 
 ### Two events from one write
 
 One I/O write can match the 0xFE decode (A0 = 0) and the 0x1FFD decode
 together, for example port 0x1FFC. No other pair of decodes can match the
-same address. The protocol asks for two events, TYPE 3 then TYPE 7. The queue
-stores such a write as one entry with the internal type code 0, which the
-protocol does not use. The read side sends that entry as two pairs, TYPE 3
-then TYPE 7, with the same DATA, and removes it after the second pair. One
-entry per write keeps the write pointer moving one step at a time, which the
-Gray-code pointer crossing needs.
+same address. The protocol asks for two events, TYPE 3 then TYPE 7. The read
+side sends such an entry as two pairs, TYPE 3 then TYPE 7, with the same DATA
+and OFFSET 0, and removes it after the second pair. One entry per write keeps
+the write pointer moving one step at a time, which the Gray-code pointer
+crossing needs.
+
+All eight TYPE codes are protocol events, so the double entry has no code of
+its own. It is stored as TYPE code 0 with OFFSET bit 0 set:
+
+| Stored TYPE | Stored OFFSET bit 0 | Sent as |
+|---|---|---|
+| 0 | 0 | TYPE 0 (reset) |
+| 0 | 1 | TYPE 3, then TYPE 7 |
+| 1 to 7 | any | that TYPE |
+
+Reset and I/O events always send OFFSET 0, so OFFSET bit 0 of a code 0 entry
+carries no other information. The read side clears that bit in half-word 1
+for both pairs of a double entry. This adds no bit to each queue entry. A
+fourth TYPE bit would add DEPTH storage registers and widen the TYPE
+multiplexer. The marker costs a one-bit OFFSET multiplexer at the next-entry
+index, one register (`dbl`) and the mask on OFFSET bit 0. See
+[Logic element estimate](#logic-element-estimate).
+
+## Reset event
+
+The write side is clocked by `wclk = /WR and /RESET`. While /RESET is high,
+`wclk` is /WR. While /RESET is low, `wclk` is low, so /WR edges during a reset
+have no effect. The Z80 holds /WR high while /RESET is low and after it, so
+the end of a reset is a `wclk` rising edge of its own, separate from the next
+write.
+
+- `rst_seen` is set asynchronously while /RESET is low and cleared at the next
+  `wclk` falling edge, which is the /WR falling edge of the first write after
+  the reset.
+- At the `wclk` rising edge made by /RESET going high, `rst_seen` is 1, so the
+  decode makes a reset event, with DATA and OFFSET forced to 0 whatever the
+  bus holds. It goes through the normal queue write, full test and overflow
+  flag. `rst_seen` does not change at that edge, so it needs no synchronizer.
+- The paging copies are cleared while /RESET is low. The reset event does not
+  write them.
+- The read pointer the write side uses for the full test is the one sampled
+  at the last `wclk` falling edge: when /RESET went low, or the last /WR
+  falling edge before that. It can be stale, which only makes the queue look
+  fuller. The reset event can then be dropped as on a full queue.
+- A write that ends while SYNC is high is not queued. The same holds for a
+  reset that ends while SYNC is high.
+- If /RESET goes high while the CPLD is not yet configured, there is no reset
+  event for that reset.
+- Each `wclk` rising edge while `rst_seen` is 1 queues one reset event. A
+  /RESET edge that bounces gives more than one reset event. The Pi treats
+  them all the same, so extra ones change nothing on screen.
 
 ## Write capture
 
-The event is stored on the rising edge of /WR, at the end of the write. The
-edge-connector clock is not used.
+The event is stored on the rising edge of `wclk` (/WR while /RESET is high),
+at the end of the write. The edge-connector clock is not used.
 
 - At the /WR rising edge, D0 to D7 are valid for memory writes and for I/O
   writes. Memory write data is valid before /WR falls. I/O write data can
@@ -79,21 +131,22 @@ edge-connector clock is not used.
 
 ## Clock domains
 
-There are two clock domains. The write side is clocked by /WR. The read side
+There are two clock domains. The write side is clocked by `wclk`, which is
+/WR while /RESET is high, plus one rising edge at the end of a reset. The read side
 is clocked by the rising edge of SOE (Pi GPIO 6). The two edges have no fixed
 relation. The queue pointers cross between them in Gray code, so a pointer
 sampled while it changes is either the old value or the new one.
 
-- Read pointer into the write side: one register samples it at the /WR
-  falling edge. The write side first uses it at the /WR rising edge of the
-  same write, so the register has at least one T-state (about 280 ns at
-  3.5 MHz) to settle from metastability. A /WR-clocked second register would
-  only update on the next write, so it is not used.
+- Read pointer into the write side: one register samples it at the `wclk`
+  falling edge. The write side first uses it at the next `wclk` rising edge,
+  the end of the same write, so the register has at least one T-state (about
+  280 ns at 3.5 MHz) to settle from metastability. A `wclk`-clocked second
+  register would only update on the next write, so it is not used.
 - Write pointer into the read side: two registers in series, clocked by SOE.
 - A stale pointer is always safe. A stale read pointer makes the queue look
   fuller than it is, so a write can never overwrite an entry the Pi has not
   read. A stale write pointer hides new entries for a few reads, and the Pi
-  gets empty pairs meanwhile. An entry's storage is written at the same /WR
+  gets empty pairs meanwhile. An entry's storage is written at the same `wclk`
   edge that advances the write pointer, and the read side reads it at least
   two SOE edges later.
 
@@ -224,6 +277,13 @@ write that matches both 0xFE and 0x1FFD, the inverted clock, back-to-back
 writes while the Pi reads, overflow and OVF, and SYNC (queue emptied,
 overflow cleared, paging kept, half-word pointer reset).
 
+The reset event tests check one reset event at power-up and one per reset,
+with DATA 0 and OFFSET 0 while the bus carries other values. They check that
+the reset event comes after events queued before the reset and before
+events after it, that paging is cleared, that a double match after a reset
+still arrives as TYPE 3 then TYPE 7 with OFFSET 0, and that a reset on a full
+queue is dropped and the next event carries OVF = 1.
+
 Simulation checks function only. It does not check timing or metastability.
 
 ## Logic element estimate
@@ -236,15 +296,22 @@ element (LE) has one 4-input look-up table and one register.
 |---|---|
 | Queue storage: 4 entries of 25 bits (TYPE 3, OFFSET 13, DATA 8, OVF 1), plus write enables | 100 to 106 |
 | Write capture flags, event decode, paging copies | 25 to 35 |
+| Reset event: `wclk` gate, `rst_seen`, decode, DATA forced to 0 | 3 to 11 |
 | Write pointer, read-pointer sample, full test, overflow flag | 10 to 14 |
 | Read pointer, write-pointer synchronizer, empty test, read state | 20 to 26 |
+| Double-entry marker: OFFSET bit 0 test, `dbl`, OFFSET bit 0 mask | 3 to 5 |
 | Output multiplexers and the PI_SD register | 55 to 75 |
 | NOT_EMPTY | 2 to 3 |
-| Total | 212 to 259 |
+| Total | 218 to 275 |
+
+Forcing DATA to 0 can fit in the look-up tables in front of the DATA
+storage registers. If it does not, it costs 8 LEs. A fourth stored TYPE bit
+in place of the marker would cost about 6 to 7 LEs at DEPTH 4 (4 storage
+registers and a wider TYPE multiplexer), and more at larger depths.
 
 At DEPTH 4 the design may not fit in 240 LEs. Storage and the output
-multiplexers grow with the depth. At DEPTH 2 the estimate is about 130 to
-160 LEs.
+multiplexers grow with the depth. At DEPTH 2 the estimate is about 135 to
+175 LEs.
 
 ## Not verified
 
@@ -253,6 +320,10 @@ multiplexers grow with the depth. At DEPTH 2 the estimate is about 130 to
   known.
 - The /IORQ flag uses an asynchronous set driven by logic (/IORQ and /WR both
   low). How Quartus implements it on MAX II is not known.
+- The write-side clock `wclk` is made by logic (/WR and /RESET). How the
+  fitter routes it, and its skew against the bus inputs, is not known.
+- The rise time of /RESET on each Spectrum model, and whether a slow or
+  bouncing edge gives more than one reset event.
 - The SOE low and high times the read side needs. They depend on the Quartus
   timing report.
 - The Z80A (NMOS) data hold time after /WR rises.

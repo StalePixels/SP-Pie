@@ -38,6 +38,7 @@ struct TIntakeShared
 	u64	Overflows;
 	u64	Mismatches;
 	u64	Malformed;
+	u64	Resets;
 	u64	BusyTicks;		// time spent on ring words, restarts and resyncs
 	u64	Restarts;		// SMI transfers started after the first
 	u64	MaxRestartGapTicks;	// upper bound of the read gap at a restart

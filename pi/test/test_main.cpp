@@ -140,6 +140,15 @@ static void TestDecoderFields (void)
 	CHECK (Event.Type == EventPortFE);
 	CHECK (Event.Data == 0x17);
 	CHECK (Event.Overflow);
+
+	// Reset: TYPE 0, DATA 0, OFFSET 0, with or without OVF.
+	CHECK_EQ_HEX (EncodeEvent (EventReset, 0, 0), 0x80004000u);
+	CHECK (DecodeWord (EncodeEvent (EventReset, 0, 0), Event) == WordEvent);
+	CHECK (Event.Type == EventReset);
+	CHECK (!Event.Overflow);
+	CHECK (DecodeWord (EncodeEvent (EventReset, 0, 0, true), Event) == WordEvent);
+	CHECK (Event.Type == EventReset);
+	CHECK (Event.Overflow);
 }
 
 static void TestDecoderMismatch (void)
@@ -163,7 +172,8 @@ static void TestDecoderMalformed (void)
 {
 	TEvent Event;
 
-	CHECK (DecodeWord (EncodeEvent (EventUnused, 0, 0), Event) == WordMalformed);
+	CHECK (DecodeWord (EncodeEvent (EventReset, 0x01, 0), Event) == WordMalformed);	// DATA not 0
+	CHECK (DecodeWord (EncodeEvent (EventReset, 0, 0x0001), Event) == WordMalformed);	// OFFSET not 0
 	CHECK (DecodeWord (EncodeEvent (EventBank5, 0, 0x1B00), Event) == WordMalformed);
 	CHECK (DecodeWord (EncodeEvent (EventPortFE, 0, 0x0001), Event) == WordMalformed);
 	CHECK (DecodeWord (EncodeEvent (EventPortFE, 0, 0) | 0x0100u, Event) == WordMalformed);
@@ -189,7 +199,7 @@ static void TestIntakeOverflow (void)
 		EmptyPairWord,
 		EmptyPairWord,
 		EncodeEvent (EventPortFE, 0x05, 0, true),
-		EncodeEvent (EventUnused, 0x00, 0),
+		EncodeEvent (EventReset, 0x80, 0),			// malformed: DATA not 0
 	});
 
 	CHECK (Counters.Events == 3);
@@ -493,6 +503,123 @@ static void TestUlaPlusPaletteAndMode (void)
 	CheckBorder (Frame, MakeRGB (0, 0xA0, 0));
 }
 
+// --- reset ---------------------------------------------------------------
+
+static void TestResetShadowScreen (void)
+{
+	CSpectrumState State;
+	State.Reset ();
+	TIntakeCounters Counters = {};
+
+	unsigned nPix = PixelRowOffset (60) + 4;
+	unsigned nAttr = AttributeRowOffset (60) + 4;
+
+	Feed (State, Counters, {
+		EncodeEvent (EventBank5, 0xF0, (uint16_t) nPix),
+		EncodeEvent (EventBank5, 0x07, (uint16_t) nAttr),	// white on black
+		EncodeEvent (EventBank7, 0x0F, (uint16_t) nPix),
+		EncodeEvent (EventBank7, 0x02 | (1 << 3), (uint16_t) nAttr),	// red on blue
+		EncodeEvent (EventPort1FFD, 0x05, 0),
+		EncodeEvent (EventPort7FFD, 0x08 | 0x07, 0),		// show bank 7
+	});
+
+	CTestFrame Frame;
+	Render (State, 0, Frame);
+	CheckCell (Frame, 4, 60, 0x0F, MakeRGB (0xA0, 0, 0), MakeRGB (0, 0, 0xA0));
+
+	Feed (State, Counters, { EncodeEvent (EventReset, 0, 0) });
+	CHECK (Counters.Resets == 1);
+	CHECK (Counters.Events == 7);
+	CHECK (State.Port7FFD == 0);
+	CHECK (State.Port1FFD == 0);
+	Render (State, 0, Frame);
+	CheckCell (Frame, 4, 60, 0xF0, MakeRGB (0xA0, 0xA0, 0xA0), MakeRGB (0, 0, 0));
+	// the screen banks keep their contents
+	CHECK (State.Bank7[nPix] == 0x0F);
+}
+
+static void TestResetUlaPlus (void)
+{
+	CSpectrumState State;
+	State.Reset ();
+	TIntakeCounters Counters = {};
+
+	unsigned nPix = PixelRowOffset (20) + 7;
+	unsigned nAttr = AttributeRowOffset (20) + 7;
+
+	std::vector<uint32_t> Words = {
+		EncodeEvent (EventBank5, 0xAA, (uint16_t) nPix),
+		EncodeEvent (EventBank5, (1 << 3) | 6, (uint16_t) nAttr),	// yellow on blue
+		EncodeEvent (EventPortFE, 0x02, 0),				// border red
+	};
+	for (unsigned i = 0; i < 64; i++)
+	{
+		Words.push_back (EncodeEvent (EventUlaReg, (uint8_t) i, 0));
+		Words.push_back (EncodeEvent (EventUlaData, (uint8_t) (255 - i), 0));
+	}
+	Words.push_back (EncodeEvent (EventUlaReg, 0x40, 0));
+	Words.push_back (EncodeEvent (EventUlaData, 0x01, 0));		// ULAplus on
+	Words.push_back (EncodeEvent (EventUlaReg, 0x17, 0));		// register latch not 0
+	Feed (State, Counters, Words);
+	CHECK (State.UlaPlusOn ());
+	CHECK (State.UlaPlusRegister == 0x17);
+
+	Feed (State, Counters, { EncodeEvent (EventReset, 0, 0) });
+	CHECK (Counters.Resets == 1);
+	CHECK (!State.UlaPlusOn ());
+	CHECK (State.UlaPlusMode == 0);
+	CHECK (State.UlaPlusRegister == 0);
+	CHECK (State.Border == 2);
+	for (unsigned i = 0; i < 64; i++)
+	{
+		CHECK (State.UlaPlusPalette[i] == (uint8_t) (255 - i));
+	}
+
+	// normal colours, border unchanged
+	CTestFrame Frame;
+	Render (State, 0, Frame);
+	CheckCell (Frame, 7, 20, 0xAA, MakeRGB (0xA0, 0xA0, 0), MakeRGB (0, 0, 0xA0));
+	CheckBorder (Frame, MakeRGB (0xA0, 0, 0));
+
+	// The register latch is 0 after the reset, so a data-port write with no
+	// register write before it sets palette entry 0.
+	Feed (State, Counters, { EncodeEvent (EventUlaData, 0x1C, 0) });
+	CHECK (State.UlaPlusPalette[0] == 0x1C);
+	CHECK (!State.UlaPlusOn ());
+
+	// The kept palette is used again when software turns ULAplus back on.
+	Feed (State, Counters, {
+		EncodeEvent (EventUlaReg, 0x40, 0),
+		EncodeEvent (EventUlaData, 0x01, 0),
+	});
+	Render (State, 0, Frame);
+	CheckBorder (Frame, UlaPlusColour (State.UlaPlusPalette[8 + 2]));
+	CHECK (State.UlaPlusPalette[8 + 2] == (uint8_t) (255 - 10));
+}
+
+static void TestResetBorderAndOverflow (void)
+{
+	CSpectrumState State;
+	State.Reset ();
+	TIntakeCounters Counters = {};
+
+	Feed (State, Counters, {
+		EncodeEvent (EventPortFE, 0x05, 0),
+		EncodeEvent (EventReset, 0, 0, true),	// a reset event can carry OVF
+		EmptyPairWord,
+		EncodeEvent (EventReset, 0, 0),
+	});
+	CHECK (Counters.Resets == 2);
+	CHECK (Counters.Overflows == 1);
+	CHECK (Counters.Events == 3);
+	CHECK (Counters.Malformed == 0);
+	CHECK (State.Border == 5);
+
+	CTestFrame Frame;
+	Render (State, 0, Frame);
+	CheckBorder (Frame, MakeRGB (0, 0xA0, 0xA0));
+}
+
 int main (void)
 {
 	Run ("decoder: fields of event and empty pair", TestDecoderFields);
@@ -507,6 +634,9 @@ int main (void)
 	Run ("renderer: FLASH phases", TestFlashPhases);
 	Run ("renderer: ULAplus colour conversion", TestUlaPlusColour);
 	Run ("renderer: ULAplus palette and mode on/off", TestUlaPlusPaletteAndMode);
+	Run ("reset: shadow screen back to bank 5, paging cleared", TestResetShadowScreen);
+	Run ("reset: ULAplus off, palette kept, register latch cleared", TestResetUlaPlus);
+	Run ("reset: border kept, OVF and counter", TestResetBorderAndOverflow);
 
 	printf ("%u tests, %u failed, %u checks, %u failed checks\n",
 		s_nTests, s_nTestsFailed, s_nChecks, s_nFailures);

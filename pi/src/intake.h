@@ -25,6 +25,7 @@ struct TIntakeCounters
 	uint64_t	Overflows;	// events with OVF = 1: one per run of dropped events
 	uint64_t	Mismatches;	// words with a wrong H bit
 	uint64_t	Malformed;	// words with correct H bits that break the format, dropped
+	uint64_t	Resets;		// reset events (TYPE 0), also counted in Events
 };
 
 // Decodes up to nCount words from pWords and applies each valid event.

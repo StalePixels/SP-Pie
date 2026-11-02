@@ -50,7 +50,7 @@ Half-word 1:
 
 | TYPE | Event | Decode |
 |---|---|---|
-| 0 | Not used | |
+| 0 | Reset | /RESET went high (end of a Spectrum reset). DATA and OFFSET are 0 |
 | 1 | Write to RAM bank 5, OFFSET below 0x1B00 | Memory write, bank from the paging state |
 | 2 | Write to RAM bank 7, OFFSET below 0x1B00 | Memory write, bank from the paging state |
 | 3 | Write to port 0xFE | I/O write, A0 = 0 |
@@ -68,6 +68,7 @@ One I/O write can match both the 0xFE and the 0x1FFD decodes, as on the +2A/+3. 
 The CPLD keeps copies of port 0x7FFD and port 0x1FFD to know which bank a memory write goes to.
 
 - Both are cleared while /RESET is low.
+- When /RESET goes high, the CPLD queues a reset event (TYPE 0). It comes after every event from before the reset. When the queue is full, the reset event is dropped like any other event, and the next event has OVF = 1. On a reset event the Pi sets its copies of 0x7FFD and 0x1FFD to 0, turns ULAplus mode off and sets the ULAplus register to 0. The ULAplus palette and the border stay as they are.
 - 0x7FFD bit 5 set locks both ports until reset. Writes to a locked port are ignored and queue no event.
 - With 0x1FFD bit 0 = 0 (normal paging): 0x4000 to 0x7FFF is bank 5, and 0xC000 to 0xFFFF is the bank in 0x7FFD bits 2 to 0.
 - With 0x1FFD bit 0 = 1 (special paging, +2A/+3), 0x1FFD bits 2 and 1 select the banks for 0x0000, 0x4000, 0x8000 and 0xC000:

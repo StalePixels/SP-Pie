@@ -22,9 +22,9 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 {
 	CString Line1, Line2, Line3;
 
-	Line1.Format ("EV%6u EMP%7u OVF%5u HS%5u BAD%5u",
+	Line1.Format ("EV%6u EMP%7u OVF%5u HS%5u BAD%5u RST%3u",
 		      rReport.Events, rReport.EmptyPairs, rReport.Overflows,
-		      rReport.Mismatches, rReport.Malformed);
+		      rReport.Mismatches, rReport.Malformed, rReport.Resets);
 	Line2.Format ("IN%6u IDI%6u RN%6u IDR%6u us",
 		      rReport.IntakeBusyUs, rReport.IntakeIdleUs,
 		      rReport.RenderUs, rReport.RenderIdleUs);

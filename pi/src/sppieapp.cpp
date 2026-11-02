@@ -155,6 +155,7 @@ void CSpPieApp::RunIntake (void)
 			Publish (&m_Shared.Overflows, Counters.Overflows);
 			Publish (&m_Shared.Mismatches, Counters.Mismatches);
 			Publish (&m_Shared.Malformed, Counters.Malformed);
+			Publish (&m_Shared.Resets, Counters.Resets);
 			Publish (&m_Shared.BusyTicks, nBusyTicks);
 			Publish (&m_Shared.Restarts, nRestarts);
 			Publish (&m_Shared.MaxRestartGapTicks, nMaxGap);
@@ -236,6 +237,7 @@ void CSpPieApp::RunRenderer (void)
 		Report.Overflows = (unsigned) Fetch (&m_Shared.Overflows);
 		Report.Mismatches = (unsigned) Fetch (&m_Shared.Mismatches);
 		Report.Malformed = (unsigned) Fetch (&m_Shared.Malformed);
+		Report.Resets = (unsigned) Fetch (&m_Shared.Resets);
 		Report.MaxBacklogWords = (unsigned) Fetch (&m_Shared.MaxBacklogWords);
 		Report.Restarts = (unsigned) Fetch (&m_Shared.Restarts);
 		Report.MaxRestartGapUs = (unsigned) TicksToMicroseconds (

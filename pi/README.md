@@ -58,9 +58,11 @@ Each of these counts as one H mismatch. The kernel also pulses SYNC once at star
 - **Empty**: exactly 0x0000 then 0x8000.
 - **Event**: V = 1 with valid fields. It is applied to the state.
 - **Mismatch**: a wrong H bit. The resync above follows.
-- **Malformed**: correct H bits, but the word is not the exact empty pair and not a valid event. This covers TYPE 0, a set reserved bit, a screen OFFSET at or above 0x1B00, or a non-zero OFFSET on a port event. The word is dropped and counted, with no resync.
+- **Malformed**: correct H bits, but the word is not the exact empty pair and not a valid event. This covers a set reserved bit, a screen OFFSET at or above 0x1B00, a non-zero OFFSET on a port or reset event, or a non-zero DATA on a reset event. The word is dropped and counted, with no resync.
 
-An event with OVF = 1 is applied as normal and counted. The events dropped before it cannot be recovered.
+TYPE 0 with V = 1, DATA 0 and OFFSET 0 is a reset event. The CPLD sends it when /RESET goes high, at the end of a Spectrum reset.
+
+An event with OVF = 1 is applied as normal and counted. The events dropped before it cannot be recovered. A reset event can be among the dropped events.
 
 ### State model
 
@@ -72,7 +74,7 @@ An event with OVF = 1 is applied as normal and counted. The events dropped befor
 - Port 0x1FFD. Stored for completeness, not used by the picture.
 - The ULAplus register, the 64-entry palette and the mode byte. Data-port writes with register group 0 set palette entries and group 1 sets the mode. Groups 2 and 3 are ignored. Mode bit 0 turns ULAplus on. The optional greyscale bit is not used.
 
-The Pi learns nothing from a Spectrum reset. After a reset, the state keeps its last values until new events arrive.
+A reset event sets the copies of ports 0x7FFD and 0x1FFD to 0, so bank 5 is shown, and sets the ULAplus mode byte and the ULAplus register to 0, so ULAplus is off. The screen banks, the border colour and the ULAplus palette keep their values.
 
 ### Renderer
 
@@ -141,6 +143,7 @@ With `OVERLAY=1` (the default), three lines of text in the bottom border show th
 | `OVF` | Events with OVF set, since boot. Each one means at least one lost event |
 | `HS` | H mismatches since boot. Each one caused a SYNC pulse |
 | `BAD` | Malformed words since boot |
+| `RST` | Reset events since boot. They are also counted in `EV` |
 | `IN` | Intake core time spent on ring words, restarts and resyncs, in µs per frame |
 | `IDI` | Intake core time spent polling with nothing new, in µs per frame |
 | `RN` | Renderer time to draw, overlay and copy the frame, in µs |
@@ -173,7 +176,8 @@ The tests cover:
 - the shadow screen switch,
 - a border change, and a 0xFE plus 0x1FFD write arriving as two events,
 - both FLASH phases,
-- ULAplus colour conversion, palette upload, and mode on and off.
+- ULAplus colour conversion, palette upload, and mode on and off,
+- the reset event: its fields, the shadow screen going back to bank 5, ULAplus going off with the palette kept, the border kept, and the reset counter.
 
 ## What is not verified
 
