@@ -45,8 +45,12 @@ public:
 	virtual void TimedEvent (const TEvent &rEvent, uint64_t nCount) = 0;
 
 	// Every event captured before nCount - CaptureLagClocks has been given
-	// to TimedEvent ().
-	virtual void Clock (uint64_t nCount) = 0;
+	// to TimedEvent (). nCount is the count an empty pair carried; nTicks
+	// is when the CPLD took it, in ticks of the Pi's timer, with a fraction.
+	virtual void Clock (uint64_t nCount, double nTicks) = 0;
+
+	// Reads stopped and start again with the transfer that begins now.
+	virtual void ReadsRestarted (void) {}
 
 protected:
 	~ITimedEventSink (void) {}

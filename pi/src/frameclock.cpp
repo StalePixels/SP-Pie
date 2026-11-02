@@ -15,6 +15,7 @@ CFrameClock::CFrameClock (CEventLog *pLog, const uint32_t pFrameTStates[MachineC
 	for (unsigned i = 0; i < MachineCount; i++)
 	{
 		m_FrameTStates[i] = pFrameTStates[i];
+		m_pContention[i] = 0;
 	}
 	Reset ();
 }
@@ -46,6 +47,112 @@ void CFrameClock::Reset (void)
 	m_nLastTState = 0;
 	m_nCompleted = 0;
 	m_nClamped = 0;
+
+	ClearAlignment ();
+	m_nAlignments = 0;
+	m_bCheckContention = true;
+}
+
+void CFrameClock::EnableContentionCheck (bool bEnable)
+{
+	m_bCheckContention = bEnable;
+	ClearAlignment ();
+}
+
+void CFrameClock::SetContention (TMachine Machine, const uint8_t *pTable)
+{
+	if (Machine < MachineCount)
+	{
+		m_pContention[Machine] = pTable;
+	}
+}
+
+int CFrameClock::ContentionAt (uint64_t nCount) const
+{
+	const uint8_t *pTable = m_pContention[m_Machine];
+	if (pTable == 0 || !m_bHaveStart)
+	{
+		return -1;
+	}
+	uint32_t nFrame, nTState;
+	Locate (nCount, nFrame, nTState);
+	return pTable[nTState];
+}
+
+void CFrameClock::ClearAlignment (void)
+{
+	for (unsigned i = 0; i < 8; i++)
+	{
+		m_Misfits[i] = 0;
+	}
+	m_nFitWrites = 0;
+	m_bAligned = false;
+}
+
+// nTState: where the current frame start puts a write to contended memory.
+void CFrameClock::CheckContention (uint32_t nTState)
+{
+	const uint8_t *pTable = m_pContention[m_Machine];
+	if (pTable == 0 || nTState < 3 + 4 || nTState + 4 >= m_nFrameTStates)
+	{
+		return;
+	}
+
+	// Candidate k puts the write's cycle, after its delay, at
+	// nTState - 3 + (k - 4). Only writes inside the screen fetch count.
+	const uint8_t *pDelay = pTable + nTState - 3 - 4;
+	bool bInFetch = false;
+	for (unsigned k = 0; k < 8; k++)
+	{
+		bInFetch = bInFetch || pDelay[k] != 0;
+	}
+	if (!bInFetch)
+	{
+		return;
+	}
+	for (unsigned k = 0; k < 8; k++)
+	{
+		if (pDelay[k] != 0)
+		{
+			m_Misfits[k]++;
+		}
+	}
+	if (++m_nFitWrites < AlignWrites)
+	{
+		return;
+	}
+
+	// The candidate with the fewest misfits; on a tie the one nearest the
+	// current start.
+	static const unsigned Order[8] = { 4, 3, 5, 2, 6, 1, 7, 0 };
+	unsigned nBest = Order[0];
+	for (unsigned i = 1; i < 8; i++)
+	{
+		if (m_Misfits[Order[i]] < m_Misfits[nBest])
+		{
+			nBest = Order[i];
+		}
+	}
+
+	bool bFits = m_Misfits[nBest] * 16 <= m_nFitWrites;
+	for (unsigned i = 0; i < 8; i++)
+	{
+		m_Misfits[i] = 0;
+	}
+	m_nFitWrites = 0;
+	if (!bFits)
+	{
+		return;
+	}
+
+	// The write is really at nTState + d, so the frame start is d earlier.
+	int64_t d = (int64_t) nBest - 4;
+	if (d != 0)
+	{
+		m_nStart = (uint64_t) ((int64_t) m_nStart - d);
+		m_nAlignments++;
+	}
+	m_bAligned = true;
 }
 
 uint64_t CFrameClock::FrameStart (uint32_t nFrame) const
@@ -90,6 +197,7 @@ void CFrameClock::SetStart (uint64_t nStart)
 	m_nStart = nStart;
 	m_nStartFrame = nFrame;
 	m_bHaveStart = true;
+	ClearAlignment ();
 }
 
 void CFrameClock::UpdateMachine (void)
@@ -114,6 +222,7 @@ void CFrameClock::UpdateMachine (void)
 		m_nOffEvents = 0;
 	}
 	m_nFrameTStates = nFrameTStates;
+	ClearAlignment ();
 }
 
 uint32_t CFrameClock::MinFrameClocks (void) const
@@ -182,6 +291,7 @@ void CFrameClock::FrameEvent (uint64_t nCount)
 				{
 					m_Class = Vote;
 					m_nVotes = 0;
+					m_bPort1FFDSeen = false;
 					UpdateMachine ();
 				}
 			}
@@ -220,7 +330,10 @@ void CFrameClock::FrameEvent (uint64_t nCount)
 
 	if (nDelay < 0 && nDelay > -(int64_t) MaxAckDelayTStates)
 	{
-		m_nStart += nDelay;		// earlier
+		if (!m_bAligned)
+		{
+			m_nStart += nDelay;	// earlier
+		}
 		m_nOffEvents = 0;
 	}
 	else if (nDelay >= 0 && nDelay < (int64_t) MaxAckDelayTStates)
@@ -243,6 +356,16 @@ void CFrameClock::TimedEvent (const TEvent &rEvent, uint64_t nCount)
 		UpdateMachine ();
 	}
 
+	// After a reset the board may sit on another Spectrum: the +2A/+3 is
+	// detected again from its ROM's first 0x1FFD write, and the class from
+	// the next frames.
+	if (rEvent.Kind == KindReset && m_bPort1FFDSeen)
+	{
+		m_bPort1FFDSeen = false;
+		m_nVotes = 0;
+		UpdateMachine ();
+	}
+
 	if (rEvent.Frame && !rEvent.Overflow)
 	{
 		FrameEvent (nCount);
@@ -261,6 +384,12 @@ void CFrameClock::TimedEvent (const TEvent &rEvent, uint64_t nCount)
 
 	uint32_t nFrame, nTState;
 	Locate (nEffect, nFrame, nTState);
+
+	if (   m_bLocked && m_bCheckContention && rEvent.Kind == KindMemory
+	    && rEvent.Address >= 0x4000 && rEvent.Address < 0x8000)
+	{
+		CheckContention (nTState);
+	}
 
 	if ((int32_t) (nFrame - m_nCompleted) < 0)
 	{
@@ -290,8 +419,10 @@ void CFrameClock::TimedEvent (const TEvent &rEvent, uint64_t nCount)
 	}
 }
 
-void CFrameClock::Clock (uint64_t nCount)
+void CFrameClock::Clock (uint64_t nCount, double nTicks)
 {
+	(void) nTicks;
+
 	if (!m_bHaveStart)
 	{
 		SetStart (nCount);

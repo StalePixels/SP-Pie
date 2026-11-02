@@ -38,7 +38,7 @@ FUSEULA_OBJDIR = fuseula/obj
 FUSEULA_OBJS = $(addprefix $(FUSEULA_OBJDIR)/,$(notdir $(FUSEULA_SOURCES:.c=.o)))
 
 OBJS	= src/main.o src/kernel.o src/sppieapp.o src/smieventreader.o \
-	  src/intake.o src/tstateclock.o src/frameclock.o src/presenter.o \
+	  src/intake.o src/tstateclock.o src/ulaclock.o src/frameclock.o src/presenter.o \
 	  src/overlay.o $(FUSEULA_OBJS)
 
 DEFINE	+= -DSPPIE_OVERLAY=$(OVERLAY)

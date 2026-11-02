@@ -20,10 +20,12 @@
 #include "../src/picture.h"
 #include "../src/presenter.h"
 #include "../src/tstateclock.h"
+#include "../src/ulaclock.h"
 #include "../fuseula/fuseula.h"
 
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <stdio.h>
 #include <string.h>
@@ -307,7 +309,7 @@ static void TestIntakeMismatchStops (void)
 
 static const uint64_t TickHz = 19200000;	// the Pi's generic timer
 static const double ReadNs = 200.0;
-static const double ClockNs = 1e9 / 3546900.0;
+static double ClockNs = 1e9 / 3546900.0;	// the simulated Z80 clock
 
 static uint64_t CountAt (double nNs)
 {
@@ -331,6 +333,7 @@ struct TSimWrite
 	uint16_t	Address;
 	uint8_t		Data;
 	bool		Frame;		// first write after an acknowledge
+	double		Ns = 0;		// when /WR rises; 0: from Count
 };
 
 struct TSimStop
@@ -380,14 +383,14 @@ public:
 		for (double nEnd = ReadNs; nEnd < nEndNs; nEnd += ReadNs)
 		{
 			// Writes that end before this read ends.
-			while (nWrite < rWrites.size () && CountNs (rWrites[nWrite].Count) < nEnd)
+			while (nWrite < rWrites.size () && WriteNs (rWrites[nWrite]) < nEnd)
 			{
 				const TSimWrite &rWrite = rWrites[nWrite++];
 				bFrame = bFrame || rWrite.Frame;
 				if (Queue.size () < Depth)
 				{
 					Queue.push_back ({ rWrite, bOverflow, bFrame,
-							   CountNs (rWrite.Count) + 2 * ReadNs });
+							   WriteNs (rWrite) + 2 * ReadNs });
 					Stored.push_back ({ rWrite.Count, rWrite, bOverflow });
 					bOverflow = bFrame = false;
 				}
@@ -435,7 +438,7 @@ public:
 			}
 			else
 			{
-				EncodeEmpty (w, (uint8_t) (CountAt (nEnd) & CountMask));
+				EncodeEmpty (w, (uint8_t) (CountAtNs (nEnd) & CountMask));
 				nLoaded = w[0];
 			}
 
@@ -449,6 +452,15 @@ public:
 		}
 		EndNs = nEndNs;
 	}
+
+	static double WriteNs (const TSimWrite &rWrite)
+	{
+		return rWrite.Ns != 0 ? rWrite.Ns : CountNs (rWrite.Count);
+	}
+
+	// The CPLD's count at a moment: the ULA's T-states, or fewer where the
+	// clock stops.
+	std::function<uint64_t (double)> CountAtNs = CountAt;
 
 	std::vector<uint32_t>	Words;
 	std::vector<TTransfer>	Transfers;
@@ -500,8 +512,9 @@ public:
 		Events.push_back (rEvent);
 		Counts.push_back (nCount);
 	}
-	void Clock (uint64_t nCount) override
+	void Clock (uint64_t nCount, double nTicks) override
 	{
+		(void) nTicks;
 		Last = nCount;
 	}
 
@@ -689,7 +702,7 @@ static void TestFrameStartFromEarliestAck (void)
 				   nFrameStart + FrameEventTStates + Delay[n]);
 		Frames.TimedEvent (MakeEvent (KindMemory, 0x5800, n), nFrameStart + 20000);
 		Frames.TimedEvent (MakeEvent (KindIo, 0x00FE, n), nFrameStart + 30000);
-		Frames.Clock (nFrameStart + L + 10);
+		Frames.Clock (nFrameStart + L + 10, 0.0);
 	}
 
 	CHECK (Frames.Locked ());
@@ -739,7 +752,7 @@ static void TestMachineDetection (void)
 		{
 			uint64_t s = 1000000 + (uint64_t) n * 69888;
 			Frames.TimedEvent (MakeEvent (KindMemory, 0xFFFE, 0, true), s + 10 + (n % 3));
-			Frames.Clock (s + 69888 + 10);
+			Frames.Clock (s + 69888 + 10, 0.0);
 		}
 		CHECK_EQ (Frames.Machine (), Machine48K);
 		CHECK_EQ (Frames.FrameTStates (), 69888u);
@@ -756,7 +769,7 @@ static void TestMachineDetection (void)
 			{
 				Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), s + 500);
 			}
-			Frames.Clock (s + 70908 + 10);
+			Frames.Clock (s + 70908 + 10, 0.0);
 			CHECK_EQ (Frames.Machine (), n < 3 ? Machine128K : MachinePlus3);
 		}
 		CHECK_EQ (Frames.FrameTStates (), 70908u);
@@ -978,6 +991,177 @@ static void TestUlaPlus (void)
 	fuseula_end_frame ();
 }
 
+static void TestMulticolourAcrossFlashFrames (void)
+{
+	// A multicolour engine rewrites the attribute of a cell for each line,
+	// every frame, while another cell has FLASH set. Fuse swaps FLASH every
+	// 16 frames inside display_frame (); every frame, including those, must
+	// keep its per-line inks.
+	auto pPicture = NewPicture ();
+	fuseula_select (FUSEULA_128K);
+	ClearScreen (0x38, 0);
+	const unsigned nCol = 7, nRow = 3;
+	for (unsigned y = 0; y < 8; y++)
+	{
+		fuseula_memory_write (0, 0x4000 + PixelOffset (8 * nRow + y, nCol), 0xFF);
+	}
+	fuseula_memory_write (0, 0x4000 + AttrOffset (100, 20), 0x80 | 0x38 | 2);	// FLASH
+	fuseula_end_frame ();
+
+	const uint8_t Ink[8] = { 1, 2, 3, 4, 5, 6, 7, 2 };
+	unsigned nBadFrames = 0;
+	for (unsigned f = 0; f < 40; f++)
+	{
+		for (unsigned y = 0; y < 8; y++)
+		{
+			uint32_t t = ChunkTState (6 + nCol, 39 + 8 * nRow + y) - 20;
+			fuseula_memory_write (t, 0x4000 + AttrOffset (8 * nRow, nCol),
+					      (uint8_t) (0x38 | Ink[y]));
+		}
+		fuseula_end_frame ();
+
+		bool bBad = false;
+		for (unsigned y = 0; y < 8; y++)
+		{
+			bBad = bBad || pPicture->Screen (8 * nCol, 8 * nRow + y) != Colour (Ink[y]);
+		}
+		nBadFrames += bBad;
+	}
+	CHECK_EQ (nBadFrames, 0u);
+}
+
+// A +3 multicolour engine and a frame start that F events alone get wrong.
+// Each attribute write for line y of a cell aims at the chunk's fetch
+// T-state + 3 + j (j = -3 to 3, by cell and line) and ends at the last
+// T-state at or before that where Fuse's +3 contention lets a contended
+// write end. Writes at or before fetch + 3 reach their line; later ones
+// reach the next line. Placed a T-state or two off, some land on the wrong
+// line.
+static uint32_t EngineWriteTState (const std::vector<uint8_t> &rContention, unsigned nCol,
+				   unsigned nLine, unsigned nIndex)
+{
+	int j = (int) (nIndex % 7) - 3;
+	uint32_t t = (uint32_t) ((int) ChunkTState (6 + nCol, 39 + nLine) + 3 + j);
+	while (rContention[t - 3] != 0)
+	{
+		t--;
+	}
+	return t;
+}
+
+static void RunContentionAligned (int nAckPhase, bool bEarlyFrameEvent, unsigned &rBadLines,
+				  uint32_t &rAlignments)
+{
+	auto pPicture = NewPicture ();
+	std::vector<uint8_t> Contention (70908);
+	fuseula_contention (FUSEULA_PLUS3, Contention.data (), (uint32_t) Contention.size ());
+	fuseula_select (FUSEULA_PLUS3);
+	ClearScreen (0x38, 0);
+	for (unsigned y = 0; y < 192; y++)
+	{
+		for (unsigned c = 0; c < 32; c++)
+		{
+			fuseula_memory_write (0, 0x4000 + PixelOffset (y, c), 0xFF);
+		}
+	}
+	fuseula_end_frame ();
+
+	std::unique_ptr<CEventLog> pLog (new CEventLog);
+	CFrameClock Frames (pLog.get (), FrameLengths (), ChoosePlus3);
+	Frames.SetContention (MachinePlus3, Contention.data ());
+	CFramePresenter Presenter (pLog.get ());
+
+	const uint64_t S = 3000000;
+	const uint32_t L = 70908;
+	const unsigned nFrames = 12, nCol0 = 1, nCols = 4, nRows = 6;
+	auto Ink = [] (unsigned y, unsigned r, unsigned c) { return (uint8_t) (1 + (y + r + c) % 7); };
+
+	for (unsigned n = 0; n < nFrames; n++)
+	{
+		uint64_t s = S + (uint64_t) n * L;
+
+		// The push: the acknowledge always nAckPhase T-states late; with
+		// bEarlyFrameEvent, the first F event comes 2 T-states before the
+		// true start.
+		uint64_t nPush = s + FrameEventTStates + nAckPhase;
+		if (bEarlyFrameEvent && n == 0)
+		{
+			nPush = s + FrameEventTStates - 2;
+		}
+		Frames.TimedEvent (MakeEvent (KindMemory, 0x5BFE, 0, true), nPush);
+
+		std::vector<std::pair<uint32_t, TEvent>> Writes;
+		for (unsigned r = 0; r < nRows; r++)
+		{
+			for (unsigned c = 0; c < nCols; c++)
+			{
+				for (unsigned y = 0; y < 8; y++)
+				{
+					unsigned nLine = 8 * (r + 1) + y;
+					uint32_t t = EngineWriteTState (Contention, nCol0 + c, nLine, 5 * y + 3 * r + c);
+					Writes.push_back ({ t, MakeEvent (KindMemory,
+						(uint16_t) (0x4000 + AttrOffset (nLine, nCol0 + c)),
+						(uint8_t) (0x38 | Ink (y, r, c))) });
+				}
+			}
+		}
+		std::sort (Writes.begin (), Writes.end (),
+			   [] (const std::pair<uint32_t, TEvent> &a, const std::pair<uint32_t, TEvent> &b)
+			   { return a.first < b.first; });
+		for (const auto &rWrite : Writes)
+		{
+			Frames.TimedEvent (rWrite.second, s + rWrite.first);
+		}
+		Frames.Clock (s + L + 10, 0.0);
+	}
+	while (Presenter.Present ())
+	{
+	}
+
+	// Fuse's rule at the true T-states: a write at t reaches the chunk at T
+	// when t <= T + 3; a later one leaves the line with the ink before it.
+	rBadLines = 0;
+	for (unsigned r = 0; r < nRows; r++)
+	{
+		for (unsigned c = 0; c < nCols; c++)
+		{
+			for (unsigned y = 0; y < 8; y++)
+			{
+				unsigned nLine = 8 * (r + 1) + y;
+				uint32_t t = EngineWriteTState (Contention, nCol0 + c, nLine, 5 * y + 3 * r + c);
+				bool bThisLine = t <= ChunkTState (6 + nCol0 + c, 39 + nLine) + 3;
+				uint8_t nExpect = bThisLine ? Ink (y, r, c) : Ink ((y + 7) % 8, r, c);
+				if (pPicture->Screen (8 * (nCol0 + c), nLine) != Colour (nExpect))
+				{
+					rBadLines++;
+				}
+			}
+		}
+	}
+	rAlignments = Frames.Alignments ();
+}
+
+static void TestContentionAlignedFrameStart (void)
+{
+	unsigned nBad;
+	uint32_t nAlignments;
+
+	// Every acknowledge 2 T-states late (a program locked to the cycle).
+	RunContentionAligned (2, false, nBad, nAlignments);
+	CHECK_EQ (nBad, 0u);
+	CHECK (nAlignments >= 1);
+
+	// The first F event 2 T-states before the true start.
+	RunContentionAligned (0, true, nBad, nAlignments);
+	CHECK_EQ (nBad, 0u);
+	CHECK (nAlignments >= 1);
+
+	// Exact acknowledges: nothing to move.
+	RunContentionAligned (0, false, nBad, nAlignments);
+	CHECK_EQ (nBad, 0u);
+	CHECK_EQ (nAlignments, 0u);
+}
+
 // --- presentation ---------------------------------------------------------
 
 static void PushFrame (CEventLog &rLog, uint32_t nFrame, uint8_t nBorder)
@@ -1085,11 +1269,14 @@ static void TestEndToEndMulticolour (void)
 
 	std::unique_ptr<CEventLog> pLog (new CEventLog);
 	CFrameClock Frames (pLog.get (), FrameLengths (), ChooseAuto);
-	CTStateClock Clock (&Frames, TickHz, 3546900);
+	CUlaClock Ula (&Frames, &Frames, TickHz);
+	CTStateClock Clock (&Ula, TickHz, 3546900);
 	TIntakeCounters Counters;
 	Feed (Sim, Clock, Counters);
 	pLog->Publish ();
 
+	CHECK (!Ula.Stopped ());
+	CHECK_EQ (Ula.MinFrameClocks () + 64 > L, true);
 	CHECK (Frames.Locked ());
 	CHECK_EQ (Frames.Machine (), Machine128K);
 	CHECK_EQ (Clock.Ambiguous (), 0u);
@@ -1111,6 +1298,243 @@ static void TestEndToEndMulticolour (void)
 	CHECK_EQ (pPicture->Chunk (43, 269), Red);
 	CHECK_EQ (pPicture->Chunk (0, 2), Red);
 	CHECK_EQ (pPicture->Chunk (0, 3), Blue);
+}
+
+// --- a 128K: the edge-connector clock stops during contention ---------------
+
+// A recording sink between the ULA clock and the frame clock.
+class CTeeSink : public ITimedEventSink
+{
+public:
+	explicit CTeeSink (ITimedEventSink *pNext) : m_pNext (pNext) {}
+	void TimedEvent (const TEvent &rEvent, uint64_t nCount) override
+	{
+		Events.push_back (rEvent);
+		Counts.push_back (nCount);
+		m_pNext->TimedEvent (rEvent, nCount);
+	}
+	void Clock (uint64_t nCount, double nTicks) override	{ m_pNext->Clock (nCount, nTicks); }
+	void ReadsRestarted (void) override			{ m_pNext->ReadsRestarted (); }
+
+	std::vector<TEvent> Events;
+	std::vector<uint64_t> Counts;
+
+private:
+	ITimedEventSink *m_pNext;
+};
+
+// A Z80 on a 128K whose clock the ULA holds, per Fuse's contention table:
+// a memory access to contended memory that starts at ULA T-state s waits
+// Contention[s] T-states. The edge-connector clock is the Z80 clock, so it
+// does not tick while the Z80 waits.
+class CStoppingZ80
+{
+public:
+	explicit CStoppingZ80 (const std::vector<uint8_t> &rContention, uint32_t nFrameTStates)
+	:	m_rContention (rContention), m_nL (nFrameTStates) {}
+
+	// A contended access whose cycle starts at ULA time s (absolute).
+	// Returns the ULA time it ends, for a 3 T-state cycle.
+	uint64_t Contended (uint64_t s)
+	{
+		uint8_t nWait = m_rContention[s % m_nL];
+		if (nWait != 0)
+		{
+			m_Stalls.push_back ({ s, nWait });
+		}
+		return s + nWait + 3;
+	}
+
+	// The count at ULA time u: ULA T-states less those the Z80 waited
+	// before u.
+	uint64_t CountAt (double u) const
+	{
+		uint64_t nEdges = (uint64_t) u;
+		uint64_t nStall = 0;
+		for (const auto &rStall : m_Stalls)
+		{
+			if (rStall.first >= nEdges)
+			{
+				break;
+			}
+			uint64_t nEnd = rStall.first + rStall.second;
+			nStall += (nEnd <= nEdges ? nEnd : nEdges) - rStall.first;
+		}
+		return nEdges - nStall;
+	}
+
+private:
+	const std::vector<uint8_t> &m_rContention;
+	uint32_t m_nL;
+	std::vector<std::pair<uint64_t, uint8_t>> m_Stalls;	// start, length
+};
+
+static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClockHz)
+{
+	// Each frame: the interrupt push 0 to 3 T-states after the start
+	// (HALT), then attribute writes for every line of 6 character rows and
+	// 4 columns, each aimed near the fetch of its chunk, with a contended
+	// read of the screen before every other write that nobody sees. The
+	// writes end where Fuse's contention lets them; the clock loses every
+	// T-state the Z80 waits. Reads stop for 7 us every 13.1 ms.
+	auto pPicture = NewPicture ();
+	const uint32_t L = fuseula_frame_tstates (Machine);
+	ClockNs = 1e9 / nClockHz;
+	std::vector<uint8_t> Contention (L);
+	fuseula_contention (Machine, Contention.data (), L);
+	fuseula_select (Machine);
+	const TMachine Expect = (TMachine) Machine;
+	ClearScreen (0x38, 0);
+	for (unsigned y = 0; y < 192; y++)
+	{
+		for (unsigned c = 0; c < 32; c++)
+		{
+			fuseula_memory_write (0, 0x4000 + PixelOffset (y, c), 0xFF);
+		}
+	}
+	fuseula_end_frame ();
+
+	CStoppingZ80 Z80 (Contention, L);
+	const uint64_t S = 2 * L;
+	const unsigned nFrames = 20, nCol0 = 1, nCols = 4, nRows = 6;
+	auto Ink = [] (unsigned y, unsigned r, unsigned c) { return (uint8_t) (1 + (y + r + c) % 7); };
+
+	struct TTrueWrite { uint64_t u; TSimWrite Write; };
+	std::vector<TTrueWrite> True;
+	std::vector<std::vector<uint64_t>> Ends (nFrames);	// true end per write, per frame
+	for (unsigned n = 0; n < nFrames; n++)
+	{
+		uint64_t s = S + (uint64_t) n * L;
+		uint64_t nPush = s + FrameEventTStates + (n * 3 + 1) % 4 * (n == 2 ? 0 : 1);
+		True.push_back ({ nPush, { 0, KindMemory, 0xBFFE, 0x12, true, 0 } });
+		True.push_back ({ nPush + 3, { 0, KindMemory, 0xBFFD, 0x34, false, 0 } });
+
+		uint64_t nNow = s + 1000;
+		unsigned nIndex = 0;
+		for (unsigned r = 0; r < nRows; r++)
+		{
+			for (unsigned y = 0; y < 8; y++)
+			{
+				for (unsigned c = 0; c < nCols; c++, nIndex++)
+				{
+					unsigned nLine = 8 * (r + 1) + y;
+					int j = (int) ((5 * y + 3 * r + c) % 7) - 3;
+					uint64_t nAim = s + (uint64_t) ((int) ChunkTState (6 + nCol0 + c, 39 + nLine) + j);
+					uint64_t nStart = nAim > nNow ? nAim : nNow;
+					if (nIndex % 2 == 0)
+					{
+						nStart = Z80.Contended (nStart) + 1;	// the unseen read
+					}
+					uint64_t nEnd = Z80.Contended (nStart);
+					True.push_back ({ nEnd, { 0, KindMemory,
+						(uint16_t) (0x4000 + AttrOffset (nLine, nCol0 + c)),
+						(uint8_t) (0x38 | Ink (y, r, c)), false, 0 } });
+					Ends[n].push_back (nEnd - s);
+					nNow = nEnd + 4;	// uncontended code
+				}
+			}
+		}
+	}
+
+	std::vector<TSimWrite> Writes;
+	for (TTrueWrite &rTrue : True)
+	{
+		rTrue.Write.Count = Z80.CountAt ((double) rTrue.u);
+		rTrue.Write.Ns = ((double) rTrue.u - 0.5) * ClockNs;
+		Writes.push_back (rTrue.Write);
+	}
+
+	double nEndNs = ((double) (S + (uint64_t) nFrames * L) + 2000) * ClockNs;
+	std::vector<TSimStop> Stops;
+	for (double t = 13.1e6; t < nEndNs; t += 13.1e6)
+	{
+		Stops.push_back ({ t, 7000 });
+	}
+	CCpldSim Sim;
+	Sim.CountAtNs = [&Z80] (double ns) { return Z80.CountAt (ns / ClockNs); };
+	Sim.Run (Writes, Stops, nEndNs);
+	CHECK_EQ (Sim.Stored.size (), Writes.size ());
+
+	std::unique_ptr<CEventLog> pLog (new CEventLog);
+	CFrameClock Frames (pLog.get (), FrameLengths (), ChooseAuto);
+	Frames.SetContention (Expect, Contention.data ());
+	CTeeSink Tee (&Frames);
+	CUlaClock Ula (&Tee, &Frames, TickHz);
+	CTStateClock Clock (&Ula, TickHz, 3546900);
+	TIntakeCounters Counters;
+	Feed (Sim, Clock, Counters);
+	pLog->Publish ();
+
+	CHECK (Ula.Stopped ());
+	CHECK (Ula.LastFrameClocks () + 500 < L);
+	CHECK_EQ (Frames.Machine (), Expect);
+	CHECK_EQ (Ula.Ambiguous (), 0u);
+	CHECK (Frames.Acquisitions () <= 2);
+	CHECK_EQ (Ula.PhaseSlips (), 0u);
+
+	// Every write from frame 8 on at its true ULA time, up to one constant.
+	CHECK_EQ (Tee.Counts.size (), True.size ());
+	if (Tee.Counts.size () == True.size ())
+	{
+		size_t nFrom = 0;
+		while (nFrom < True.size () && True[nFrom].u < S + 8 * L)
+		{
+			nFrom++;
+		}
+		uint64_t nOffset = Tee.Counts[nFrom] - True[nFrom].u;
+		unsigned nWrong = 0;
+		for (size_t i = nFrom; i < True.size (); i++)
+		{
+			nWrong += Tee.Counts[i] - True[i].u != nOffset;
+		}
+		CHECK_EQ (nWrong, 0u);
+	}
+
+	CFramePresenter Presenter (pLog.get ());
+	while (Presenter.Present ())
+	{
+	}
+	unsigned nBad = 0;
+	const std::vector<uint64_t> &rEnds = Ends[nFrames - 1];
+	unsigned nIndex = 0;
+	for (unsigned r = 0; r < nRows; r++)
+	{
+		for (unsigned y = 0; y < 8; y++)
+		{
+			for (unsigned c = 0; c < nCols; c++, nIndex++)
+			{
+				unsigned nLine = 8 * (r + 1) + y;
+				bool bThisLine = rEnds[nIndex] <= ChunkTState (6 + nCol0 + c, 39 + nLine) + 3;
+				uint8_t nExpect = bThisLine ? Ink (y, r, c) : Ink ((y + 7) % 8, r, c);
+				nBad += pPicture->Screen (8 * (nCol0 + c), nLine) != Colour (nExpect);
+			}
+		}
+	}
+	CHECK_EQ (nBad, 0u);
+}
+
+static void TestStoppedClockMulticolour (void)
+{
+	RunStoppedClockMulticolour (FUSEULA_128K, 3546900);
+	RunStoppedClockMulticolour (FUSEULA_48K, 3500000);
+	ClockNs = 1e9 / 3546900.0;
+}
+
+static void TestResetClearsPlus3 (void)
+{
+	// A +3 seen by its 0x1FFD write, then a reset and frames with no 0x1FFD
+	// write: back to the 128K; the +3 ROM's next 0x1FFD write makes it a +3
+	// again.
+	std::unique_ptr<CEventLog> pLog (new CEventLog);
+	CFrameClock Frames (pLog.get (), FrameLengths (), ChooseAuto);
+	uint64_t s = 1000000;
+	Frames.TimedEvent (MakeEvent (KindMemory, 0xFFFE, 0, true), s + 10);
+	Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), s + 500);
+	CHECK_EQ (Frames.Machine (), MachinePlus3);
+	Frames.TimedEvent (MakeEvent (KindReset, 0, 0), s + 1000);
+	CHECK_EQ (Frames.Machine (), Machine128K);
+	Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), s + 2000);
+	CHECK_EQ (Frames.Machine (), MachinePlus3);
 }
 
 // --- cost -----------------------------------------------------------------
@@ -1179,8 +1603,12 @@ int main (void)
 	Run ("fuse: 0x7FFD screen switch mid-frame, reset", TestMidFrameScreenSwitch);
 	Run ("fuse: +2A/+3 paging decode", TestPlus3Paging);
 	Run ("fuse: ULAplus palette and mode", TestUlaPlus);
+	Run ("fuse: multicolour across the FLASH frames", TestMulticolourAcrossFlashFrames);
+	Run ("frame clock: frame start from +3 contention", TestContentionAlignedFrameStart);
 	Run ("presenter: whole frames, skips and repeats", TestPresenterWholeFrames);
 	Run ("end to end: multicolour through CPLD, clocks and Fuse", TestEndToEndMulticolour);
+	Run ("48K and 128K: stopped clock, multicolour at ULA time", TestStoppedClockMulticolour);
+	Run ("frame clock: a reset clears the +2A/+3 detection", TestResetClearsPlus3);
 
 	ReportCost ();
 

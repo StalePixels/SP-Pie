@@ -40,8 +40,10 @@ struct TFrameReport
 	unsigned	BadProducer;
 	unsigned	LogDropped;	// events lost because the event log was full
 	unsigned	Clamped;	// events moved to keep log positions in order
-	unsigned	Ambiguous;	// events whose clock count the 5 bits did not fix
+	unsigned	Ambiguous;	// events whose time is not fixed exactly
 	unsigned	Acquisitions;	// times the frame start was set
+	unsigned	Alignments;	// frame start moves by the contention check
+	boolean		Aligned;	// the contention check has set the frame start
 	unsigned	Skipped;	// Spectrum frames not shown
 	unsigned	Repeated;	// HDMI frames that repeated the last Spectrum frame
 	unsigned	Frames;		// HDMI frames
@@ -52,7 +54,7 @@ struct TFrameReport
 	unsigned	Machine;	// TMachine of the frame shown
 	boolean		Locked;
 	unsigned	ArmClockMHz;
-	boolean		NotEmpty;
+	boolean		ClockStopped;	// the edge-connector clock stops during contention
 };
 
 class COverlay

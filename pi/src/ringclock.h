@@ -41,7 +41,8 @@ public:
 	static const unsigned MaxStarts = 16;
 
 	explicit CRingClock (uint64_t nTickFrequency)
-	:	m_nReadQ ((uint64_t) SmiReadNs * nTickFrequency * 65536 / 1000000000)
+	:	m_nReadQ ((uint64_t) SmiReadNs * nTickFrequency * 65536 / 1000000000),
+		m_nReadTicks ((double) SmiReadNs * (double) nTickFrequency / 1e9)
 	{
 		Reset ();
 	}
@@ -102,6 +103,33 @@ public:
 		return nStamp;
 	}
 
+	// Read time of word nWord in ticks, with no rounding and no limits:
+	// the start of its transfer plus its distance from the transfer's
+	// first word. For the ULA clock (ulaclock.h), which needs the read
+	// times to a fraction of a T-state. Uses the same starts as Stamp ()
+	// and must be called for the same or later words.
+	double ReadTime (uint64_t nWord) const
+	{
+		if (m_nCount == 0)
+		{
+			return 0.0;
+		}
+		// The latest start at or before nWord.
+		unsigned nIndex = m_nFirst;
+		for (unsigned i = 1; i < m_nCount; i++)
+		{
+			const TStart &rNext = m_Starts[(m_nFirst + i) % MaxStarts];
+			if (rNext.nWord > nWord)
+			{
+				break;
+			}
+			nIndex = (m_nFirst + i) % MaxStarts;
+		}
+		const TStart &rStart = m_Starts[nIndex];
+		double nReads = (double) (int64_t) (nWord - rStart.nWord + 1);
+		return (double) rStart.nTicks + nReads * m_nReadTicks;
+	}
+
 private:
 	struct TStart
 	{
@@ -110,6 +138,7 @@ private:
 	};
 
 	const uint64_t	m_nReadQ;	// ticks per read, Q16
+	const double	m_nReadTicks;	// ticks per read
 	TStart		m_Starts[MaxStarts];
 	unsigned	m_nFirst;
 	unsigned	m_nCount;

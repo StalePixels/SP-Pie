@@ -11,8 +11,10 @@
 //          peripheral interrupts (the system timer).
 //  Core 1: event intake. Polls the DMA producer position, decodes the new
 //          ring words into pairs, rebuilds the CPLD clock count of every
-//          event (CTStateClock), gives each event its frame and T-state
-//          (CFrameClock) and writes it to the event log. It restarts SMI
+//          event (CTStateClock), turns it into the ULA's T-state count where
+//          the clock stops during contention (CUlaClock), gives each event
+//          its frame and T-state (CFrameClock) and writes it to the event
+//          log. It restarts SMI
 //          transfers and resyncs on H-bit mismatches. It takes no
 //          interrupts and never waits for core 0.
 //  Cores 2 and 3: unused; they return from Run () and halt.
@@ -32,6 +34,7 @@
 #include "presenter.h"
 #include "smieventreader.h"
 #include "tstateclock.h"
+#include "ulaclock.h"
 #include <circle/bcmframebuffer.h>
 #include <circle/memory.h>
 #include <circle/multicore.h>
@@ -58,8 +61,11 @@ struct TIntakeShared
 	u64	BadProducer;		// DMA destination samples outside the ring
 	u64	LogDropped;
 	u64	Clamped;
-	u64	Ambiguous;		// events whose count the 5 bits did not fix
+	u64	Ambiguous;		// events whose time is not fixed exactly
+	u64	ClockStopped;		// the edge-connector clock stops during contention
 	u64	Acquisitions;
+	u64	Alignments;		// frame start moves by the contention check
+	u64	Aligned;		// the contention check has set the frame start
 	u64	Locked;
 	u64	FrameClocks;		// clocks between the F events of two frames in a row
 	u64	MinFrameClocks;		// ... smallest and largest of the last 50
@@ -91,9 +97,11 @@ private:
 
 	CEventLog	m_Log;
 	CFrameClock	m_FrameClock;	// core 1
+	CUlaClock	m_UlaClock;	// core 1
 	CTStateClock	m_TStateClock;	// core 1
 	CFramePresenter	m_Presenter;	// core 0
 	u32		*m_pDraw;	// core 0: the whole display in RAM
+	u8		*m_pContention[MachineCount];	// Fuse's contention tables
 	TIntakeShared	m_Shared;
 };
 

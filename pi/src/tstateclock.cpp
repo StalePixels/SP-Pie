@@ -38,6 +38,7 @@ void CTStateClock::StartTransfer (uint64_t nWord, uint64_t nTicks)
 {
 	ResolveForward ();
 	m_Clock.StartTransfer (nWord, nTicks);
+	m_pSink->ReadsRestarted ();
 }
 
 void CTStateClock::Empty (uint8_t nCount, uint64_t nWord)
@@ -45,7 +46,9 @@ void CTStateClock::Empty (uint8_t nCount, uint64_t nWord)
 	// The CPLD loaded the pair's R0, and took its count, at the end of the
 	// read before it. For the first pair of a transfer that read is the
 	// last one before the stop.
-	uint64_t nStamp = m_Clock.Stamp (nWord != 0 ? nWord - 1 : 0, m_nSeen);
+	uint64_t nLoadWord = nWord != 0 ? nWord - 1 : 0;
+	uint64_t nStamp = m_Clock.Stamp (nLoadWord, m_nSeen);
+	double nLoadTicks = m_Clock.ReadTime (nLoadWord);
 
 	if (!m_bHaveCount)
 	{
@@ -71,7 +74,7 @@ void CTStateClock::Empty (uint8_t nCount, uint64_t nWord)
 
 	ResolveBackward ();
 
-	m_pSink->Clock (m_nCount);
+	m_pSink->Clock (m_nCount, nLoadTicks);
 }
 
 void CTStateClock::Event (const TEvent &rEvent, uint64_t nWord)

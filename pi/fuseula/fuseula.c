@@ -419,6 +419,23 @@ fuseula_frame_tstates( enum fuseula_machine Machine )
 }
 
 void
+fuseula_contention( enum fuseula_machine Machine, uint8_t *pTable, uint32_t nSize )
+{
+  uint32_t i;
+
+  if( Machine >= FUSEULA_MACHINES ) Machine = FUSEULA_48K;
+  if( machine_select( fuse_machines[ Machine ] ) ) return;
+
+  for( i = 0; i < nSize; i++ ) {
+    pTable[i] = i < machine_current->timings.tstates_per_frame &&
+                i < ULA_CONTENTION_SIZE ? ula_contention[i] : 0;
+  }
+
+  machine_select( fuse_machines[ FUSEULA_48K ] );
+  current_machine = FUSEULA_48K;
+}
+
+void
 fuseula_memory_write( uint32_t nTState, uint16_t nAddress, uint8_t nData )
 {
   tstates = nTState;
@@ -455,7 +472,14 @@ fuseula_reset( uint32_t nTState )
 void
 fuseula_end_frame( void )
 {
-  tstates = machine_current->timings.tstates_per_frame;
+  /* Fuse calls display_frame () after it has taken the frame length off
+     tstates (spectrum.c, spectrum_frame), so the beam is at the start of
+     the next frame. display_frame () draws the rest of the frame whatever
+     the beam position, but the FLASH swap inside it marks the flashing
+     cells through the beam rule. With the beam at the end of the frame
+     that would redraw every pending chunk from the memory at the end of
+     the frame, and leave the next frame with no drawing at all. */
+  tstates = 0;
   display_frame();
   draw_outer_border();
 
@@ -469,8 +493,6 @@ fuseula_end_frame( void )
   ulaplus_changed_before = ulaplus_changed;
   ulaplus_changed = 0;
   if( ulaplus_changed_before ) display_refresh_all();
-
-  tstates = 0;
 }
 
 uint8_t

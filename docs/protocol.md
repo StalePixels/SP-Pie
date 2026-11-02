@@ -86,7 +86,7 @@ The count wraps every 32 clocks. The Pi rebuilds the full count:
 - **Empty pairs.** The Pi reads an empty pair every few reads while the queue is empty, and the count moves by less than 32 between two of them. The Pi adds the difference, modulo 32, to its running total. Across a stop in the reads, such as the gap between two SMI transfers, it uses its own timer to choose the number of wraps.
 - **Events.** An event is captured before the CPLD loads the next empty pair, so its count is at most the count of the next empty pair. The Pi gives the event the latest count at or below that empty pair's count that matches T4 to T0. This is exact while an event waits less than 32 clocks between its capture and the next empty pair. An event that waits in the queue through a stop in the reads of 32 clocks or more cannot be placed this way.
 
-On a machine where the edge-connector clock runs without stopping, the count is the ULA's T-state count. Whether the clock stops while the ULA holds the Z80 clock during contention is not the same on every model; see [Frame events](#frame-events).
+On the +2A/+3 the edge-connector clock runs without stopping, and the count is the ULA's T-state count. On the 48K and the 128K the edge-connector clock is the Z80 clock, which the ULA holds during contention, so the count leaves out every T-state the Z80 waits. The Pi then rebuilds the ULA's count from its own time (`pi/README.md`, ULA clock).
 
 ## Frame events
 
@@ -94,7 +94,7 @@ The Spectrum interrupts the Z80 once per frame, at a fixed point of the ULA's fr
 
 The CPLD sets F = 1 on the first event it stores after an acknowledge. When the queue is full and that event is dropped, the next stored event carries F = 1 (and OVF = 1). The acknowledge happens only while the Z80 has interrupts enabled, so a program that runs with interrupts disabled gives no F events.
 
-The count of an F event without OVF is the count of the acknowledge plus a constant. The difference between the counts of the F events of two frames in a row is the number of clocks per frame, plus the change in the time the Z80 took to finish its instruction. A machine with a clock that never stops gives 69,888 clocks per frame on the 48K and 70,908 on the 128K class, give or take that instruction time. A clock that stops during contention gives fewer, and the number changes with the program.
+The count of an F event without OVF is the count of the acknowledge plus a constant. The difference between the counts of the F events of two frames in a row is the number of clocks per frame, plus the change in the time the Z80 took to finish its instruction. A clock that never stops gives 69,888 clocks per frame on the 48K and 70,908 on the 128K class, give or take that instruction time. A clock that stops during contention gives fewer, and the number changes with the program.
 
 ## Reset event
 

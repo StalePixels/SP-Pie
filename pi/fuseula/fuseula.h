@@ -63,6 +63,13 @@ enum fuseula_machine fuseula_current_machine (void);
 /* T-states per frame of a model, from libspectrum's timing tables. */
 uint32_t fuseula_frame_tstates (enum fuseula_machine Machine);
 
+/* Fuse's memory contention delay for each T-state of a model's frame
+   (Fuse's ula_contention table, which machine_reset fills from the model's
+   contend_delay function), into pTable[0] to pTable[nSize - 1]. Selects
+   each model in turn, so call it only before the first frame; the 48K is
+   selected again afterwards. */
+void fuseula_contention (enum fuseula_machine Machine, uint8_t *pTable, uint32_t nSize);
+
 /* One write, at nTState (0 to frame T-states - 1) in the frame. Writes of
    a frame come in time order. nTState is the T-state at which Fuse makes
    the write take effect: the end of a memory write cycle, and the first

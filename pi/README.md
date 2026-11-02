@@ -13,7 +13,7 @@ None of this has run on hardware yet. See [What is not verified](#what-is-not-ve
 The Zero 2 W has four cores. The kernel uses two.
 
 - **Core 0** starts Circle, the frame buffer, the SMI reader and Fuse, then runs the frames. Once per HDMI frame it runs the next complete Spectrum frame through Fuse and shows it. It also takes Circle's interrupts (the system timer).
-- **Core 1** runs event intake. It polls the DMA position, decodes the new ring words into pairs, rebuilds each event's clock count, gives each event its frame and T-state, and writes the events to the event log. It also restarts or resyncs SMI. It takes no interrupts and never waits for core 0.
+- **Core 1** runs event intake. It polls the DMA position, decodes the new ring words into pairs, rebuilds each event's clock count, turns it into the ULA's T-state count where the clock stops during contention, gives each event its frame and T-state, and writes the events to the event log. It also restarts or resyncs SMI. It takes no interrupts and never waits for core 0.
 - **Cores 2 and 3** halt.
 
 The two working cores share the event log (see [Event log](#event-log)) and a block of counters. Core 1 publishes the counters with atomic 64-bit stores, and core 0 reads them once per frame.
@@ -71,6 +71,23 @@ An event with OVF = 1 is used as normal and counted. The events dropped before i
 - **Stops.** Before reads stop for a restart or a resync, events that wait for an empty pair are placed from the empty pair before them: the earliest count at or after it, less a two-read delay, that matches their 5 bits.
 - **Long waits.** An event that waited 32 clocks or more, which only a stop in the reads that long can cause, may be placed a multiple of 32 clocks off. Such events are counted (`TAMB` on the overlay).
 
+### ULA clock
+
+`src/ulaclock.cpp` turns the count into the ULA's T-state count.
+
+On the +2A/+3 the edge-connector clock (CKEXT) runs without stopping, and the count already is the ULA's count: 70,908 clocks per frame, measured on a +3. On the 48K and the 128K the edge-connector clock is the Z80 clock, which the ULA holds during contention (Sinclair Wiki, 16K/48K edge connector: the clock "is interrupted during contended memory access"). A 128K running Bifrost* measures about 67,300 to 67,600 clocks per frame: some 3,300 to 3,600 T-states a frame are missing. There the ULA time of a write is its count plus the stall, every T-state the ULA held the Z80 before it.
+
+The clock decides from the count between the F events of two frames in a row. Two frames in a row more than 64 T-states short put it in stopped mode; 50 frames in a row at the frame length put it back in free mode, where counts pass through unchanged. `CLK` on the overlay shows the mode.
+
+In stopped mode it rebuilds the stall from the Pi's own time:
+
+- Each empty pair gives the count c at a known moment τ: the end of the read before it, from the read's position in the ring, to a fraction of a timer tick. The ULA time at τ is u(τ) = phase + rate × τ, and the stall at τ is the s with c + s ≤ u(τ) < c + s + 1.
+- The rate is the frame length over the frame period, measured from the read times of the last 16 F events. The frame period also gives the class: 19.968 ms is a 48K (69,888 T-states at 3.5 MHz), 19.9915 ms the 128K class (70,908 at 3.5469 MHz).
+- The phase is the interval of values that fit the pairs. From the interrupt to the first display line, over 14,000 T-states, the ULA holds the Z80 not at all, so after each F event the stall is held and every pair narrows the phase (to a few hundredths of a T-state). In the display the stall only grows, in whole T-states: a pair that fits only a larger stall gives the new stall, and a pair at a T-state edge that fits two decides nothing. The interval widens with the rate's error and by one timer tick at each restart of the reads.
+- An event lies between two pairs that decided the stall. When they agree, that is its stall. When they differ: a write to 0x4000 to 0x7FFF, which is contended on every model, takes the candidate where Fuse's contention table lets a contended write end (3 T-states after a T-state with no delay, preferring a cycle that waited); an I/O write takes the stall before it, as Fuse writes the port before the I/O contention that follows; any other write takes the stall after it and is counted (`TAMB`).
+
+In the host tests' Fuse-generated streams (a 48K and a 128K whose Z80 waits per Fuse's contention table, with unseen contended reads, attribute writes near each fetch, and restart gaps), every write from the eighth frame on gets its exact ULA T-state. A pair that fits no stall at all is a phase slip, also counted in `TAMB`.
+
 ### Frame clock
 
 `src/frameclock.cpp` turns a count into a frame number and a Fuse T-state.
@@ -82,9 +99,11 @@ The CPLD sets F on the first write after each interrupt acknowledge, which is th
 - Eight F events in a row that agree with neither set the frame start again, from the last of them.
 - Until the first F event, or with interrupts off from the start, frames run from an arbitrary start.
 
-With a clock that runs without stopping, the frame start never moves in counts. Once one acknowledge has come exactly at an instruction boundary, every position is exact from then on.
+With a clock that runs without stopping (or a ULA count from the ULA clock), the frame start never moves in counts. Once one acknowledge has come exactly at an instruction boundary, every position is exact from then on.
 
-**Limit.** A program locked to the cycle that always takes its interrupt at the same point after the start, for example a HALT that always ends 2 T-states late, never shows the true start. Every write is then placed that many T-states early, up to 3 in HALT, and the error does not change. Any frame before or after with an acknowledge at the start, such as BASIC or a loader, removes it.
+**Contention check.** A program locked to the cycle that always takes its interrupt at the same point after the start, for example a HALT that always ends 2 T-states late, never shows the true start, and one early F event moves the start too early. In Fuse's model a contended memory write ends 3 T-states after a T-state with no contention delay; inside the screen fetch of a display line that is one T-state in 8 on the +2A/+3. For each write to 0x4000 to 0x7FFF (contended on every model), the clock counts which of the frame starts 4 T-states before to 3 after the current one would put the write where it cannot end. After 256 such writes it moves the frame start to the one that fits, the nearest when two fit, and from then on F events no longer move it back (`ALN` counts the moves, `LOCK` shows 2). A multicolour engine makes hundreds of these writes a frame. In stopped mode the check is off, because the ULA clock places those writes by the same table.
+
+**Limit.** A program that writes no contended memory during the display keeps the earliest-F frame start, which is late by the acknowledge delay of the earliest F event seen, up to 3 T-states in HALT.
 
 Fuse makes a write take effect at a T-state of its own. A memory write takes effect at its count: /WR rises half a T-state before the end of the write cycle, and Fuse writes at the end of it (`memory_pages.c`, `writebyte`). An I/O write takes effect 3 T-states earlier: /WR rises half a T-state before the end of the 4 T-state I/O cycle, and Fuse writes the port one T-state after its start (`periph.c`, `writeport`). For a contended port write on the 48K and 128K the start of the cycle is not visible, so the write is placed as if uncontended. The constants are in `src/machine.h`.
 
@@ -92,9 +111,7 @@ Positions in the log never go backwards. An event that would land before the las
 
 ### Clocks per frame
 
-The count between the F events of two frames in a row is the number of clocks in a frame, give or take the change in instruction time. The overlay shows the last one and the smallest and largest of the last 50 (`CPF`, `CMIN`, `CMAX`).
-
-A clock that never stops gives 69,888 per frame on the 48K and 70,908 on the 128K class. If the edge-connector clock stops while the ULA holds the Z80 clock for contention, the count is Z80 clocks and not ULA T-states. Writes after contended accesses are then placed early by the stall so far in the frame, the frame length is short and changes with the program, and the 48K/128K test below can fail. The Sinclair Wiki says the 48K and 128K edge-connector clock stops for contention; it does not say for the +2A/+3. Nothing on the edge connector gives the ULA's own clock.
+The count between the F events of two frames in a row is the number of clocks in a frame, give or take the change in instruction time. The overlay shows the last one and the smallest and largest of the last 50 (`CPF`, `CMIN`, `CMAX`), in the CPLD's count. The ULA clock uses the same numbers to choose its mode.
 
 ### Machine model
 
@@ -103,7 +120,7 @@ A clock that never stops gives 69,888 per frame on the 48K and 70,908 on the 128
 | T-states per frame (libspectrum `timings.c`) | 69,888 | 70,908 |
 | Fuse machine | `48` | `128`, or `plus3` once port 0x1FFD is written |
 
-The frame lengths come from libspectrum's timing tables at start-up. A frame length within 64 T-states of one of them, four frames in a row, selects that class; the 128K class is the start. The frame length cannot tell a 128K or +2 from a +2A or +3: they share the timing but decode the paging ports differently. Only the +2A/+3 has port 0x1FFD. Its ROM writes that port at start-up and each time it changes ROM, and the 128K and +2 ROMs never write it. So by default the kernel uses Fuse's 128K for the 128K class until it sees the first I/O write that matches Fuse's 0x1FFD decode (mask 0xF002, value 0x1000). From then on, until the kernel restarts, it uses Fuse's +3. The model applies per Spectrum frame, so the frame that holds that first write is already a +3 frame. A 128K program that writes to 0x1FFD selects the +3 by mistake; `auto128` prevents that.
+The frame lengths come from libspectrum's timing tables at start-up. A frame length within 64 T-states of one of them, four frames in a row, selects that class; the 128K class is the start. In stopped mode the ULA clock's counts give the frame length. The frame length cannot tell a 128K or +2 from a +2A or +3: they share the timing but decode the paging ports differently. Only the +2A/+3 has port 0x1FFD. Its ROM writes that port at start-up and each time it changes ROM, and the 128K and +2 ROMs never write it. So by default the kernel uses Fuse's 128K for the 128K class until it sees the first I/O write that matches Fuse's 0x1FFD decode (mask 0xF002, value 0x1000). From then on it uses Fuse's +3, until a reset event or a change of class; the +3 ROM writes 0x1FFD again soon after a reset. The model applies per Spectrum frame, so the frame that holds that first write is already a +3 frame. A 128K program that writes to 0x1FFD selects the +3 by mistake; `auto128` prevents that.
 
 The `machine` option in `cmdline.txt` on the SD card changes the choice:
 
@@ -133,7 +150,7 @@ Their own builds use autoconf. Here the headers autoconf and their Perl scripts 
 
 Our layer in `fuseula/` sits between Fuse and the C++ code:
 
-- `fuseula.h` and `fuseula.c`: the C interface. Each write is applied by setting Fuse's T-state counter and calling Fuse's `writebyte_internal` or `writeport_internal`; a reset calls Fuse's `machine_reset`; the end of a frame calls Fuse's `display_frame`. Fuse's drawing calls (`uidisplay_plot8`) land in the picture.
+- `fuseula.h` and `fuseula.c`: the C interface. Each write is applied by setting Fuse's T-state counter and calling Fuse's `writebyte_internal` or `writeport_internal`; a reset calls Fuse's `machine_reset`; the end of a frame calls Fuse's `display_frame` with the T-state counter at the start of the next frame, as Fuse's own frame end does. Fuse's FLASH swap inside `display_frame` marks cells through the beam rule, so a counter left at the end of the frame would make it redraw the screen from the memory at the end of the frame. Fuse's drawing calls (`uidisplay_plot8`) land in the picture.
 - `fusestubs.c`: definitions for the parts of Fuse that are not built (the Z80, sound, tape, disk, debugger, menus and other peripherals), each doing nothing or holding Fuse's value for an absent feature. ROMs are all zero; the display reads only RAM, and ROM pages are not writable.
 
 Fuse's display covers 320 x 240 pixels: the screen with 32 pixels of border left and right and 24 lines above and below. The layer draws the rest of the 352 x 270 picture's border with Fuse's own beam rule: an 8-pixel chunk that starts at T-state T shows the state of T + 3 (`display.c`, `get_beam_position`). It records each border change Fuse makes with its T-state for this.
@@ -233,15 +250,18 @@ Left side:
 | `RS` | SMI transfer restarts since boot |
 | `GAP` | Largest restart gap seen, in µs (an upper bound) |
 | `PB` | Times the DMA position read back outside the ring |
-| `NE` | NOT_EMPTY (GPIO 27) at the end of the frame |
+| `CLK` | 1 when the edge-connector clock stops during contention (the ULA clock's stopped mode) |
+
+`ACQ` should stay still once a program runs; it rises when F events keep disagreeing with the frame start.
 
 Right side:
 
 | Label | Meaning |
 |---|---|
 | `MACH` | Model of the frame shown: `48K`, `128K` or `+2A/+3` |
-| `LOCK` | 1 when the frame start is set from F events |
+| `LOCK` | 1 when the frame start is set from F events, 2 when the contention check has set it |
 | `ACQ` | Times the frame start was set from scratch, since boot |
+| `ALN` | Times the contention check moved the frame start, since boot |
 | `CPF` | Clocks between the F events of the last two frames in a row |
 | `CMIN` | Smallest of the last 50 such values |
 | `CMAX` | Largest of the last 50 such values |
@@ -250,13 +270,15 @@ Right side:
 | `REP` | HDMI frames that showed the last Spectrum frame again, since boot |
 | `LD` | Events lost because the event log was full, since boot |
 | `CLMP` | Events moved to keep log positions in order, since boot |
-| `TAMB` | Events whose count the 5 bits did not fix, since boot |
+| `TAMB` | Events whose time is not fixed exactly (count, stall or phase), since boot |
 | `F` | HDMI frames since boot |
 | `C` | ARM clock in MHz, read from the firmware at start-up |
 
-`CPF`, `CMIN` and `CMAX` answer whether the edge-connector clock runs during contention. All three within a few dozen clocks of 70,908 on a 128K-class machine (69,888 on a 48K), whatever the program, means it runs without stopping. Values well below, which change with the program, mean it stops.
+`CPF`, `CMIN` and `CMAX` show whether the edge-connector clock runs during contention: within a few dozen clocks of 70,908 (69,888 on a 48K) it runs; well below, changing with the program, it stops, and `CLK` shows 1.
 
 Times come from the ARM generic timer's physical counter (`CNTPCT_EL0`). Every core reads the same counter, it does not change when the firmware changes the CPU clock, and reading it touches no device. It counts at the rate the firmware sets in `CNTFRQ_EL0`. That rate is expected to be 19.2 MHz, but it has not been read on this board.
+
+Reads arrive all the time, so nearly every pass of core 1's loop finds new words, and `IN` includes the fixed cost of each pass (the DMA and SMI register reads, the cache invalidate, the counter stores). A slower pass handles more words at once. Whether core 1 keeps up shows in `BL`, the largest backlog.
 
 The Pi budget is the idle time per frame (`IDI` for core 1, `IDR` for core 0) under the worst stress test, with `OVF`, `HS`, `BAD`, `LD` and `TAMB` staying at zero and `BL` well below the ring size of 524,288 words.
 
@@ -277,15 +299,20 @@ The tests cover:
 - the clock count of every event in a steady stream, across a full queue with OVF, across restart gaps (one long enough to need the read times for its wraps), and an event that waited too long being counted,
 - the frame start from the earliest acknowledge, the exact T-state of memory and I/O writes, and the clocks per frame,
 - machine detection: the 48K by frame length, the +2A/+3 by its first 0x1FFD write, the `auto128` and fixed choices, and frames from a stopping clock leaving the class alone,
-- in Fuse: a still picture and the border inside and outside Fuse's area, multicolour per line including a write one T-state too late, border changes inside a line, a 0x7FFD screen switch in the middle of a frame and a reset, the +2A/+3 paging decode, and ULAplus palette and mode, with a palette change in the middle of a frame,
+- in Fuse: a still picture and the border inside and outside Fuse's area, multicolour per line including a write one T-state too late, multicolour kept through the frames where Fuse swaps FLASH, border changes inside a line, a 0x7FFD screen switch in the middle of a frame and a reset, the +2A/+3 paging decode, and ULAplus palette and mode, with a palette change in the middle of a frame,
 - whole frames: skips and repeats in the presenter,
-- end to end, through the simulated CPLD, the intake, the clock count, the frame clock, the log and Fuse: multicolour per line, border changes inside a line, and a restart gap in each frame, with a different acknowledge delay each frame.
+- the contention check: the frame start found from +3 contended writes when every acknowledge is 2 T-states late, and when one F event is 2 T-states early, with writes on both sides of each fetch,
+- a reset clearing the +2A/+3 detection,
+- end to end with a clock that runs, through the simulated CPLD, the intake, the clock count, the ULA clock, the frame clock, the log and Fuse: multicolour per line, border changes inside a line, and a restart gap in each frame, with a different acknowledge delay each frame,
+- end to end with a clock that stops, on a 48K and a 128K: a Z80 that waits per Fuse's contention table, with unseen contended reads and restart gaps; every write at its exact ULA T-state, the multicolour lines right, no phase slips and a steady frame start.
 
 At the end the tests print the time core 0 takes to run a frame of 13,000 screen writes through Fuse, and the time core 1's code takes for one frame of words at the worst write rate, on the build machine.
 
 ## Cost
 
-On an Apple Silicon build machine the tests measure about 0.13 ms for core 0 to run a frame of 13,000 screen writes through Fuse, and about 0.35 to 0.45 ms for core 1's code to decode and place one frame of words (100,000 ring words, 14,000 events). A Cortex-A53 at 1000 MHz is assumed to be about ten times slower: about 1.3 ms of core 0's 20 ms per frame, plus the copy of the 480 x 270 picture to the frame buffer, and about 4.5 ms of core 1's 20 ms, not counting the DMA and SMI register reads of each loop pass. These are estimates; `RN`, `IDR`, `IN` and `IDI` on the overlay give the real figures.
+On the +3 with Bifrost*, the overlay shows core 0 at about 1.7 to 2.0 ms per frame (`RN`) and core 1 at about 13 ms of 20 (`IN`) with a backlog of about 50 words (`BL`). `IN` counts whole passes of core 1's loop with their fixed costs (see [Instrumentation](#instrumentation)); the backlog shows that core 1 keeps up. On the build machine the tests measure about 0.1 ms for core 0 to run a frame of 13,000 screen writes through Fuse, and about 0.3 ms for core 1's code to decode and place one frame of words (100,000 ring words).
+
+In stopped mode the ULA clock adds a few floating-point operations for each empty pair, 2.5 million a second. That is estimated at a few milliseconds of core 1 per frame; it is not measured.
 
 ## What is not verified
 
@@ -300,7 +327,8 @@ No hardware was attached during development. Everything below is untested:
 - Whether a word is in memory by the time the DMA destination register has moved past it. If it is not, the consumer can read a stale word.
 - Whether the firmware applies the virtual offset at the next vertical sync. If it applies it at once, a flip can land mid-scan, between two complete frames.
 - That an SMI transfer gives exactly 65,534 ring words, and that reads run at exactly the read period from the moment core 1 starts a transfer. A late first read shortens the time used for the wraps across that stop.
-- Whether the edge-connector clock runs during contention, on each model (see [Clocks per frame](#clocks-per-frame)).
+- The ULA clock on a real 48K or 128K: the read times to a fraction of a T-state, a timer tick of error at each restart, and contended accesses the Pi cannot see near the edges of the display. The tests use Fuse's contention model, not a real machine.
+- That the 48K's edge-connector clock stops during contention like the 128K's (from the Sinclair Wiki; measured on a 128K only).
 - Whether the /WR rising edge can meet a counting edge of the edge-connector clock on the +2A/+3, which can make a count one clock off (see `../cpld/README.md`).
 - That Fuse's write points (memory at the end of the cycle, I/O one T-state after its start) match the relation of /WR to the ULA on the real machines; Fuse is calibrated against the real machines with its own Z80 timing, which is not run here.
 - Whether the firmware scales the 480 x 270 frame buffer to 1080p with sharp pixels or with smoothing.

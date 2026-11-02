@@ -23,6 +23,21 @@
 // F event (or with interrupts off from the start) the frames run from an
 // arbitrary start.
 //
+// Contention check. In Fuse's model a memory write to contended memory
+// ends 3 T-states after a T-state where the contention delay is 0
+// (memory_pages.c, writebyte: the delay, then 3 T-states). Inside the
+// screen fetch of a display line that is one T-state in 8 on the +2A/+3
+// and two in 8 on the 48K and 128K. Writes to 0x4000 to 0x7FFF are
+// contended on every model, and a multicolour engine makes many of them
+// while the ULA fetches. For each such write, the clock counts which of
+// the frame starts 4 T-states before to 3 after the current one would put
+// the write where Fuse's contention table (SetContention) says it cannot
+// end. After AlignWrites such writes it moves the frame start to the one
+// that fits, the nearest when two fit. From then on F events only check the
+// frame start; they no longer move it back. This makes the frame start
+// exact while a program writes contended memory during the display, also
+// when every acknowledge comes late or an F event comes early.
+//
 // Frame length. The distance between the F events of two frames in a row
 // is the clock count of one frame, give or take the instruction time. It
 // is kept for the overlay (last, smallest and largest of the last
@@ -32,7 +47,8 @@
 // gives shorter frames that match neither, and the class stays as it is.
 //
 // Model. The class, the machine choice and whether a write to port 0x1FFD
-// has been seen give the model (ResolveMachine). The frame length of the
+// has been seen since the last reset event and the last class change give
+// the model (ResolveMachine). The frame length of the
 // model is libspectrum's, given to the constructor. A change of frame
 // length sets the frame start again.
 //
@@ -65,6 +81,7 @@ public:
 	static const unsigned RelockEvents	= 8;
 	static const unsigned ClassVotes	= 4;
 	static const unsigned StatsFrames	= 50;
+	static const unsigned AlignWrites	= 256;
 
 	// pFrameTStates: T-states per frame of each TMachine.
 	CFrameClock (CEventLog *pLog, const uint32_t pFrameTStates[MachineCount],
@@ -72,8 +89,15 @@ public:
 
 	void Reset (void);
 
+	// Fuse's contention delay for each T-state of a model's frame
+	// (fuseula_contention). The table is kept, not copied.
+	void SetContention (TMachine Machine, const uint8_t *pTable);
+
+	// The contention check on or off (on after Reset ()).
+	void EnableContentionCheck (bool bEnable);
+
 	void TimedEvent (const TEvent &rEvent, uint64_t nCount) override;
-	void Clock (uint64_t nCount) override;
+	void Clock (uint64_t nCount, double nTicks) override;
 
 	bool Locked (void) const		{ return m_bLocked; }
 	uint32_t Acquisitions (void) const	{ return m_nAcquisitions; }
@@ -81,6 +105,8 @@ public:
 	uint32_t FrameTStates (void) const	{ return m_nFrameTStates; }
 	uint32_t CompletedFrames (void) const	{ return m_nCompleted; }
 	uint64_t Clamped (void) const		{ return m_nClamped; }
+	uint32_t Alignments (void) const	{ return m_nAlignments; }	// frame start moves by the contention check
+	bool Aligned (void) const		{ return m_bAligned; }
 
 	// Clock counts between the F events of two frames in a row: the last
 	// one, and the smallest and largest of the last StatsFrames. 0 before
@@ -88,6 +114,10 @@ public:
 	uint32_t LastFrameClocks (void) const	{ return m_nLastClocks; }
 	uint32_t MinFrameClocks (void) const;
 	uint32_t MaxFrameClocks (void) const;
+
+	// Fuse's contention delay at the T-state a count falls on, or -1 when
+	// there is no table or no frame start yet.
+	int ContentionAt (uint64_t nCount) const;
 
 	// The count at which frame nFrame starts (for the tests).
 	uint64_t FrameStart (uint32_t nFrame) const;
@@ -97,6 +127,8 @@ private:
 	void SetStart (uint64_t nStart);
 	void UpdateMachine (void);
 	void Locate (uint64_t nCount, uint32_t &rFrame, uint32_t &rTState) const;
+	void CheckContention (uint32_t nTState);
+	void ClearAlignment (void);
 
 private:
 	CEventLog	*m_pLog;
@@ -124,6 +156,13 @@ private:
 	uint32_t	m_Clocks[StatsFrames];
 	unsigned	m_nClocks;
 	unsigned	m_nClocksNext;
+
+	const uint8_t	*m_pContention[MachineCount];
+	uint32_t	m_Misfits[8];		// writes that do not fit, per frame start -4..3
+	uint32_t	m_nFitWrites;
+	bool		m_bAligned;
+	uint32_t	m_nAlignments;
+	bool		m_bCheckContention;
 
 	uint32_t	m_nLastFrame;		// last logged position
 	uint32_t	m_nLastTState;

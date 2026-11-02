@@ -19,7 +19,7 @@ FUSEULA_GEN  = $(BUILDDIR)/gen
 include ../fuseula/fuseula.mk
 
 SRCDIR   = ../src
-SOURCES  = test_main.cpp $(SRCDIR)/intake.cpp $(SRCDIR)/tstateclock.cpp \
+SOURCES  = test_main.cpp $(SRCDIR)/intake.cpp $(SRCDIR)/tstateclock.cpp $(SRCDIR)/ulaclock.cpp \
 	   $(SRCDIR)/frameclock.cpp $(SRCDIR)/presenter.cpp
 HEADERS  = $(wildcard $(SRCDIR)/*.h) $(FUSEULA_DIR)/fuseula.h
 

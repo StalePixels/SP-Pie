@@ -46,11 +46,16 @@ CSpPieApp::CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffe
 	m_pReader (pReader),
 	m_nArmClockMHz (nArmClockMHz),
 	m_FrameClock (&m_Log, FuseFrameTStates (), Choice),
-	m_TStateClock (&m_FrameClock, TickFrequency (), NominalClockHz),
+	m_UlaClock (&m_FrameClock, &m_FrameClock, TickFrequency ()),
+	m_TStateClock (&m_UlaClock, TickFrequency (), NominalClockHz),
 	m_Presenter (&m_Log),
 	m_pDraw (0)
 {
 	memset (&m_Shared, 0, sizeof m_Shared);
+	for (unsigned i = 0; i < MachineCount; i++)
+	{
+		m_pContention[i] = 0;
+	}
 }
 
 boolean CSpPieApp::InitializeRenderer (void)
@@ -67,8 +72,27 @@ boolean CSpPieApp::InitializeRenderer (void)
 		m_pDraw[i] = 0xFF000000u;
 	}
 
-	return m_Presenter.Initialize (m_pDraw + PictureTop * DisplayWidth + PictureLeft,
-				       DisplayWidth);
+	if (!m_Presenter.Initialize (m_pDraw + PictureTop * DisplayWidth + PictureLeft,
+				     DisplayWidth))
+	{
+		return FALSE;
+	}
+
+	// Fuse's contention tables for the frame clock's contention check.
+	// Core 1 only reads them.
+	for (unsigned i = 0; i < MachineCount; i++)
+	{
+		u32 nSize = fuseula_frame_tstates ((fuseula_machine) i);
+		m_pContention[i] = new u8[nSize];
+		if (m_pContention[i] == 0)
+		{
+			return FALSE;
+		}
+		fuseula_contention ((fuseula_machine) i, m_pContention[i], nSize);
+		m_FrameClock.SetContention ((TMachine) i, m_pContention[i]);
+	}
+
+	return TRUE;
 }
 
 void CSpPieApp::Run (unsigned nCore)
@@ -229,12 +253,16 @@ void CSpPieApp::RunIntake (void)
 			Publish (&m_Shared.FrameEvents, Counters.FrameEvents);
 			Publish (&m_Shared.LogDropped, m_Log.Dropped ());
 			Publish (&m_Shared.Clamped, m_FrameClock.Clamped ());
-			Publish (&m_Shared.Ambiguous, m_TStateClock.Ambiguous ());
+			Publish (&m_Shared.Ambiguous, m_TStateClock.Ambiguous () + m_UlaClock.Ambiguous ()
+						      + m_UlaClock.PhaseSlips ());
+			Publish (&m_Shared.ClockStopped, m_UlaClock.Stopped () ? 1 : 0);
 			Publish (&m_Shared.Acquisitions, m_FrameClock.Acquisitions ());
+			Publish (&m_Shared.Alignments, m_FrameClock.Alignments ());
+			Publish (&m_Shared.Aligned, m_FrameClock.Aligned () ? 1 : 0);
 			Publish (&m_Shared.Locked, m_FrameClock.Locked () ? 1 : 0);
-			Publish (&m_Shared.FrameClocks, m_FrameClock.LastFrameClocks ());
-			Publish (&m_Shared.MinFrameClocks, m_FrameClock.MinFrameClocks ());
-			Publish (&m_Shared.MaxFrameClocks, m_FrameClock.MaxFrameClocks ());
+			Publish (&m_Shared.FrameClocks, m_UlaClock.LastFrameClocks ());
+			Publish (&m_Shared.MinFrameClocks, m_UlaClock.MinFrameClocks ());
+			Publish (&m_Shared.MaxFrameClocks, m_UlaClock.MaxFrameClocks ());
 			Publish (&m_Shared.Events, Counters.Events);
 			Publish (&m_Shared.EmptyPairs, Counters.EmptyPairs);
 			Publish (&m_Shared.Overflows, Counters.Overflows);
@@ -355,6 +383,8 @@ void CSpPieApp::RunRenderer (void)
 		Report.Clamped = (unsigned) Fetch (&m_Shared.Clamped);
 		Report.Ambiguous = (unsigned) Fetch (&m_Shared.Ambiguous);
 		Report.Acquisitions = (unsigned) Fetch (&m_Shared.Acquisitions);
+		Report.Alignments = (unsigned) Fetch (&m_Shared.Alignments);
+		Report.Aligned = Fetch (&m_Shared.Aligned) != 0;
 		Report.Locked = Fetch (&m_Shared.Locked) != 0;
 		Report.FrameClocks = (unsigned) Fetch (&m_Shared.FrameClocks);
 		Report.MinFrameClocks = (unsigned) Fetch (&m_Shared.MinFrameClocks);
@@ -364,7 +394,7 @@ void CSpPieApp::RunRenderer (void)
 		Report.SpectrumFrame = m_Presenter.LastFrame ();
 		Report.Machine = m_Presenter.LastRecord ().Machine;
 		Report.Frames = nFrame;
-		Report.NotEmpty = m_pReader->NotEmpty ();
+		Report.ClockStopped = Fetch (&m_Shared.ClockStopped) != 0;
 
 		nPrevEvents = nEvents;
 		nPrevEmpty = nEmpty;

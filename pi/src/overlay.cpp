@@ -48,13 +48,14 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 		{ "RS",   rReport.Restarts },
 		{ "GAP",  rReport.MaxRestartGapUs },
 		{ "PB",   rReport.BadProducer },
-		{ "NE",   rReport.NotEmpty ? 1u : 0u },
+		{ "CLK",  rReport.ClockStopped ? 1u : 0u },
 	};
 
 	const TItem Right[] =
 	{
-		{ "LOCK", rReport.Locked ? 1u : 0u },
+		{ "LOCK", rReport.Aligned ? 2u : rReport.Locked ? 1u : 0u },
 		{ "ACQ",  rReport.Acquisitions },
+		{ "ALN",  rReport.Alignments },
 		{ "CPF",  rReport.FrameClocks },
 		{ "CMIN", rReport.MinFrameClocks },
 		{ "CMAX", rReport.MaxFrameClocks },
