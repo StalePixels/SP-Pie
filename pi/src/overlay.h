@@ -57,7 +57,7 @@ class COverlay
 public:
 	COverlay (void);
 
-	// Draws the counters into the side areas of the 640 x 360 display.
+	// Draws the counters into the side areas of the 480 x 270 display.
 	void Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch);
 
 private:

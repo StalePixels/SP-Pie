@@ -36,7 +36,7 @@ public:
 	// Clears the state; the next frame shown is frame nFirstFrame.
 	void Reset (uint32_t nFirstFrame = 0);
 
-	// Draws the next Spectrum frame into the 352 x 296 picture at pPixels.
+	// Draws the next Spectrum frame into the 352 x 270 picture at pPixels.
 	// FALSE when no frame was complete: pPixels is not changed.
 	bool Present (uint32_t *pPixels, unsigned nPitch);
 

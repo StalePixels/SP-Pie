@@ -5,15 +5,15 @@
 // the frame's timed events. Platform-free, so the host tests can check the
 // pixels.
 //
-// Display: 640 x 360 pixels, 16:9, which the firmware scales by exactly 3 to
-// 1920 x 1080. The Spectrum picture is 352 x 296 pixels, centred: the 256 x
-// 192 screen with 48 pixels of border left and right, 48 lines above and 56
-// lines below. Sources (World of Spectrum FAQ, 48K reference): "The border
-// is 48 pixels wide at each side"; of the 64 lines before the screen "at
-// least the last 48 of these are actual border-lines"; after the screen
-// come "56 border lines". The 128K class has the same 48 + 192 + 56 lines
-// (63 lines before the screen, 311 lines a frame). The areas left and right
-// of the picture are black; the optional overlay uses them.
+// Display: 480 x 270 pixels, 16:9, which the firmware scales by exactly 4 to
+// 1920 x 1080. The Spectrum picture is 352 x 270 pixels and fills the height:
+// the 256 x 192 screen with 48 pixels of border left and right and 39 lines
+// above and below. Sources (World of Spectrum FAQ, 48K reference): "The
+// border is 48 pixels wide at each side"; of the 64 lines before the screen
+// "at least the last 48 of these are actual border-lines"; after the screen
+// come "56 border lines". So the display shows all of the side border and
+// the 39 border lines nearest the screen above and below. The areas left and
+// right of the picture are black; the optional overlay uses them.
 //
 // Timing: the picture is drawn in 8-pixel blocks, 44 a line. Block b of
 // picture line y is shown at T-state
@@ -41,18 +41,18 @@
 
 namespace sppie {
 
-static const unsigned DisplayWidth	= 640;
-static const unsigned DisplayHeight	= 360;
+static const unsigned DisplayWidth	= 480;
+static const unsigned DisplayHeight	= 270;
 
 static const unsigned BorderLeft	= 48;		// pixels
-static const unsigned BorderTop		= 48;		// lines
-static const unsigned BorderBottom	= 56;		// lines
+static const unsigned BorderTop		= 39;		// lines
+static const unsigned BorderBottom	= 39;		// lines
 static const unsigned ScreenPixelWidth	= 256;
 static const unsigned ScreenPixelHeight	= 192;
 static const unsigned PictureWidth	= BorderLeft + ScreenPixelWidth + BorderLeft;	// 352
-static const unsigned PictureHeight	= BorderTop + ScreenPixelHeight + BorderBottom;	// 296
-static const unsigned PictureLeft	= (DisplayWidth - PictureWidth) / 2;		// 144
-static const unsigned PictureTop	= (DisplayHeight - PictureHeight) / 2;		// 32
+static const unsigned PictureHeight	= BorderTop + ScreenPixelHeight + BorderBottom;	// 270
+static const unsigned PictureLeft	= (DisplayWidth - PictureWidth) / 2;		// 64
+static const unsigned PictureTop	= (DisplayHeight - PictureHeight) / 2;		// 0
 
 static const unsigned BlockPixels	= 2 * BorderStepTStates;			// 8
 static const unsigned BlocksPerLine	= PictureWidth / BlockPixels;			// 44
@@ -104,7 +104,7 @@ struct CRenderState
 // Draws one Spectrum frame and applies all of its events to rState.
 //
 // rEvents holds the frame's events in time order. pPixels points at the
-// top-left pixel of the 352 x 296 picture; nPitch is the distance between
+// top-left pixel of the 352 x 270 picture; nPitch is the distance between
 // rows in pixels. Normal mode uses the 16 Spectrum colours and FLASH (from
 // nFrame). ULAplus mode (on at the block's T-state) uses the 64-entry
 // palette: attribute bits 7..6 select one of four 16-entry groups, ink is

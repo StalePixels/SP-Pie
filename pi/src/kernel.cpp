@@ -41,7 +41,7 @@ boolean CKernel::Initialize (void)
 		Fail (FailSystem);
 	}
 
-	// 640 x 360 at 32 bits per pixel, twice as high for the flip. The
+	// 480 x 270 at 32 bits per pixel, twice as high for the flip. The
 	// firmware scales it to the HDMI mode (x3 for 1080p).
 	m_pFrameBuffer = new CBcmFrameBuffer (DisplayWidth, DisplayHeight, 32,
 					      DisplayWidth, DisplayHeight * 2);

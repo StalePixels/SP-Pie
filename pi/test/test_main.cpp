@@ -468,8 +468,8 @@ static void TestAttributePixelPattern (void)
 	CHECK (AttributeRowOffset (191) == 0x1AE0);
 
 	// Geometry: 640 x 360, picture 352 x 296 centred.
-	CHECK (PictureWidth == 352 && PictureHeight == 296);
-	CHECK (PictureLeft == 144 && PictureTop == 32);
+	CHECK (PictureWidth == 352 && PictureHeight == 270);
+	CHECK (PictureLeft == 64 && PictureTop == 0);
 
 	CTestPicture Picture;
 	Render (*pState, 0, Picture);

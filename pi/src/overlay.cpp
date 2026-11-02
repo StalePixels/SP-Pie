@@ -68,29 +68,33 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 	const unsigned nColumnWidth = PictureLeft - 2 * Margin;
 	const unsigned nRightX = PictureLeft + PictureWidth + Margin;
 
-	unsigned nY = PictureTop;
+	// Each item is two lines: the label, then the value right-aligned in
+	// nine characters, which fits the side area.
+	unsigned nY = PictureTop + Margin;
 	for (const TItem &rItem : Left)
 	{
-		CString Line;
-		Line.Format ("%-5s%10u", rItem.pLabel, rItem.nValue);
-		DrawText (Line, Margin, nY, nColumnWidth, pPixels, nPitch);
-		nY += LineHeight;
+		CString Value;
+		Value.Format ("%9u", rItem.nValue);
+		DrawText (rItem.pLabel, Margin, nY, nColumnWidth, pPixels, nPitch);
+		DrawText (Value, Margin, nY + LineHeight, nColumnWidth, pPixels, nPitch);
+		nY += 2 * LineHeight;
 	}
 
-	nY = PictureTop;
+	nY = PictureTop + Margin;
 	{
-		CString Line;
-		Line.Format ("%-5s%10s", "MACH",
-			     MachineNames[rReport.Machine < MachineCount ? rReport.Machine : 0]);
-		DrawText (Line, nRightX, nY, nColumnWidth, pPixels, nPitch);
-		nY += LineHeight;
+		CString Value;
+		Value.Format ("%9s", MachineNames[rReport.Machine < MachineCount ? rReport.Machine : 0]);
+		DrawText ("MACH", nRightX, nY, nColumnWidth, pPixels, nPitch);
+		DrawText (Value, nRightX, nY + LineHeight, nColumnWidth, pPixels, nPitch);
+		nY += 2 * LineHeight;
 	}
 	for (const TItem &rItem : Right)
 	{
-		CString Line;
-		Line.Format ("%-5s%10u", rItem.pLabel, rItem.nValue);
-		DrawText (Line, nRightX, nY, nColumnWidth, pPixels, nPitch);
-		nY += LineHeight;
+		CString Value;
+		Value.Format ("%9u", rItem.nValue);
+		DrawText (rItem.pLabel, nRightX, nY, nColumnWidth, pPixels, nPitch);
+		DrawText (Value, nRightX, nY + LineHeight, nColumnWidth, pPixels, nPitch);
+		nY += 2 * LineHeight;
 	}
 }
 

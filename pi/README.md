@@ -138,7 +138,7 @@ A Z80 writing as fast as it can (PUSH) makes about 640,000 writes a second, abou
 
 ### Renderer
 
-The frame buffer is 640 x 360 pixels at 32 bits per pixel, 16:9, which the firmware scales by exactly 3 to the HDMI mode. `config.txt` sets 1920 x 1080 at 50 Hz (CEA mode 31), with HDMI on even when no display is detected at start-up. The Spectrum picture is 352 x 296 pixels in the middle: the 256 x 192 screen with 48 pixels of border left and right, 48 lines above and 56 below. These are the border sizes in the World of Spectrum 48K reference ("The border is 48 pixels wide at each side"; of the 64 lines before the screen "at least the last 48 of these are actual border-lines"; then "56 border lines"). The areas left and right of the picture are black.
+The frame buffer is 480 x 270 pixels at 32 bits per pixel, 16:9, which the firmware scales by exactly 4 to the HDMI mode. `config.txt` sets 1920 x 1080 at 50 Hz (CEA mode 31), with HDMI on even when no display is detected at start-up. The Spectrum picture is 352 x 270 pixels in the middle and fills the height: the 256 x 192 screen with 48 pixels of border left and right and 39 lines above and below. The World of Spectrum 48K reference gives the visible border as 48 pixels at each side, 48 lines above the screen and 56 below ("The border is 48 pixels wide at each side"; of the 64 lines before the screen "at least the last 48 of these are actual border-lines"; then "56 border lines"). The display shows all of the side border and the 39 lines nearest the screen above and below. The areas left and right of the picture are black.
 
 `src/renderer.cpp` draws a frame in 8-pixel blocks, 44 a line, in the order the ULA shows them. 1 T-state is two pixels, so each block has a T-state; the first screen byte of each line is at the line's first-pixel T-state. Before each block, the renderer applies every event of the frame before that T-state. A screen block then takes its pixel byte, attribute, screen bank (port 0x7FFD bit 3) and colours from the state, and a border block its border colour. The ULA changes the border only at these 8-pixel blocks, every 4 T-states (World of Spectrum: "you cannot change the border within a 'byte', an 8-pixel chunk"). After the last block, the rest of the frame's events are applied, which leaves the state at the start of the next frame.
 
@@ -151,7 +151,7 @@ FLASH counts Spectrum frames and changes phase every 16 frames. In ULAplus mode 
 `src/presenter.cpp` runs once per HDMI frame on core 0:
 
 1. It draws the oldest complete Spectrum frame into a buffer in RAM.
-2. Core 0 copies the picture into the hidden half of a 640 x 720 frame buffer.
+2. Core 0 copies the picture into the hidden half of a 480 x 540 frame buffer.
 3. It moves the display to that half (`SetVirtualOffset`) and waits for vertical sync (`WaitForVerticalSync`).
 
 The Spectrum makes frames a little faster than HDMI shows them: 50.08 Hz on a 48K and 50.02 Hz on the 128K class, against 50.00 Hz. When three or more complete frames are waiting, the presenter applies the oldest without drawing them until one will be left after the drawn one. That skips one whole frame about every 12.5 s on a 48K and every 47 s on the 128K class. When no frame is complete, the last one is shown again. The screen only ever shows whole Spectrum frames. A picture that alternates on alternate frames shows its phase change once at each skip.
@@ -298,5 +298,5 @@ No hardware was attached during development. Everything below is untested:
 - The Z80 delay from interrupt to the first push (`FrameEventTStates`, 10 T-states from the Z80 manual's cycle timing).
 - Where the ULA reads a cell relative to where it shows the border. The renderer uses the same T-state for both, at the first-pixel T-state from the World of Spectrum FAQ. The real ULA fetches screen bytes a little before it shows them.
 - That the +2A/+3 has the same first-pixel T-state as the 128K. The World of Spectrum FAQ says it shares the 128K timing but gives different contention start points.
-- Whether the firmware scales the 640 x 360 frame buffer to 1080p with sharp pixels or with smoothing.
+- Whether the firmware scales the 480 x 270 frame buffer to 1080p with sharp pixels or with smoothing.
 - The real restart gaps, backlog and CPU times. They exist only once the kernel runs on the board. A host measurement scaled to the Pi gives core 1 about 5 ms of work per 20 ms frame at the worst write rate and core 0 about 1.5 ms to draw a frame with 13,000 events, plus the copy to the frame buffer.
