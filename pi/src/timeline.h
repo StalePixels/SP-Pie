@@ -4,16 +4,20 @@
 // The intake core's side of the hand-off. It puts a Spectrum frame number
 // and T-state on every event and writes it to the event log.
 //
-// The intake core calls, for each run of new ring words:
+// The intake core calls StartTransfer () each time it starts an SMI
+// transfer, and for each run of new ring words:
 //
-//     BeginBatch (time the words were first seen)
+//     BeginBatch (word number of the first word, time the words were seen)
 //     ProcessWords (..., timeline, ...)      -> Event () for each event
 //     EndBatch ()
 //
-// and Advance (now) on every pass of its loop. Every event of a batch gets
-// the batch time. F events also go to the frame lock. Advance () marks a
-// frame complete once the time is past its end: an event seen later has a
-// later time, so it belongs to a later frame.
+// and Advance (time of its last producer sample) on every pass of its
+// loop, after it has handed over every word up to that sample. Each event's
+// time is the read time of its ring word, from the word's position (see
+// ringclock.h), so it does not depend on how late the core sees the word.
+// F events also go to the frame lock. Advance () marks a frame complete once
+// the sample time, less SeenMarginNs for words still in the SMI FIFO or the
+// DMA, is past the frame's end: every word read before then has been seen.
 //
 // Positions in the log never go backwards. When the frame lock moves the
 // line back a little, an event that would land before the last logged
@@ -29,6 +33,8 @@
 #include "eventlog.h"
 #include "framelock.h"
 #include "intake.h"
+#include "ringclock.h"
+#include <stddef.h>
 #include <stdint.h>
 
 namespace sppie {
@@ -41,11 +47,20 @@ public:
 	// Starts the frame lock free-running and the log at frame 0.
 	void Start (uint64_t nNow);
 
-	void BeginBatch (uint64_t nStamp);
-	void Event (const TEvent &rEvent) override;
+	// The SMI transfer whose first ring word is word number nWord started
+	// at nTicks.
+	void StartTransfer (uint64_t nWord, uint64_t nTicks);
+
+	// The next run of words starts at word number nFirstWord; the core saw
+	// them at nSeen.
+	void BeginBatch (uint64_t nFirstWord, uint64_t nSeen);
+	void Event (const TEvent &rEvent, size_t nWord) override;
 	void EndBatch (void);
 
-	void Advance (uint64_t nNow);
+	// Every word read up to nSeen - SeenMarginNs has been given to Event ().
+	void Advance (uint64_t nSeen);
+
+	static const uint32_t SeenMarginNs = 2000;
 
 	const CFrameLock &Lock (void) const	{ return m_Lock; }
 	uint32_t CurrentFrame (void) const	{ return m_nCompleted; }	// first incomplete frame
@@ -57,17 +72,17 @@ private:
 private:
 	CEventLog	*m_pLog;
 	CFrameLock	m_Lock;
+	CRingClock	m_Clock;
 
-	uint64_t	m_nStamp;
-	bool		m_bPositioned;		// m_nFrame/m_nTState valid for this batch
-	uint32_t	m_nFrame;
-	uint32_t	m_nTState;
+	uint64_t	m_nFirstWord;		// word number of the run's first word
+	uint64_t	m_nSeen;
 
 	uint32_t	m_nLastFrame;		// last logged position
 	uint32_t	m_nLastTState;
 	uint32_t	m_nCompleted;		// frames before this are complete
 	uint64_t	m_nNextCheck;		// Advance () does nothing before this tick
 	uint32_t	m_nLockVersion;		// line version m_nNextCheck was computed for
+	uint64_t	m_nMarginTicks;
 	uint64_t	m_nClamped;
 };
 

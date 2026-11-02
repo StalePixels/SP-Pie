@@ -9,7 +9,9 @@ namespace sppie {
 
 CTimeline::CTimeline (CEventLog *pLog, uint64_t nTickFrequency, TMachineChoice Choice)
 :	m_pLog (pLog),
-	m_Lock (nTickFrequency, Choice)
+	m_Lock (nTickFrequency, Choice),
+	m_Clock (nTickFrequency),
+	m_nMarginTicks ((uint64_t) SeenMarginNs * nTickFrequency / 1000000000)
 {
 	Start (0);
 }
@@ -17,11 +19,10 @@ CTimeline::CTimeline (CEventLog *pLog, uint64_t nTickFrequency, TMachineChoice C
 void CTimeline::Start (uint64_t nNow)
 {
 	m_Lock.Start (nNow);
+	m_Clock.Reset ();
 
-	m_nStamp = nNow;
-	m_bPositioned = false;
-	m_nFrame = 0;
-	m_nTState = 0;
+	m_nFirstWord = 0;
+	m_nSeen = nNow;
 	m_nLastFrame = 0;
 	m_nLastTState = 0;
 	m_nCompleted = 0;
@@ -49,43 +50,47 @@ void CTimeline::Locate (uint64_t nTicks, uint32_t &rFrame, uint32_t &rTState)
 	}
 }
 
-void CTimeline::BeginBatch (uint64_t nStamp)
+void CTimeline::StartTransfer (uint64_t nWord, uint64_t nTicks)
 {
-	m_nStamp = nStamp;
-	m_bPositioned = false;
+	m_Clock.StartTransfer (nWord, nTicks);
 }
 
-void CTimeline::Event (const TEvent &rEvent)
+void CTimeline::BeginBatch (uint64_t nFirstWord, uint64_t nSeen)
 {
+	m_nFirstWord = nFirstWord;
+	m_nSeen = nSeen;
+}
+
+void CTimeline::Event (const TEvent &rEvent, size_t nWord)
+{
+	uint64_t nStamp = m_Clock.Stamp (m_nFirstWord + nWord, m_nSeen);
+
 	if (rEvent.Kind == KindIo && (rEvent.Address & 0xF002) == 0x1000)
 	{
 		m_Lock.Port1FFDWrite ();
 	}
 
+	// The lock first, so that an F event lands just after the frame start
+	// it may have moved.
 	if (rEvent.Frame)
 	{
-		m_Lock.FrameEvent (m_nStamp);
+		m_Lock.FrameEvent (nStamp);
 	}
 
-	// Positioned once per batch, after any F event of the batch has moved
-	// the line, so that the F event itself lands just after its frame start.
-	if (!m_bPositioned)
-	{
-		Locate (m_nStamp, m_nFrame, m_nTState);
-		m_bPositioned = true;
-	}
+	uint32_t nFrame, nTState;
+	Locate (nStamp, nFrame, nTState);
 
 	TTimedEvent Timed;
-	Timed.Frame = m_nFrame;
-	Timed.TState = m_nTState;
+	Timed.Frame = nFrame;
+	Timed.TState = nTState;
 	Timed.Address = rEvent.Address;
 	Timed.Kind = rEvent.Kind;
 	Timed.Data = rEvent.Data;
 
 	if (m_pLog->Push (Timed))
 	{
-		m_nLastFrame = m_nFrame;
-		m_nLastTState = m_nTState;
+		m_nLastFrame = nFrame;
+		m_nLastTState = nTState;
 	}
 }
 
@@ -94,8 +99,14 @@ void CTimeline::EndBatch (void)
 	m_pLog->Publish ();
 }
 
-void CTimeline::Advance (uint64_t nNow)
+void CTimeline::Advance (uint64_t nSeen)
 {
+	if (nSeen < m_nMarginTicks)
+	{
+		return;
+	}
+	uint64_t nNow = nSeen - m_nMarginTicks;
+
 	if (m_Lock.Version () != m_nLockVersion)
 	{
 		m_nLockVersion = m_Lock.Version ();

@@ -35,7 +35,7 @@ size_t ProcessWords (const volatile uint32_t *pWords, size_t nCount,
 			{
 				rCounters.FrameEvents++;
 			}
-			rSink.Event (Event);
+			rSink.Event (Event, i);
 			rCounters.Events++;
 			break;
 

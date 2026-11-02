@@ -8,8 +8,9 @@
 //          to the hidden half of a double-height frame buffer, moves the
 //          display to that half, and waits for HDMI vertical sync. Core 0
 //          also takes Circle's peripheral interrupts (the system timer).
-//  Core 1: event intake. Polls the DMA producer position, stamps each run
-//          of new ring words with the time it first saw them, decodes them,
+//  Core 1: event intake. Polls the DMA producer position, stamps each new
+//          ring word with its read time from its position in the ring
+//          (ringclock.h), decodes the words,
 //          locks to the Spectrum frame and writes timed events to the event
 //          log (CTimeline). It restarts SMI transfers and resyncs on H-bit
 //          mismatches. It takes no interrupts and never waits for core 0.
@@ -50,6 +51,8 @@ struct TIntakeShared
 	u64	Restarts;		// SMI transfers started after the first
 	u64	MaxRestartGapTicks;	// upper bound of the read gap at a restart
 	u64	MaxBacklogWords;	// largest producer - consumer distance seen
+	u64	TransferWordsOff;	// restarts where the DMA position disagreed with the
+					// transfer length by more than the allowance
 	u64	BadProducer;		// DMA destination samples outside the ring
 	u64	LogDropped;
 	u64	Clamped;

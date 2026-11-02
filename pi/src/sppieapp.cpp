@@ -75,10 +75,16 @@ void CSpPieApp::RunIntake (void)
 	u64 nMaxBacklog = 0;
 	u64 nBadProducer = 0;
 
+	// Word numbers count every ring word since the start; nWord is the
+	// number of the word at nRead.
 	unsigned nRead = m_pReader->Start ();
 	u64 nTransferStart = ReadTicks ();
 	u64 nLastNotDone = nTransferStart;
+	u64 nWord = 0;
+	u64 nTransferWord = 0;		// first word of the running transfer
+	u64 nTransferWordsOff = 0;
 	m_Timeline.Start (nTransferStart);
+	m_Timeline.StartTransfer (nTransferWord, nTransferStart);
 	Publish (&m_Shared.Running, 1);
 
 	while (1)
@@ -91,8 +97,26 @@ void CSpPieApp::RunIntake (void)
 		{
 			if (m_pReader->TransferDone ())
 			{
+				// The next transfer's first word: a transfer is
+				// SmiTransferWords words. The DMA position must agree,
+				// allowing for words still on their way to memory.
+				u64 nExpected = nTransferWord + SmiTransferWords;
+				u64 nFirst = nExpected;
+				unsigned nEnd = m_pReader->ProducerIndex ();
+				if (nEnd != RingWords)
+				{
+					u64 nAt = nWord + (nEnd + RingWords - nRead) % RingWords;
+					if (nAt > nExpected || nAt + 4 < nExpected)
+					{
+						nFirst = nAt;
+						nTransferWordsOff++;
+					}
+				}
+
 				m_pReader->Restart ();
 				nTransferStart = ReadTicks ();
+				nTransferWord = nFirst;
+				m_Timeline.StartTransfer (nTransferWord, nTransferStart);
 
 				// Reads stopped some time after the last poll
 				// that saw the transfer running.
@@ -132,27 +156,38 @@ void CSpPieApp::RunIntake (void)
 			}
 
 			bool bMismatch = false;
-			m_Timeline.BeginBatch (nSeen);
 			while (nRead != nProducer && !bMismatch)
 			{
 				unsigned nEnd = nProducer > nRead ? nProducer : RingWords;
 				m_pReader->InvalidateWords (nRead, nEnd);
+				m_Timeline.BeginBatch (nWord, nSeen);
 				size_t nUsed = ProcessWords (pRing + nRead, nEnd - nRead,
 							     m_Timeline, Counters, bMismatch);
+				m_Timeline.EndBatch ();
 				nRead = (unsigned) ((nRead + nUsed) % RingWords);
+				nWord += nUsed;
 			}
-			m_Timeline.EndBatch ();
 
 			if (bMismatch)
 			{
-				nRead = m_pReader->Resync ();
+				// Resync skips the ring up to the producer and starts a
+				// new transfer there.
+				unsigned nNew = m_pReader->Resync ();
+				nWord += (nNew + RingWords - nRead) % RingWords;
+				nRead = nNew;
 				nTransferStart = ReadTicks ();
 				nLastNotDone = nTransferStart;
+				nTransferWord = nWord;
+				m_Timeline.StartTransfer (nTransferWord, nTransferStart);
 			}
 		}
 
-		// Frames whose end has passed are complete.
-		m_Timeline.Advance (ReadTicks ());
+		// Frames whose end has passed are complete: every word read before
+		// the producer sample has been handed over.
+		if (nProducer != RingWords)
+		{
+			m_Timeline.Advance (nSeen);
+		}
 
 		if (bBusy)
 		{
@@ -175,6 +210,7 @@ void CSpPieApp::RunIntake (void)
 			Publish (&m_Shared.Restarts, nRestarts);
 			Publish (&m_Shared.MaxRestartGapTicks, nMaxGap);
 			Publish (&m_Shared.MaxBacklogWords, nMaxBacklog);
+			Publish (&m_Shared.TransferWordsOff, nTransferWordsOff);
 		}
 		Publish (&m_Shared.BadProducer, nBadProducer);
 	}

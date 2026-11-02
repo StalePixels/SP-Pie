@@ -21,6 +21,7 @@
 #include "../src/spectrumstate.h"
 #include "../src/timeline.h"
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <stdio.h>
@@ -107,7 +108,7 @@ class CStateSink : public IEventSink
 public:
 	CStateSink (CRenderState &rState, TMachine Machine) : m_rState (rState), m_Machine (Machine) {}
 
-	void Event (const TEvent &rEvent) override
+	void Event (const TEvent &rEvent, size_t) override
 	{
 		m_rState.State.Apply (rEvent, m_Machine);
 	}
@@ -878,12 +879,14 @@ public:
 		std::stable_sort (m_Writes.begin (), m_Writes.end (),
 				  [] (const TWrite &a, const TWrite &b) { return a.nTicks < b.nTicks; });
 
-		// Arrival: write + 1.0 us + 0 to 0.8 us, in order, whole ticks.
+		// Arrival: write + 1.0 us + 0 to 0.4 us (one SMI pair period), in
+		// order, whole ticks. With no transfer start given to the timeline,
+		// an event's time is the time its batch was seen.
 		std::vector<uint64_t> Arrivals;
 		uint64_t nLast = 0;
 		for (const TWrite &rWrite : m_Writes)
 		{
-			double nLatencyNs = 1000.0 + (Random () % 801);
+			double nLatencyNs = 1000.0 + (Random () % (SmiPairNs + 1));
 			uint64_t nArrival = (uint64_t) (rWrite.nTicks + nLatencyNs * TickHz / 1e9);
 			nLast = std::max (nLast, nArrival);
 			Arrivals.push_back (nLast);
@@ -898,7 +901,7 @@ public:
 		{
 			while (i < m_Writes.size () && Arrivals[i] <= (uint64_t) nVsync)
 			{
-				m_pTimeline->BeginBatch (Arrivals[i]);
+				m_pTimeline->BeginBatch (i, Arrivals[i]);
 				bool bMismatch = false;
 				ProcessWords (&m_Writes[i].nWord, 1, *m_pTimeline, m_Counters, bMismatch);
 				m_pTimeline->EndBatch ();
@@ -1017,7 +1020,7 @@ static void TestPositionAccuracy (void)
 		uint32_t nRandom = 99;
 		auto Random = [&nRandom] () { nRandom = nRandom * 1103515245u + 12345u;
 					      return (nRandom >> 16) & 0x7FFF; };
-		auto Latency = [&] () { return (1000.0 + (Random () % 801)) * TickHz / 1e9; };
+		auto Latency = [&] () { return (1000.0 + (Random () % (SmiPairNs + 1))) * TickHz / 1e9; };
 
 		for (uint32_t f = 0; f < 600; f++)
 		{
@@ -1028,7 +1031,7 @@ static void TestPositionAccuracy (void)
 			TIntakeCounters Counters = {};
 			bool bMismatch;
 			uint32_t nWord = Mem (0x9FFE, 0, true);
-			Timeline.BeginBatch (nArrival);
+			Timeline.BeginBatch (f, nArrival);
 			ProcessWords (&nWord, 1, Timeline, Counters, bMismatch);
 			Timeline.EndBatch ();
 			Timeline.Advance (nArrival);
@@ -1044,7 +1047,7 @@ static void TestPositionAccuracy (void)
 			uint32_t f = 600 + k / 50;
 			uint32_t t = 500 + (k * 337) % (rTiming.FrameTStates - 1000);
 			double nTicks =   nInt0 + ((double) f * rTiming.FrameTStates + t) * nTicksPerT
-					+ 1400.0 * TickHz / 1e9;
+					+ (1000.0 + SmiPairNs / 2) * TickHz / 1e9;
 			uint32_t nFrame, nTState;
 			rLock.Position ((uint64_t) nTicks, nFrame, nTState);
 
@@ -1058,6 +1061,233 @@ static void TestPositionAccuracy (void)
 			Hw == Machine48K ? "48K" : "128K class", nWorst);
 		CHECK (nWorst <= 3);
 	}
+}
+
+// --- ring clock ------------------------------------------------------------
+
+// The SMI side of the board, word by word: one pair every SmiPairNs within
+// a transfer, SmiTransferWords words a transfer, a gap between transfers.
+// A Z80 write shows in the first pair that starts at least two reads after
+// it; every other pair is empty.
+class CRingSim
+{
+public:
+	struct TWrite
+	{
+		double		nTicks;		// capture time
+		uint32_t	nWord;
+	};
+
+	CRingSim (double nStartTicks, double nGapTicks)
+	:	m_nPair ((double) SmiPairNs * TickHz / 1e9),
+		m_nGap (nGapTicks),
+		m_nWord (0),
+		m_nTransferWord (0),
+		m_nTransferStart (nStartTicks),
+		m_nNext (0)
+	{
+	}
+
+	// Writes in capture order.
+	void Add (double nTicks, uint32_t nWord)	{ m_Writes.push_back ({ nTicks, nWord }); }
+
+	uint64_t Word (void) const		{ return m_nWord; }
+	double TransferStart (void) const	{ return m_nTransferStart; }
+
+	// TRUE when the next word starts a new transfer.
+	bool AtTransferStart (void) const
+	{
+		return m_nWord != 0 && m_nWord - m_nTransferWord == SmiTransferWords;
+	}
+
+	// Moves to the next transfer, which starts after the gap.
+	void NextTransfer (void)
+	{
+		m_nTransferStart += SmiTransferWords * m_nPair + m_nGap;
+		m_nTransferWord = m_nWord;
+	}
+
+	// Is a capture time inside a gap, or so close before one that it shows
+	// only after it?
+	bool NearGap (double nTicks) const
+	{
+		double nInTransfer = std::fmod (nTicks - m_nFirstStart, SmiTransferWords * m_nPair + m_nGap);
+		return nInTransfer > SmiTransferWords * m_nPair - 4 * m_nPair;
+	}
+
+	// The next word and the time its read ended.
+	uint32_t Next (double &rReadEnd)
+	{
+		double nPairStart = m_nTransferStart + (double) (m_nWord - m_nTransferWord) * m_nPair;
+		rReadEnd = nPairStart + m_nPair;
+		m_nWord++;
+
+		if (m_nNext < m_Writes.size () && m_Writes[m_nNext].nTicks + m_nPair <= nPairStart)
+		{
+			return m_Writes[m_nNext++].nWord;
+		}
+		return EmptyPairWord;
+	}
+
+	void SetFirstStart (double nTicks)	{ m_nFirstStart = nTicks; }
+
+private:
+	double			m_nPair;
+	double			m_nGap;
+	uint64_t		m_nWord;
+	uint64_t		m_nTransferWord;
+	double			m_nTransferStart;
+	double			m_nFirstStart = 0;
+	std::vector<TWrite>	m_Writes;
+	size_t			m_nNext;
+};
+
+// A backlog of ring words seen late in one batch, across an SMI transfer
+// restart: every event still gets the T-state it was written at.
+static void TestBacklogSeenLate (void)
+{
+	const TMachineTiming &rTiming = MachineTiming (Machine48K);
+	const double nTicksPerT = (double) TickHz / rTiming.ClockHz;
+	const double nStart = 1.0 * TickHz;
+	const double nInt0 = nStart + 0.003 * TickHz;
+	const double nGap = 30e-6 * TickHz;		// 30 us restart gap
+	const double nStartError = 0.2e-6 * TickHz;	// core 1 reads the timer a little late
+	auto At = [&] (uint32_t f, double t) { return nInt0 + ((double) f * rTiming.FrameTStates + t)
+							  * nTicksPerT; };
+
+	std::unique_ptr<CEventLog> pLog (new CEventLog);
+	CTimeline Timeline (pLog.get (), TickHz);
+	Timeline.Start ((uint64_t) nStart);
+
+	CRingSim Ring (nStart, nGap);
+	Ring.SetFirstStart (nStart);
+	Timeline.StartTransfer (0, (uint64_t) (nStart + nStartError));
+
+	// F events every frame; from frame 200 on, a marker write every 100
+	// T-states, as a multicolour engine writes attributes.
+	uint32_t nRandom = 7;
+	auto Random = [&nRandom] () { nRandom = nRandom * 1103515245u + 12345u;
+				      return (nRandom >> 16) & 0x7FFF; };
+	struct TMarker { double nTicks; uint32_t nTState; };
+	std::vector<TMarker> Markers;
+	for (uint32_t f = 0; f < 210; f++)
+	{
+		double nDelay = FrameEventTStates + Random () % 23;
+		Ring.Add (At (f, nDelay), Mem (0x9FFE, 0, true));
+		Ring.Add (At (f, nDelay + 3), Mem (0x9FFD, 0));
+		if (f >= 200 && f < 204)
+		{
+			for (uint32_t t = 200; t + 100 < rTiming.FrameTStates; t += 100)
+			{
+				uint16_t nIndex = (uint16_t) Markers.size ();
+				Markers.push_back ({ At (f, t), t });
+				Ring.Add (At (f, t), Mem ((uint16_t) (0xC000 + nIndex), 0));
+			}
+		}
+	}
+
+	TIntakeCounters Counters = {};
+	auto Feed = [&] (const std::vector<uint32_t> &rWords, uint64_t nFirst, double nSeen) {
+		bool bMismatch = false;
+		Timeline.BeginBatch (nFirst, (uint64_t) nSeen);
+		ProcessWords (rWords.data (), rWords.size (), Timeline, Counters, bMismatch);
+		Timeline.EndBatch ();
+		Timeline.Advance ((uint64_t) nSeen);
+		CHECK (!bMismatch);
+	};
+
+	// Words up to frame 200 in small batches, seen 1 us after they are read;
+	// then 60,000 words (24 ms, more than a frame and across a restart)
+	// seen 5 ms late in one batch; then small batches again.
+	std::vector<uint32_t> Batch;
+	uint64_t nBatchFirst = 0;
+	double nReadEnd = 0;
+	unsigned nBigBatches = 0;
+	const double nBacklogFrom = At (200, 0);
+	const uint64_t nBacklogWords = 60000;
+	uint64_t nBacklogStart = 0;
+	bool bInBacklog = false;
+
+	while (nReadEnd < At (208, 0))
+	{
+		if (Ring.AtTransferStart ())
+		{
+			Ring.NextTransfer ();
+			if (!bInBacklog)
+			{
+				// Batch boundary at a restart, as on the Pi.
+				if (!Batch.empty ())
+				{
+					Feed (Batch, nBatchFirst, nReadEnd + 0.000001 * TickHz);
+					Batch.clear ();
+				}
+			}
+			// Core 1 registers the restart before it reads the words.
+			Timeline.StartTransfer (Ring.Word (), (uint64_t) (Ring.TransferStart () + nStartError));
+		}
+
+		if (Batch.empty ())
+		{
+			nBatchFirst = Ring.Word ();
+		}
+		Batch.push_back (Ring.Next (nReadEnd));
+
+		if (!bInBacklog && nReadEnd >= nBacklogFrom && nBigBatches == 0)
+		{
+			bInBacklog = true;
+			nBacklogStart = Ring.Word ();
+		}
+
+		if (bInBacklog)
+		{
+			if (Ring.Word () - nBacklogStart >= nBacklogWords)
+			{
+				Feed (Batch, nBatchFirst, nReadEnd + 0.005 * TickHz);
+				Batch.clear ();
+				bInBacklog = false;
+				nBigBatches++;
+			}
+		}
+		else if (Batch.size () == 16)
+		{
+			Feed (Batch, nBatchFirst, nReadEnd + 0.000001 * TickHz);
+			Batch.clear ();
+		}
+	}
+	CHECK (nBigBatches == 1);
+	CHECK (Timeline.Lock ().Locked ());
+
+	// Every marker's logged T-state against the T-state it was written at.
+	int nWorst = 0;
+	unsigned nChecked = 0;
+	uint32_t nCompleted = pLog->Completed ();
+	for (uint32_t f = 0; f != nCompleted; f++)
+	{
+		TFrameSpan Span = pLog->TakeFrame (f);
+		for (uint32_t i = 0; i < Span.nCount; i++)
+		{
+			const TTimedEvent &rEvent = Span.At (i);
+			if (rEvent.Address < 0xC000)
+			{
+				continue;
+			}
+			const TMarker &rMarker = Markers[rEvent.Address - 0xC000];
+			if (Ring.NearGap (rMarker.nTicks))
+			{
+				continue;	// waited in the CPLD queue during a restart gap
+			}
+			int nError = (int) rEvent.TState - (int) rMarker.nTState;
+			int nHalf = (int) rTiming.FrameTStates / 2;
+			if (nError > nHalf) nError -= (int) rTiming.FrameTStates;
+			if (nError < -nHalf) nError += (int) rTiming.FrameTStates;
+			nWorst = std::max (nWorst, nError < 0 ? -nError : nError);
+			nChecked++;
+		}
+		pLog->Release (Span);
+	}
+	printf ("    %u markers, worst error %d T-states\n", nChecked, nWorst);
+	CHECK (nChecked > 2000);
+	CHECK (nWorst <= 3);
 }
 
 // --- timed rendering ------------------------------------------------------
@@ -1336,6 +1566,7 @@ int main (void)
 	Run ("event log: full ring drops, producer never waits", TestEventLogFullDrops);
 	Run ("frame lock: period and machine for 48K and 128K class", TestFrameLockMachines);
 	Run ("frame lock: position accuracy", TestPositionAccuracy);
+	Run ("ring clock: backlog seen late keeps each event's T-state", TestBacklogSeenLate);
 	Run ("timed: multicolour attribute per line", TestMulticolour);
 	Run ("renderer: border change at its 8-pixel block", TestBorderBlockExact);
 	Run ("timed: mid-line border change", TestMidLineBorder);

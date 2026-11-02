@@ -13,7 +13,7 @@ None of this has run on hardware yet. See [What is not verified](#what-is-not-ve
 The Zero 2 W has four cores. The kernel uses two.
 
 - **Core 0** starts Circle, the frame buffer and the SMI reader, then runs the renderer. Once per HDMI frame it draws the next complete Spectrum frame and shows it. It also takes Circle's interrupts (the system timer).
-- **Core 1** runs event intake. It polls the DMA position, puts a time on each new event, locks to the Spectrum frame, and writes the events to the event log. It also restarts or resyncs SMI. It takes no interrupts and never waits for core 0.
+- **Core 1** runs event intake. It polls the DMA position, gives each new event the read time of its ring word, locks to the Spectrum frame, and writes the events to the event log. It also restarts or resyncs SMI. It takes no interrupts and never waits for core 0.
 - **Cores 2 and 3** halt.
 
 The two working cores share the event log (see [Event log](#event-log)) and a block of counters. Core 1 publishes the counters with atomic 64-bit stores, and core 0 reads them once per frame.
@@ -64,22 +64,29 @@ An event with OVF = 1 is used as normal and counted. The events dropped before i
 
 ### Time stamps
 
-Core 1 reads the DMA producer position, then the ARM generic timer (`CNTPCT_EL0`). Every event in the new ring words gets that time: the moment core 1 first saw it. The CPLD queue is almost always empty and core 1 polls without a break, so this is a short, nearly fixed time after the Z80 wrote.
+SMI reads one pair every 400 ns at a fixed rate, and every pair goes into the ring, empty pairs included. So the position of a word in the ring is a clock. `src/ringclock.h` turns it into the read time of each word:
+
+- Core 1 numbers every ring word since start-up.
+- Each time it starts an SMI transfer (at start-up, at each restart and after a resync), it reads the ARM generic timer (`CNTPCT_EL0`) and records the time with the number of the transfer's first word. The first word of a restarted transfer is the previous first word plus the transfer length. When the DMA position at the restart disagrees with that by more than a few words, core 1 uses the DMA position and counts the difference.
+- Word w of a transfer that started at time T0 with word w0 was read at T0 + (w - w0 + 1) x the pair period. The pair period comes from the SMI timing constants in `src/smitiming.h`.
+- A stamp is never later than the time core 1 saw the word, and never earlier than the stamp before it.
+
+This time does not depend on when core 1 sees the word. A large backlog seen late in one batch keeps the right times. The reads stop between transfers, and the new transfer's start time covers that gap. A write that waits in the CPLD queue during a restart gap gets the time of the first pair after the restart.
 
 ### Frame lock
 
-`src/framelock.cpp` ties the Pi's timer to the Spectrum frame. It uses the events with F = 1: the CPLD sets F on the first write after each interrupt acknowledge, which is the Z80 pushing its return address. Such an event arrives at
+`src/framelock.cpp` ties the Pi's timer to the Spectrum frame. It uses the events with F = 1: the CPLD sets F on the first write after each interrupt acknowledge, which is the Z80 pushing its return address. The read time of such an event is
 
-> interrupt time + Z80 delay + transport latency
+> interrupt time + Z80 delay + write-to-read delay
 
-The Z80 delay is about 10 T-states (the 7 T-state acknowledge and the first push, from the Zilog Z80 CPU User Manual) plus the rest of the instruction the Z80 was running, up to about 23 T-states. The transport latency (CPLD queue, SMI read, DMA, the core 1 poll) varies by under a microsecond. Neither is ever negative, so the earliest F arrivals lie on a straight line, one point per frame. The lock estimates that line.
+The Z80 delay is about 10 T-states (the 7 T-state acknowledge and the first push, from the Zilog Z80 CPU User Manual) plus the rest of the instruction the Z80 was running, up to about 23 T-states. The write-to-read delay is two SMI reads plus up to one pair period, 400 ns. Neither delay varies below its minimum, so the earliest F events lie on a straight line, one point per frame. The lock estimates that line.
 
 - **Acquisition.** A run of F events, close together, gives a first period (time span divided by frames) and the line through the earliest of them.
-- **Tracking.** F events are grouped in blocks of frames. The earliest arrival of each block is one point. After each block, a least-squares line through the recent points corrects the period and the phase.
+- **Tracking.** F events are grouped in blocks of frames. The earliest F event of each block is one point. After each block, a least-squares line through the recent points corrects the period and the phase.
 - **Flywheel.** With no F events (a program that runs with interrupts off), the line goes on with the last period and phase.
 - **Re-acquisition.** When the newest points lie far off the line, the lock acquires again. The old line keeps running meanwhile.
 
-The frame start is the interrupt time, as seen in arrival time: the line minus the Z80 delay of the earliest arrivals, plus the calibration constant below. An event's arrival time minus the frame start is its time in the frame, which gives its frame number and T-state.
+The frame start is the interrupt time, as seen in read time: the line minus the Z80 delay of the earliest F events, plus the calibration constant below. An event's read time minus the frame start is its time in the frame, which gives its frame number and T-state.
 
 Until the first lock the kernel runs free on the nominal 128K period, with an arbitrary phase. The picture is then correct apart from timing effects.
 
@@ -129,7 +136,7 @@ Only core 0 uses the state. It applies each event at the event's T-state while i
 `src/eventlog.h` is the hand-off from core 1 to core 0. It is a ring of timed events (frame number, T-state, kind, address, data) with one writer and one reader, and no lock.
 
 - Core 1 writes events in time order and publishes its write index with a release store. When the ring is full it drops the event and counts it. It never waits.
-- When the time is past the end of a frame, core 1 writes a record for the frame (its model and lock state) and then stores the count of complete frames with a release store. An event seen later has a later time stamp, so it belongs to a later frame.
+- When the time of its last DMA position read, less 2 µs for words still in the SMI FIFO or the DMA, is past the end of a frame, core 1 writes a record for the frame (its model and lock state) and then stores the count of complete frames with a release store. Every word read before then has been handed over, so no later event belongs to that frame.
 - Core 0 loads the complete count with an acquire load, uses the frame's events, and publishes its read index with a release store.
 
 Positions in the log never go backwards. When a lock correction moves the line back a little, an event that would land before the last logged position, or in a complete frame, gets the last position.
@@ -162,13 +169,13 @@ The time from a Spectrum frame's end to its display is one to two HDMI frames.
 
 An event's position in the frame is only as good as its time stamp and the lock.
 
-- **Arrival jitter.** The transport latency spreads over about 0.8 µs: the CPLD shows a new event two SMI reads late (200 ns each), and core 1 sees new words once per poll. 0.8 µs is about 2.8 T-states, or about 6 pixels. This is an estimate; it has not been measured.
+- **Read-time jitter.** A write shows in the next pair the CPLD presents, so the time from write to read varies over one pair period, 400 ns. That is about 1.4 T-states, or about 3 pixels. How late core 1 sees the word does not matter.
 - **Lock phase.** The earliest F arrival in a block of frames has a Z80 delay a little above the minimum, depending on the program's instructions. A program that waits in HALT reaches the minimum within 3 T-states.
 - **Machines.** The World of Spectrum FAQ notes that some machines are one T-state later than others for all timings.
 
-In the host tests' simulation (Z80 delay 0 to 22 T-states, latency spread 0.8 µs) the position error stays within 4 T-states, with a mean of about 1.6 T-states early. 4 T-states is one 8-pixel block. A write that lands within a few T-states of the moment the ULA reads a cell can therefore show one line or one border block early or late. Multicolour engines that write well ahead of the ULA are not affected.
+In the host tests' simulation (Z80 delay 0 to 22 T-states, read-time spread 400 ns) the position error stays within 2 T-states, with a mean of about 1.4 T-states early, from about 3 s after the first F event. In the first seconds, while the lock settles, it reaches 6 T-states. 4 T-states is one 8-pixel block. A write that lands within a few T-states of the moment the ULA reads a cell can therefore show one line or one border block early or late. Multicolour engines that write well ahead of the ULA are not affected.
 
-The one calibration constant is `TransportCalibrationNs` in `src/machinetiming.h`. It is the difference between the latency of an ordinary event and the smallest latency the lock sees, and it also absorbs any constant error of the Z80 delay above. It is set to 400 ns, half the estimated latency spread. A larger value moves every event later in the frame. It must be set from a hardware test that writes the border at a known T-state.
+The one calibration constant is `TransportCalibrationNs` in `src/machinetiming.h`. It is the difference between the write-to-read delay of an ordinary event and the smallest delay the lock sees, and it also absorbs any constant error of the Z80 delay above. It is half the pair period, 200 ns. A larger value moves every event later in the frame. It must be set from a hardware test that writes the border at a known T-state.
 
 ## Building
 
@@ -265,7 +272,7 @@ The decoder, the intake loop, the state model, the frame lock, the timeline, the
 gmake test
 ```
 
-The timed tests use a simulated Spectrum: writes at known T-states, F events with a random Z80 delay, a random transport latency, a 19.2 MHz timer and a 50.00 Hz vertical sync.
+The timed tests use a simulated Spectrum: writes at known T-states, F events with a random Z80 delay, a random delay of up to one pair period, a 19.2 MHz timer and a 50.00 Hz vertical sync. The ring clock test also simulates the SMI ring word by word, with transfers and restart gaps.
 
 The tests cover:
 
@@ -276,6 +283,7 @@ The tests cover:
 - the reset event: paging cleared and unlocked, ULAplus off with the palette kept, the border and RAM kept,
 - the event log dropping events when full instead of waiting,
 - the frame lock's period and model for the 48K and the 128K class, and its position accuracy,
+- a backlog of more than a frame of ring words, across a transfer restart, seen late in one batch: every event keeps its T-state,
 - a multicolour attribute change on every line of a character row,
 - a border change inside a line, at the exact block in the renderer and within one block end to end,
 - a 0x7FFD screen switch in the middle of a frame,
@@ -294,9 +302,11 @@ No hardware was attached during development. Everything below is untested:
 - Whether SMI leaves SD0 to SD15 undriven at all times when it only does reads.
 - Whether a word is in memory by the time the DMA destination register has moved past it. If it is not, the consumer can read a stale word.
 - Whether the firmware applies the virtual offset at the next vertical sync. If it applies it at once, a flip can land mid-scan, between two complete frames.
-- The transport latency and its spread, and so `TransportCalibrationNs`.
+- The write-to-read delay and its spread, and so `TransportCalibrationNs`.
+- That an SMI transfer gives exactly 32,767 ring words, and that reads run at exactly the pair period from the moment core 1 starts a transfer.
+- The time from starting a transfer to its first read. A constant offset cancels between F events and other events; only a varying one moves events.
 - The Z80 delay from interrupt to the first push (`FrameEventTStates`, 10 T-states from the Z80 manual's cycle timing).
 - Where the ULA reads a cell relative to where it shows the border. The renderer uses the same T-state for both, at the first-pixel T-state from the World of Spectrum FAQ. The real ULA fetches screen bytes a little before it shows them.
 - That the +2A/+3 has the same first-pixel T-state as the 128K. The World of Spectrum FAQ says it shares the 128K timing but gives different contention start points.
 - Whether the firmware scales the 480 x 270 frame buffer to 1080p with sharp pixels or with smoothing.
-- The real restart gaps, backlog and CPU times. They exist only once the kernel runs on the board. A host measurement scaled to the Pi gives core 1 about 5 ms of work per 20 ms frame at the worst write rate and core 0 about 1.5 ms to draw a frame with 13,000 events, plus the copy to the frame buffer.
+- The real restart gaps, backlog and CPU times. They exist only once the kernel runs on the board. An instruction count estimate for core 1 at 1000 MHz is about 0.2 µs per event and 0.02 µs per empty pair, about 3.6 ms per 20 ms frame at the worst write rate, not counting the DMA and SMI register reads of each loop pass. A host measurement scaled to the Pi gives core 0 about 1.5 ms to draw a frame with 13,000 events, plus the copy to the frame buffer.

@@ -17,11 +17,12 @@
 
 namespace sppie {
 
-// Receives every valid event in stream order.
+// Receives every valid event in stream order, with the position of its word
+// in the run given to ProcessWords ().
 class IEventSink
 {
 public:
-	virtual void Event (const TEvent &rEvent) = 0;
+	virtual void Event (const TEvent &rEvent, size_t nWord) = 0;
 
 protected:
 	~IEventSink (void) {}

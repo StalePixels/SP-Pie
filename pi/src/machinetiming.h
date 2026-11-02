@@ -36,6 +36,7 @@
 #ifndef _sppie_machinetiming_h
 #define _sppie_machinetiming_h
 
+#include "smitiming.h"
 #include <stdint.h>
 
 namespace sppie {
@@ -127,15 +128,15 @@ static inline const TMachineTiming &MachineTiming (unsigned nMachine)
 // the frame lock takes the earliest arrivals, which have the least of it.
 static const uint32_t FrameEventTStates		= 10;
 
-// The one calibration constant. Every event's arrival time includes the
-// transport latency: CPLD queue, SMI read (a new event shows two reads
-// late), DMA, and the intake core's poll loop. The frame lock measures the
-// smallest latency (from the earliest frame events); an ordinary event has
-// the average latency, which is larger by about half the latency spread.
-// The spread is estimated at 0.8 us (two SMI reads of 200 ns each plus a
-// poll loop pass), so this is 400 ns. It moves every event later in the
-// frame when it is made larger. It has not been measured on hardware.
-static const uint32_t TransportCalibrationNs	= 400;
+// The one calibration constant. Each event's time is the read time of its
+// ring word (see ringclock.h). A Z80 write shows in the next pair the CPLD
+// presents, two SMI reads after the capture, so the time from write to read
+// varies over one pair period. The frame lock measures the smallest delay
+// (from the earliest frame events); an ordinary event has the average
+// delay, which is larger by half a pair period. It moves every event later
+// in the frame when it is made larger. It has not been measured on
+// hardware.
+static const uint32_t TransportCalibrationNs	= SmiPairNs / 2;
 
 // The ULA changes the border colour only at 8-pixel boundaries, every 4
 // T-states, aligned with the screen bytes [WOS48].
