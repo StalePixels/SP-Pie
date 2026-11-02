@@ -91,7 +91,7 @@ Bits 3 and 2 give the mix:
 |---|---|---|
 | 00 | Average | Each pixel half of the newest frame and half of the frame before. |
 | 01 | CRT-style | 5/8 of the newest frame and 3/8 of the frame before. On a CRT the eye sees the picture that the beam has just drawn brighter than the one before it, which has faded. This weight leans towards the newest frame while both stay clearly visible. It is a chosen weight, not a measurement. |
-| 10 | Line weave | Each Spectrum line is 4 HDMI lines: the newest frame on the upper 2 and the frame before on the lower 2. No colour is mixed. |
+| 10 | Line weave | Not available: it needs a frame buffer with two lines for each display line, and the firmware does not stretch such a buffer. It shows the newest frame. |
 | 11 | Reserved | A data write with this mode is ignored. |
 
 The display feature applies from the Spectrum frame that holds the data write. The splash screen is never mixed.

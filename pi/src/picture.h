@@ -3,11 +3,11 @@
 //
 // The display geometry.
 //
-// The display is 480 x 270 pixels, 16:9. The frame buffer has two lines
-// for each display line, 480 x 540, which the firmware scales by exactly
-// 4 across and 2 down to 1920 x 1080: each display line is 4 HDMI lines,
-// and the two frame buffer lines of it can differ (the line weave of
-// interlace mixing, interlace.h). The Spectrum picture is 352 x 270 pixels in the
+// The display is 480 x 270 pixels, 16:9, and the frame buffer has the same
+// size, which the firmware scales by exactly 4 to 1920 x 1080. The firmware
+// keeps the frame buffer's shape, so the buffer must be 16:9. With one
+// frame buffer line per display line the line weave mode of interlace
+// mixing (interlace.h) has no second line and shows the newest frame. The Spectrum picture is 352 x 270 pixels in the
 // middle and fills the height: the 256 x 192 screen with 48 pixels of
 // border left and right and 39 lines above and below. Sources (World of
 // Spectrum FAQ, 48K reference): "The border is 48 pixels wide at each
@@ -31,7 +31,7 @@ namespace sppie {
 
 static const unsigned DisplayWidth	= 480;
 static const unsigned DisplayHeight	= 270;
-static const unsigned FrameBufferLines	= 2;	// frame buffer lines per display line
+static const unsigned FrameBufferLines	= 1;	// frame buffer lines per display line
 
 static const unsigned PictureWidth	= FUSEULA_PICTURE_WIDTH;			// 352
 static const unsigned PictureHeight	= FUSEULA_PICTURE_HEIGHT;			// 270
