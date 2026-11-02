@@ -84,8 +84,15 @@ public:
 	// their counts now.
 	void StartTransfer (uint64_t nWord, uint64_t nTicks);
 
-	// The next run of words was seen at nSeen.
-	void BeginBatch (uint64_t nSeen)	{ m_nSeen = nSeen; }
+	// The next run of words was seen at nSeen, when the DMA had written
+	// words up to nProducerWord (exclusive).
+	void BeginBatch (uint64_t nSeen, uint64_t nProducerWord)
+	{
+		m_nSeen = nSeen;
+		m_Clock.Observe (nProducerWord, nSeen);
+	}
+
+	double ReadTicks (void) const		{ return m_Clock.ReadTicks (); }
 
 	void Empty (uint8_t nCount, uint64_t nWord) override;
 	void Event (const TEvent &rEvent, uint64_t nWord) override;

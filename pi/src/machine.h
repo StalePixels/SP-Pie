@@ -62,12 +62,24 @@ static inline TMachine ResolveMachine (TMachine Measured, TMachineChoice Choice,
 	}
 }
 
-// Fuse's decode of port 0x1FFD on the +2A/+3 (machines_periph.c,
-// plus3_memory_ports: mask 0xF002, value 0x1000).
+// The write that shows a +2A/+3: to exactly port 0x1FFD. Fuse decodes the
+// port on A15..A12 = 0001 and A1 = 0 (machines_periph.c, mask 0xF002),
+// but a 128K writes such addresses too: OUT (n),A puts A on A15..A8, and
+// the bus carries stray values while /RESET bounces. The +2A/+3 software
+// writes the full address: the +3 manual's examples load BC with 1FFDh
+// before OUT (C),A ("bank2 equ 01FFDh"), and BASIC and the editor keep
+// the port's value in BANK678 (Spectrum +3 manual, chapter 8 part 26).
 static inline bool IsPort1FFD (uint16_t nPort)
 {
-	return (nPort & 0xF002) == 0x1000;
+	return nPort == 0x1FFD;
 }
+
+// A reset bounces: a press and a release of a reset button each give a
+// burst of /RESET edges, and the CPLD sends a reset event for each one.
+// Reset events closer together than this are one reset. Between a press
+// and its release the Z80 is held and writes nothing, so a reset that
+// lasts longer than this still gives no write between its two bursts.
+static const uint32_t ResetBurstTStates	= 70000;	// about 20 ms
 
 // The CPLD counts the edge-connector clock and stamps each write with the
 // count at the rising edge of /WR (docs/protocol.md). Fuse makes a write

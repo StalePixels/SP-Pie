@@ -22,6 +22,17 @@ namespace sppie {
 static const u64 TransferNs = (u64) SmiBatchTransfers
 			      * (SmiSetup + SmiStrobe + SmiHold + SmiPace) * SmiCycleNs;
 
+// Every read stop longer than 32 clocks (9 us) can cost an event its exact
+// count, and the CPLD queue holds only four events. So from this long
+// before a transfer is due to end, the intake core waits for its end and
+// starts the next one at once, and it never handles more than
+// BatchWords words between two looks at the transfer.
+static const u64 RestartLeadNs = 40000;
+static const unsigned BatchWords = 256;
+
+// The shared counters are published at most this often.
+static const u64 PublishNs = 1000000;
+
 // The clock rate the intake core uses to count wraps of the 5-bit clock
 // count across a stop in the reads: the 128K-class Z80 clock. The 48K
 // clock is 1.3 % slower, which matters only for stops of hundreds of
@@ -126,6 +137,11 @@ void CSpPieApp::RunIntake (void)
 {
 	const u64 nFrequency = TickFrequency ();
 	const u64 nRestartGuardTicks = TransferNs / 2 * nFrequency / 1000000000;
+	const u64 nRestartDueTicks = (TransferNs - RestartLeadNs) * nFrequency / 1000000000;
+	const u64 nRestartSpinTicks = 2 * RestartLeadNs * nFrequency / 1000000000;
+	const u64 nPublishTicks = PublishNs * nFrequency / 1000000000;
+	u64 nLastPublish = 0;
+	boolean bSpun = FALSE;		// waited for the end of the running transfer
 	const volatile u32 *pRing = m_pReader->Ring ();
 
 	TIntakeCounters Counters;
@@ -155,6 +171,20 @@ void CSpPieApp::RunIntake (void)
 		u64 nLoopStart = ReadTicks ();
 		boolean bBusy = FALSE;
 
+		// Near the end of an SMI transfer, wait for it and start the next
+		// one at once.
+		if (!bSpun && nLoopStart - nTransferStart >= nRestartDueTicks)
+		{
+			bSpun = TRUE;
+			u64 nSpinStart = ReadTicks ();
+			u64 nNow = nSpinStart;
+			while (!m_pReader->TransferDone () && nNow - nSpinStart < nRestartSpinTicks)
+			{
+				nLastNotDone = nNow;
+				nNow = ReadTicks ();
+			}
+		}
+
 		// End of an SMI transfer: start the next one.
 		if (nLoopStart - nTransferStart >= nRestartGuardTicks)
 		{
@@ -178,6 +208,7 @@ void CSpPieApp::RunIntake (void)
 
 				m_pReader->Restart ();
 				nTransferStart = ReadTicks ();
+				bSpun = FALSE;
 				nTransferWord = nFirst;
 				m_TStateClock.StartTransfer (nTransferWord, nTransferStart);
 
@@ -219,10 +250,16 @@ void CSpPieApp::RunIntake (void)
 			}
 
 			bool bMismatch = false;
-			m_TStateClock.BeginBatch (nSeen);
-			while (nRead != nProducer && !bMismatch)
+			m_TStateClock.BeginBatch (nSeen, nWord + nBacklog);
+			unsigned nLeft = BatchWords;
+			while (nRead != nProducer && !bMismatch && nLeft != 0)
 			{
 				unsigned nEnd = nProducer > nRead ? nProducer : RingWords;
+				if (nEnd - nRead > nLeft)
+				{
+					nEnd = nRead + nLeft;
+				}
+				nLeft -= nEnd - nRead;
 				m_pReader->InvalidateWords (nRead, nEnd);
 				size_t nUsed = ProcessWords (pRing + nRead, nEnd - nRead, nWord,
 							     m_TStateClock, State, Counters, bMismatch);
@@ -243,12 +280,21 @@ void CSpPieApp::RunIntake (void)
 				nTransferWord = nWord;
 				m_TStateClock.StartTransfer (nTransferWord, nTransferStart);
 				ResetIntake (State);
+				bSpun = FALSE;
 			}
 		}
 
 		if (bBusy)
 		{
 			nBusyTicks += ReadTicks () - nLoopStart;
+		}
+		if (bBusy && nLoopStart - nLastPublish >= nPublishTicks)
+		{
+			nLastPublish = nLoopStart;
+			Publish (&m_Shared.ReadPicoseconds,
+				 (u64) (m_TStateClock.ReadTicks () * 1e12 / (double) nFrequency));
+			Publish (&m_Shared.Port1FFDWrite, m_FrameClock.Port1FFDWrite ());
+			Publish (&m_Shared.ResetBursts, m_FrameClock.Resets ());
 
 			Publish (&m_Shared.FrameEvents, Counters.FrameEvents);
 			Publish (&m_Shared.LogDropped, m_Log.Dropped ());
@@ -395,6 +441,9 @@ void CSpPieApp::RunRenderer (void)
 		Report.Machine = m_Presenter.LastRecord ().Machine;
 		Report.Frames = nFrame;
 		Report.ClockStopped = Fetch (&m_Shared.ClockStopped) != 0;
+		Report.ReadPicoseconds = (unsigned) Fetch (&m_Shared.ReadPicoseconds);
+		Report.Port1FFDWrite = (unsigned) Fetch (&m_Shared.Port1FFDWrite);
+		Report.ResetBursts = (unsigned) Fetch (&m_Shared.ResetBursts);
 
 		nPrevEvents = nEvents;
 		nPrevEmpty = nEmpty;

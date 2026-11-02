@@ -29,6 +29,7 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 	{
 		const char	*pLabel;
 		unsigned	nValue;
+		bool		bHex;
 	};
 
 	const TItem Left[] =
@@ -39,7 +40,7 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 		{ "OVF",  rReport.Overflows },
 		{ "HS",   rReport.Mismatches },
 		{ "BAD",  rReport.Malformed },
-		{ "RST",  rReport.Resets },
+		{ "RST",  rReport.ResetBursts },
 		{ "IN",   rReport.IntakeBusyUs },
 		{ "IDI",  rReport.IntakeIdleUs },
 		{ "RN",   rReport.RenderUs },
@@ -65,7 +66,8 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 		{ "LD",   rReport.LogDropped },
 		{ "CLMP", rReport.Clamped },
 		{ "TAMB", rReport.Ambiguous },
-		{ "F",    rReport.Frames },
+		{ "P3W",  rReport.Port1FFDWrite, true },
+		{ "RDPS", rReport.ReadPicoseconds },
 		{ "C",    rReport.ArmClockMHz },
 	};
 
@@ -95,7 +97,14 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 	for (const TItem &rItem : Right)
 	{
 		CString Value;
-		Value.Format ("%9u", rItem.nValue);
+		if (rItem.bHex)
+		{
+			Value.Format ("%9X", rItem.nValue);
+		}
+		else
+		{
+			Value.Format ("%9u", rItem.nValue);
+		}
 		DrawText (rItem.pLabel, nRightX, nY, nColumnWidth, pPixels, nPitch);
 		DrawText (Value, nRightX, nY + LineHeight, nColumnWidth, pPixels, nPitch);
 		nY += 2 * LineHeight;

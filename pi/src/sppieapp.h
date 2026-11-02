@@ -63,6 +63,9 @@ struct TIntakeShared
 	u64	Clamped;
 	u64	Ambiguous;		// events whose time is not fixed exactly
 	u64	ClockStopped;		// the edge-connector clock stops during contention
+	u64	ReadPicoseconds;	// measured SMI read period
+	u64	Port1FFDWrite;		// write that selected the +2A/+3: address << 8 | data
+	u64	ResetBursts;		// resets, one per burst of reset events
 	u64	Acquisitions;
 	u64	Alignments;		// frame start moves by the contention check
 	u64	Aligned;		// the contention check has set the frame start

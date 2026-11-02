@@ -48,6 +48,12 @@ void CFrameClock::Reset (void)
 	m_nCompleted = 0;
 	m_nClamped = 0;
 
+	m_bInReset = false;
+	m_nResetEnd = 0;
+	m_nResets = 0;
+	m_nPort1FFDWrite = 0;
+	m_bCompleteAtValid = false;
+
 	ClearAlignment ();
 	m_nAlignments = 0;
 	m_bCheckContention = true;
@@ -350,23 +356,39 @@ void CFrameClock::FrameEvent (uint64_t nCount)
 
 void CFrameClock::TimedEvent (const TEvent &rEvent, uint64_t nCount)
 {
-	if (rEvent.Kind == KindIo && IsPort1FFD (rEvent.Address) && !m_bPort1FFDSeen)
+	if (m_bInReset && nCount >= m_nResetEnd)
+	{
+		m_bInReset = false;
+	}
+
+	if (rEvent.Kind == KindReset)
+	{
+		// After a reset the board may sit on another Spectrum: the
+		// +2A/+3 is detected again from its ROM's first 0x1FFD write, and
+		// the class from the next frames.
+		if (!m_bInReset)
+		{
+			m_nResets++;
+		}
+		m_bInReset = true;
+		m_nResetEnd = nCount + ResetBurstTStates;
+		m_nVotes = 0;
+		if (m_bPort1FFDSeen)
+		{
+			m_bPort1FFDSeen = false;
+			UpdateMachine ();
+		}
+	}
+
+	if (   !m_bInReset && rEvent.Kind == KindIo && IsPort1FFD (rEvent.Address)
+	    && !m_bPort1FFDSeen)
 	{
 		m_bPort1FFDSeen = true;
+		m_nPort1FFDWrite = (uint32_t) rEvent.Address << 8 | rEvent.Data;
 		UpdateMachine ();
 	}
 
-	// After a reset the board may sit on another Spectrum: the +2A/+3 is
-	// detected again from its ROM's first 0x1FFD write, and the class from
-	// the next frames.
-	if (rEvent.Kind == KindReset && m_bPort1FFDSeen)
-	{
-		m_bPort1FFDSeen = false;
-		m_nVotes = 0;
-		UpdateMachine ();
-	}
-
-	if (rEvent.Frame && !rEvent.Overflow)
+	if (rEvent.Frame && !rEvent.Overflow && !m_bInReset)
 	{
 		FrameEvent (nCount);
 	}
@@ -429,6 +451,20 @@ void CFrameClock::Clock (uint64_t nCount, double nTicks)
 	}
 
 	if (nCount < CTStateClock::CaptureLagClocks)
+	{
+		return;
+	}
+
+	// Most pairs complete nothing: compare with the count that completes
+	// the next frame, found again when the frame start or length moves.
+	uint64_t nStartNext = FrameStart (m_nCompleted + 1) + CTStateClock::CaptureLagClocks;
+	if (m_bCompleteAtValid && nStartNext == m_nCompleteAt && nCount < m_nCompleteAt)
+	{
+		return;
+	}
+	m_nCompleteAt = nStartNext;
+	m_bCompleteAtValid = true;
+	if (nCount < m_nCompleteAt)
 	{
 		return;
 	}

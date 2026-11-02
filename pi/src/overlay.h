@@ -55,6 +55,9 @@ struct TFrameReport
 	boolean		Locked;
 	unsigned	ArmClockMHz;
 	boolean		ClockStopped;	// the edge-connector clock stops during contention
+	unsigned	ReadPicoseconds;	// measured SMI read period
+	unsigned	Port1FFDWrite;	// write that selected the +2A/+3: address << 8 | data
+	unsigned	ResetBursts;	// resets, one per burst of reset events
 };
 
 class COverlay

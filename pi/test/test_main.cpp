@@ -24,6 +24,7 @@
 #include "../fuseula/fuseula.h"
 
 #include <algorithm>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -308,7 +309,7 @@ static void TestIntakeMismatchStops (void)
 // --- simulated CPLD -------------------------------------------------------
 
 static const uint64_t TickHz = 19200000;	// the Pi's generic timer
-static const double ReadNs = 200.0;
+static double ReadNs = 200.0;	// the simulated SMI read period
 static double ClockNs = 1e9 / 3546900.0;	// the simulated Z80 clock
 
 static uint64_t CountAt (double nNs)
@@ -401,6 +402,7 @@ public:
 			}
 
 			Words.push_back (nLoaded);
+			WordNs.push_back (nEnd);
 
 			// The SOE rising edge at nEnd loads the next read word.
 			if (!bR1)
@@ -463,6 +465,7 @@ public:
 	std::function<uint64_t (double)> CountAtNs = CountAt;
 
 	std::vector<uint32_t>	Words;
+	std::vector<double>	WordNs;		// when each read ended
 	std::vector<TTransfer>	Transfers;
 	std::vector<TStored>	Stored;
 	double			EndNs = 0;
@@ -496,7 +499,8 @@ static void Feed (const CCpldSim &rSim, CTStateClock &rClock, TIntakeCounters &r
 		{
 			nEnd = rSim.Transfers[nTransfer].Word;
 		}
-		rClock.BeginBatch (Ticks (rSim.EndNs) + 1);
+		// The batch is seen 1 us after its last word was read.
+		rClock.BeginBatch (Ticks (rSim.WordNs[nEnd - 1] + 1000), nEnd);
 		bool bMismatch = false;
 		ProcessWords (&rSim.Words[nPos], nEnd - nPos, nPos, rClock, State, rCounters, bMismatch);
 		CHECK (!bMismatch);
@@ -1396,7 +1400,7 @@ static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClock
 
 	CStoppingZ80 Z80 (Contention, L);
 	const uint64_t S = 2 * L;
-	const unsigned nFrames = 20, nCol0 = 1, nCols = 4, nRows = 6;
+	const unsigned nFrames = 24, nCol0 = 1, nCols = 4, nRows = 6;
 	auto Ink = [] (unsigned y, unsigned r, unsigned c) { return (uint8_t) (1 + (y + r + c) % 7); };
 
 	struct TTrueWrite { uint64_t u; TSimWrite Write; };
@@ -1462,8 +1466,16 @@ static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClock
 	CUlaClock Ula (&Tee, &Frames, TickHz);
 	CTStateClock Clock (&Ula, TickHz, 3546900);
 	TIntakeCounters Counters;
+	auto t0 = std::chrono::steady_clock::now ();
 	Feed (Sim, Clock, Counters);
+	auto t1 = std::chrono::steady_clock::now ();
 	pLog->Publish ();
+	if (Machine == FUSEULA_128K && ReadNs == 200.0)
+	{
+		double nNs = std::chrono::duration<double, std::nano> (t1 - t0).count ();
+		printf ("cost (host, stopped clock): core 1 %.1f ns per pair, %.0f us per frame\n",
+			nNs / (Sim.Words.size () / 2), nNs / 1000 / nFrames);
+	}
 
 	CHECK (Ula.Stopped ());
 	CHECK (Ula.LastFrameClocks () + 500 < L);
@@ -1472,12 +1484,12 @@ static void RunStoppedClockMulticolour (fuseula_machine Machine, uint32_t nClock
 	CHECK (Frames.Acquisitions () <= 2);
 	CHECK_EQ (Ula.PhaseSlips (), 0u);
 
-	// Every write from frame 8 on at its true ULA time, up to one constant.
+	// Every write from frame 10 on at its true ULA time, up to one constant.
 	CHECK_EQ (Tee.Counts.size (), True.size ());
 	if (Tee.Counts.size () == True.size ())
 	{
 		size_t nFrom = 0;
-		while (nFrom < True.size () && True[nFrom].u < S + 8 * L)
+		while (nFrom < True.size () && True[nFrom].u < S + 10 * L)
 		{
 			nFrom++;
 		}
@@ -1517,6 +1529,12 @@ static void TestStoppedClockMulticolour (void)
 {
 	RunStoppedClockMulticolour (FUSEULA_128K, 3546900);
 	RunStoppedClockMulticolour (FUSEULA_48K, 3500000);
+
+	// SMI reads 200 ppm slower than the 200 ns the Pi assumes: the ring
+	// clock measures the period over the first transfer.
+	ReadNs = 200.04;
+	RunStoppedClockMulticolour (FUSEULA_128K, 3546900);
+	ReadNs = 200.0;
 	ClockNs = 1e9 / 3546900.0;
 }
 
@@ -1533,13 +1551,60 @@ static void TestResetClearsPlus3 (void)
 	CHECK_EQ (Frames.Machine (), MachinePlus3);
 	Frames.TimedEvent (MakeEvent (KindReset, 0, 0), s + 1000);
 	CHECK_EQ (Frames.Machine (), Machine128K);
-	Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), s + 2000);
+	Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), s + 1000 + ResetBurstTStates + 100);
 	CHECK_EQ (Frames.Machine (), MachinePlus3);
+	CHECK_EQ (Frames.Port1FFDWrite (), 0x1FFD04u);
+}
+
+// A reset button that bounces: a dozen reset events at the press, the Z80
+// held for 300 ms, a few dozen at the release, with stray writes between
+// the bounces (one of them to exactly 0x1FFD), then the 128K ROM's own
+// writes, which include OUT (n),A to 0x10FD. One reset, the 128K stays a
+// 128K, and the frame start is not disturbed by F events in the burst.
+static void TestBouncingReset (void)
+{
+	for (int nPlus3 = 0; nPlus3 < 2; nPlus3++)
+	{
+		std::unique_ptr<CEventLog> pLog (new CEventLog);
+		CFrameClock Frames (pLog.get (), FrameLengths (), ChooseAuto);
+		const uint32_t L = 70908;
+		uint64_t s = 1000000;
+		for (unsigned n = 0; n < 10; n++, s += L)
+		{
+			Frames.TimedEvent (MakeEvent (KindMemory, 0xFFFE, 0, true), s + 10);
+			Frames.Clock (s + L + 10, 0.0);
+		}
+		uint32_t nAcq = Frames.Acquisitions ();
+		uint64_t c = s + 5000;
+		for (unsigned i = 0; i < 12; i++, c += 600)
+		{
+			Frames.TimedEvent (MakeEvent (KindReset, 0, 0), c);
+			Frames.TimedEvent (MakeEvent (KindIo, (uint16_t) (0x1000 | (i * 0x111)), 0xFF), c + 20);
+			Frames.TimedEvent (MakeEvent (KindMemory, 0x5800, 0x12, true), c + 40);
+		}
+		Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x07), c + 50);
+		c += 300 * 3547;			// held
+		for (unsigned i = 0; i < 30; i++, c += 400)
+		{
+			Frames.TimedEvent (MakeEvent (KindReset, 0, 0), c);
+			Frames.TimedEvent (MakeEvent (KindIo, (uint16_t) (0x1FF0 + i), 0xFF), c + 20);
+		}
+		c += ResetBurstTStates + 1000;
+		Frames.TimedEvent (MakeEvent (KindIo, 0x7FFD, 0x10), c);
+		Frames.TimedEvent (MakeEvent (KindIo, 0x10FD, 0x00), c + 100);
+		if (nPlus3)
+		{
+			Frames.TimedEvent (MakeEvent (KindIo, 0x1FFD, 0x04), c + 200);
+		}
+
+		CHECK_EQ (Frames.Resets (), 2u);	// press and release, far apart
+		CHECK_EQ (Frames.Machine (), nPlus3 ? MachinePlus3 : Machine128K);
+		CHECK_EQ (Frames.Port1FFDWrite (), nPlus3 ? 0x1FFD04u : 0u);
+		CHECK_EQ (Frames.Acquisitions (), nAcq);
+	}
 }
 
 // --- cost -----------------------------------------------------------------
-
-#include <chrono>
 
 static void ReportCost (void)
 {
@@ -1609,6 +1674,7 @@ int main (void)
 	Run ("end to end: multicolour through CPLD, clocks and Fuse", TestEndToEndMulticolour);
 	Run ("48K and 128K: stopped clock, multicolour at ULA time", TestStoppedClockMulticolour);
 	Run ("frame clock: a reset clears the +2A/+3 detection", TestResetClearsPlus3);
+	Run ("frame clock: a bouncing reset", TestBouncingReset);
 
 	ReportCost ();
 

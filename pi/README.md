@@ -38,7 +38,7 @@ SMI timing is in `src/smitiming.h`:
 
 The Z80 writes memory no faster than PUSH does, about 640,000 bytes per second, so the link reads about four times faster than the fastest event stream.
 
-An SMI transfer has a fixed count of reads. The count is 65,534 (even, so a transfer ends on a pair boundary), which is about 13.1 ms of reads. The width of the SMI length register is not documented, and this count fits in 16 bits. When a transfer ends, core 1 starts the next one. Reads stop for the time between the end of one transfer and the start of the next. Core 1 measures an upper bound of that gap and shows the largest one on screen. The CPLD queue holds events during the gap.
+An SMI transfer has a fixed count of reads. The count is 65,534 (even, so a transfer ends on a pair boundary), which is about 13.1 ms of reads. The width of the SMI length register is not documented, and this count fits in 16 bits. When a transfer ends, core 1 starts the next one. Reads stop for the time between the end of one transfer and the start of the next. The CPLD queue holds four events during the gap, and an event that waits more than 32 clocks (9 µs) cannot be placed from its 5 count bits, so the gap must stay short. From 40 µs before a transfer is due to end, core 1 waits for the end and starts the next transfer at once, and it never handles more than 256 ring words between two looks at the transfer, so a backlog cannot delay the restart. Core 1 measures an upper bound of each gap and shows the largest one on screen.
 
 ### Pair check and SYNC
 
@@ -66,6 +66,7 @@ An event with OVF = 1 is used as normal and counted. The events dropped before i
 
 `src/tstateclock.cpp` rebuilds the CPLD's full clock count from the 5-bit Gray-coded counts (protocol.md, Time base).
 
+- **Read period.** The read period is taken as 200 ns until it is measured: in each transfer, core 1 notes the DMA position and the timer at its first look and at each later one, and over 32,768 words or more these give the true period. The first measurement replaces the nominal value, later ones move it by an eighth. Read times within a transfer use it, so a read period that is a little off does not move the time of the reads after a restart. `RDPS` shows it, in picoseconds.
 - **Empty pairs.** The CPLD loads an empty pair's R0, and takes its count, at the end of the read before it. The running count advances by the difference of two counts modulo 32. The number of whole wraps comes from the time between the two loads and the clock rate (3.5469 MHz): the advance is the value that matches the 5 bits and is nearest to that time. The time of each read comes from its position in the ring (`src/ringclock.h`): SMI reads at a fixed rate, every read lands in the ring, and each transfer start is timed. So the wraps across a transfer restart or a resync are counted as well.
 - **Events.** An event is captured before the CPLD loads the next empty pair. Its count is the latest count at or below that pair's count that matches its 5 bits. This is exact while the event waited less than 32 clocks, about 9 µs.
 - **Stops.** Before reads stop for a restart or a resync, events that wait for an empty pair are placed from the empty pair before them: the earliest count at or after it, less a two-read delay, that matches their 5 bits.
@@ -120,7 +121,9 @@ The count between the F events of two frames in a row is the number of clocks in
 | T-states per frame (libspectrum `timings.c`) | 69,888 | 70,908 |
 | Fuse machine | `48` | `128`, or `plus3` once port 0x1FFD is written |
 
-The frame lengths come from libspectrum's timing tables at start-up. A frame length within 64 T-states of one of them, four frames in a row, selects that class; the 128K class is the start. In stopped mode the ULA clock's counts give the frame length. The frame length cannot tell a 128K or +2 from a +2A or +3: they share the timing but decode the paging ports differently. Only the +2A/+3 has port 0x1FFD. Its ROM writes that port at start-up and each time it changes ROM, and the 128K and +2 ROMs never write it. So by default the kernel uses Fuse's 128K for the 128K class until it sees the first I/O write that matches Fuse's 0x1FFD decode (mask 0xF002, value 0x1000). From then on it uses Fuse's +3, until a reset event or a change of class; the +3 ROM writes 0x1FFD again soon after a reset. The model applies per Spectrum frame, so the frame that holds that first write is already a +3 frame. A 128K program that writes to 0x1FFD selects the +3 by mistake; `auto128` prevents that.
+The frame lengths come from libspectrum's timing tables at start-up. A frame length within 64 T-states of one of them, four frames in a row, selects that class; the 128K class is the start. In stopped mode the ULA clock's counts give the frame length. The frame length cannot tell a 128K or +2 from a +2A or +3: they share the timing but decode the paging ports differently. Only the +2A/+3 has port 0x1FFD. Its ROM writes that port at start-up and each time it changes ROM, and the 128K and +2 ROMs never write it. So by default the kernel uses Fuse's 128K for the 128K class until it sees the first I/O write to exactly port 0x1FFD. Fuse decodes the port on fewer lines (A15 to A12 = 0001, A1 = 0), but a 128K writes such addresses too: OUT (n),A puts A on A15 to A8, and stray values appear while /RESET bounces. The +2A/+3 software writes the full address: the +3 manual's examples load BC with 1FFDh before OUT (C),A, and BASIC keeps the port's value in BANK678 (Spectrum +3 manual, chapter 8 part 26). From then on the kernel uses Fuse's +3, until a reset or a change of class; the +3 ROM writes 0x1FFD again soon after a reset. `P3W` shows the write that made the choice, as address and data in hex.
+
+A reset button bounces at both the press and the release, and the CPLD sends a reset event for each edge. Reset events less than 70,000 T-states (about 20 ms) apart are one reset. From a reset event until 70,000 T-states after the last one, F events do not touch the frame start or the class, and port writes do not select the +2A/+3. Fuse takes every reset event, which leaves the state of one reset at the end of the burst. The Z80 is held between the press and the release, so it writes nothing there. `RST` counts these resets: a press and a release far apart count as two. The model applies per Spectrum frame, so the frame that holds that first write is already a +3 frame. A 128K program that writes to 0x1FFD selects the +3 by mistake; `auto128` prevents that.
 
 The `machine` option in `cmdline.txt` on the SD card changes the choice:
 
@@ -241,7 +244,7 @@ Left side:
 | `OVF` | Events with OVF set, since boot. Each one means at least one lost event |
 | `HS` | H mismatches since boot. Each one caused a SYNC pulse |
 | `BAD` | Malformed pairs since boot |
-| `RST` | Reset events since boot. They are also counted in `EV` |
+| `RST` | Resets since boot, one per burst of reset events (see [Machine model](#machine-model)) |
 | `IN` | Core 1 time spent on ring words, restarts and resyncs, in µs per frame |
 | `IDI` | Core 1 time spent polling with nothing new, in µs per frame |
 | `RN` | Core 0 time to run the frame through Fuse, draw the overlay and copy, in µs |
@@ -271,7 +274,8 @@ Right side:
 | `LD` | Events lost because the event log was full, since boot |
 | `CLMP` | Events moved to keep log positions in order, since boot |
 | `TAMB` | Events whose time is not fixed exactly (count, stall or phase), since boot |
-| `F` | HDMI frames since boot |
+| `P3W` | The write that selected the +2A/+3, address and data in hex (0 when none) |
+| `RDPS` | Measured SMI read period, in picoseconds |
 | `C` | ARM clock in MHz, read from the firmware at start-up |
 
 `CPF`, `CMIN` and `CMAX` show whether the edge-connector clock runs during contention: within a few dozen clocks of 70,908 (69,888 on a 48K) it runs; well below, changing with the program, it stops, and `CLK` shows 1.
@@ -302,9 +306,9 @@ The tests cover:
 - in Fuse: a still picture and the border inside and outside Fuse's area, multicolour per line including a write one T-state too late, multicolour kept through the frames where Fuse swaps FLASH, border changes inside a line, a 0x7FFD screen switch in the middle of a frame and a reset, the +2A/+3 paging decode, and ULAplus palette and mode, with a palette change in the middle of a frame,
 - whole frames: skips and repeats in the presenter,
 - the contention check: the frame start found from +3 contended writes when every acknowledge is 2 T-states late, and when one F event is 2 T-states early, with writes on both sides of each fetch,
-- a reset clearing the +2A/+3 detection,
+- a reset clearing the +2A/+3 detection, and a bouncing reset: a dozen reset events at the press and thirty at the release with stray writes between them (one to exactly 0x1FFD), then a 128K's OUT to 0x10FD; the 128K stays a 128K, a +3's 0x1FFD write after the burst still makes a +3, and the frame start is not disturbed,
 - end to end with a clock that runs, through the simulated CPLD, the intake, the clock count, the ULA clock, the frame clock, the log and Fuse: multicolour per line, border changes inside a line, and a restart gap in each frame, with a different acknowledge delay each frame,
-- end to end with a clock that stops, on a 48K and a 128K: a Z80 that waits per Fuse's contention table, with unseen contended reads and restart gaps; every write at its exact ULA T-state, the multicolour lines right, no phase slips and a steady frame start.
+- end to end with a clock that stops, on a 48K and a 128K: a Z80 that waits per Fuse's contention table, with unseen contended reads and 7 µs restart gaps; every write at its exact ULA T-state, the multicolour lines right, no phase slips and a steady frame start; and the same with SMI reads 200 ppm slower than assumed. With 26 µs gaps, or without the read period measurement, the same stream gives phase slips, wrong placements and new acquisitions.
 
 At the end the tests print the time core 0 takes to run a frame of 13,000 screen writes through Fuse, and the time core 1's code takes for one frame of words at the worst write rate, on the build machine.
 
@@ -312,7 +316,7 @@ At the end the tests print the time core 0 takes to run a frame of 13,000 screen
 
 On the +3 with Bifrost*, the overlay shows core 0 at about 1.7 to 2.0 ms per frame (`RN`) and core 1 at about 13 ms of 20 (`IN`) with a backlog of about 50 words (`BL`). `IN` counts whole passes of core 1's loop with their fixed costs (see [Instrumentation](#instrumentation)); the backlog shows that core 1 keeps up. On the build machine the tests measure about 0.1 ms for core 0 to run a frame of 13,000 screen writes through Fuse, and about 0.3 ms for core 1's code to decode and place one frame of words (100,000 ring words).
 
-In stopped mode the ULA clock adds a few floating-point operations for each empty pair, 2.5 million a second. That is estimated at a few milliseconds of core 1 per frame; it is not measured.
+In stopped mode the host tests measure core 1's code at about 18 ns per pair, against about 6 ns in free mode. At an assumed tenfold for the Cortex-A53 that is about 9 ms of core 1's 20 ms per frame, before the fixed cost of each loop pass. The restart of a transfer does not wait for this work.
 
 ## What is not verified
 

@@ -47,8 +47,15 @@
 // gives shorter frames that match neither, and the class stays as it is.
 //
 // Model. The class, the machine choice and whether a write to port 0x1FFD
-// has been seen since the last reset event and the last class change give
-// the model (ResolveMachine). The frame length of the
+// (IsPort1FFD) has been seen since the last reset and the last class
+// change give the model (ResolveMachine).
+//
+// Resets. Reset events within ResetBurstTStates of each other are one
+// reset: the burst of a press and the burst of its release. During a burst
+// and for ResetBurstTStates after its last event, F events do not touch the
+// frame start or the class and port writes do not select the +2A/+3;
+// writes and reset events still go to the log, and Fuse takes every one,
+// which leaves the state of one reset at the end of the burst. The frame length of the
 // model is libspectrum's, given to the constructor. A change of frame
 // length sets the frame start again.
 //
@@ -105,6 +112,9 @@ public:
 	uint32_t FrameTStates (void) const	{ return m_nFrameTStates; }
 	uint32_t CompletedFrames (void) const	{ return m_nCompleted; }
 	uint64_t Clamped (void) const		{ return m_nClamped; }
+	uint32_t Resets (void) const		{ return m_nResets; }	// reset bursts
+	// The write that last selected the +2A/+3: address << 8 | data.
+	uint32_t Port1FFDWrite (void) const	{ return m_nPort1FFDWrite; }
 	uint32_t Alignments (void) const	{ return m_nAlignments; }	// frame start moves by the contention check
 	bool Aligned (void) const		{ return m_bAligned; }
 
@@ -163,6 +173,13 @@ private:
 	bool		m_bAligned;
 	uint32_t	m_nAlignments;
 	bool		m_bCheckContention;
+
+	bool		m_bInReset;		// within ResetBurstTStates of a reset event
+	uint64_t	m_nResetEnd;
+	uint32_t	m_nResets;
+	uint32_t	m_nPort1FFDWrite;
+	uint64_t	m_nCompleteAt;		// count that completes the next frame
+	bool		m_bCompleteAtValid;
 
 	uint32_t	m_nLastFrame;		// last logged position
 	uint32_t	m_nLastTState;
