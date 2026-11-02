@@ -18,10 +18,11 @@
 // Timing: the picture is drawn in 8-pixel blocks, 44 a line. Block b of
 // picture line y is shown at T-state
 //
-//     (FirstPixelLine - 48 + y) * TStatesPerLine + FirstPixelLineT + 4 * (b - 6)
+//     (FirstPixelLine - BorderTop + y) * TStatesPerLine + FirstPixelLineT + 4 * (b - 6)
 //
 // (1 T-state = 2 pixels; block 6 is the first screen byte). Each block uses
-// the state after every event before that T-state: a screen block takes its
+// the state after every event before that T-state + 4, Fuse's beam column
+// rule (display.c): a screen block takes its
 // pixel byte, attribute, screen bank and colours from it, and a border block
 // its border colour. The ULA changes the border only at these 8-pixel
 // blocks (BorderStepTStates).

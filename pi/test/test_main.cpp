@@ -1331,8 +1331,9 @@ static void TestMulticolour (void)
 	CHECK (nShown >= 8);
 }
 
-// The renderer puts a border change at the 8-pixel block whose T-state is
-// after the event: an event at T shows from the first block shown after T.
+// The renderer puts a border change at the first 8-pixel block whose display
+// starts after T - 4 (the Fuse beam column rule: a write at T shows in the
+// block starting at c when T < c + 4).
 static void TestBorderBlockExact (void)
 {
 	auto pState = NewState ();
@@ -1351,8 +1352,8 @@ static void TestBorderBlockExact (void)
 		CTestPicture Picture;
 		RenderTimedFrame (*pState, Span, Machine48K, 0, Picture.Data (), TestPitch);
 
-		// nDelta 1 or 4: from block b; nDelta 0: from block b + 1
-		unsigned nFirstRed = nDelta == 0 ? b + 1 : b;
+		// nDelta 1 or 4: from block b - 1; nDelta 0: from block b
+		unsigned nFirstRed = nDelta == 0 ? b : b - 1;
 		CHECK_EQ_HEX (Picture.At (nFirstRed * 8 - 1, y), Blue);
 		CHECK_EQ_HEX (Picture.At (nFirstRed * 8, y), Red);
 		CHECK_EQ_HEX (Picture.At (PictureWidth - 1, y - 1), Blue);

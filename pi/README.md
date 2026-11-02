@@ -101,7 +101,7 @@ The measured period selects the timing. The constants are in `src/machinetiming.
 | Lines per frame | 312 | 311 |
 | T-states per frame | 69,888 | 70,908 |
 | Frame period | 19.968 ms | 19.9915 ms |
-| First screen pixel | T-state 14,336 (line 64) | T-state 14,364 (line 63) |
+| First screen pixel (Fuse, libspectrum `timings.c`) | T-state 14,336 (line 64) | T-state 14,362 on the 128K/+2, 14,365 on the +2A/+3 |
 
 A period below the midpoint is the 48K class. The period cannot tell a 128K or +2 from a +2A or +3: they share the timing but decode the paging ports differently. Only the +2A/+3 has port 0x1FFD. Its ROM writes that port at start-up and each time it changes ROM, and the 128K and +2 ROMs never write it. So by default the kernel uses the 128K/+2 decode for the 128K class until it sees the first I/O write that matches the 0x1FFD decode (A15..A12 = 0001, A1 = 0). From then on, until the kernel restarts, it uses the +2A/+3 decode. The model applies per Spectrum frame, so the frame that holds that first write is already decoded as a +2A/+3. A 128K program that writes to 0x1FFD selects the +2A/+3 decode by mistake; `auto128` prevents that.
 

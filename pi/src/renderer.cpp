@@ -106,8 +106,12 @@ void RenderTimedFrame (CRenderState &rState, const TFrameSpan &rEvents, TMachine
 
 		for (unsigned b = 0; b < BlocksPerLine; b++, pOut += BlockPixels, nT += BorderStepTStates)
 		{
-			// The state at this block: every event before its T-state.
-			while (nNextT < nT)
+			// The state at this block: every event before the end of its
+			// first 4 T-states. A write at T-state t shows in the block
+			// whose display starts at c when t < c + 4, the beam column
+			// rule of Fuse (display.c, get_beam_position and
+			// display_update_critical).
+			while (nNextT < nT + BorderStepTStates)
 			{
 				rState.Apply (rEvents.At (nNext), Machine);
 				nNext++;

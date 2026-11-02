@@ -97,14 +97,17 @@ struct TMachineTiming
 						// pixel (byte 16384)
 };
 
-//  48K:      [WOS48]  14336 = 64 * 224 + 0, so line 64, T-state 0 in the line.
-//  128K/+2:  [WOS128] 14364 = 63 * 228 + 0, so line 63, T-state 0 in the line.
-//  +2A/+3:   [WOS128] the same timing as the 128K/+2.
+//  The T-state after the interrupt at which the top-left screen pixel is
+//  shown, from libspectrum's timings.c (Fuse): timings_frame_ferranti_5c_6c,
+//  timings_frame_ferranti_7c and timings_frame_amstrad_asic.
+//  48K:      14336 = 64 * 224 + 0, so line 64, T-state 0 in the line.
+//  128K/+2:  14362 = 62 * 228 + 226, so line 62, T-state 226 in the line.
+//  +2A/+3:   14365 = 63 * 228 + 1, so line 63, T-state 1 in the line.
 static const TMachineTiming MachineTimings[MachineCount] =
 {
 	{ 3500000, 224, 312, 224 * 312, 64, 0 },
-	{ 3546900, 228, 311, 228 * 311, 63, 0 },
-	{ 3546900, 228, 311, 228 * 311, 63, 0 }
+	{ 3546900, 228, 311, 228 * 311, 62, 226 },
+	{ 3546900, 228, 311, 228 * 311, 63, 1 }
 };
 
 // Frame periods: 69888 / 3.5 MHz = 19.968 ms and 70908 / 3.5469 MHz =
