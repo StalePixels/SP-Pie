@@ -59,6 +59,8 @@ Half-word 1:
 | 6 | Write to port 0x7FFD, accepted | I/O write, A15..A14 = 01, A1..A0 = 01, paging not locked |
 | 7 | Write to port 0x1FFD, accepted | I/O write, A15..A13 = 000, A12 = 1, A1 = 0, paging not locked |
 
+The I/O decodes are the decodes of the upstream TK-Pie CPLD, so software that works with TK-Pie works with this board. The 0x7FFD decode is narrower than the real 128K and +2 decode (A15 = 0, A1 = 0): a write to an address such as 0x3FFD or 0x7FFC pages a real 128K but queues no event.
+
 One I/O write can match both the 0xFE and the 0x1FFD decodes, as on the +2A/+3. The CPLD keeps this as one queue entry and sends it as two events, TYPE 3 and then TYPE 7. When the queue is full, both events are dropped together. No other pair of decodes can match the same write.
 
 ## Paging state in the CPLD

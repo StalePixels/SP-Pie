@@ -1,0 +1,8 @@
+*.o
+*.d
+*.elf
+*.img
+*.lst
+*.map
+.overlay-*
+/test/build/

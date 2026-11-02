@@ -1,0 +1,11 @@
+# SP-Pie video service, Raspberry Pi Zero 2 W
+#
+# Copy to the FAT partition of the SD card as config.txt, together with
+# kernel8.img and the firmware files listed in README.md.
+
+# Start the ARM cores in 64-bit mode (AArch64) and load the Circle kernel
+# at the address it is linked for.
+arm_64bit=1
+kernel=kernel8.img
+kernel_address=0x80000
+initial_turbo=0
