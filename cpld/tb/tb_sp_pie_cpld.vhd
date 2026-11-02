@@ -94,7 +94,7 @@ architecture sim of tb_sp_pie_cpld is
   signal edge_clk : std_logic;
 
   signal a        : std_logic_vector(15 downto 0) := (others => '1');
-  signal d        : std_logic_vector(7 downto 0)  := (others => 'X');
+  signal d        : std_logic_vector(7 downto 0)  := (others => 'Z');
   signal mreq_n   : std_logic := '1';
   signal iorq_n   : std_logic := '1';
   signal rd_n     : std_logic := '1';
@@ -238,7 +238,7 @@ begin
       wait until falling_edge(cpu_clk);
       wr_n   <= transport '1' after T_CTRL;
       mreq_n <= transport '1' after T_CTRL + 5 ns;
-      d      <= transport (others => 'X') after T_CTRL + T_HOLD;
+      d      <= transport (others => 'Z') after T_CTRL + T_HOLD;
       a      <= transport (others => 'X') after TCPU / 2 + T_ADDR;
     end procedure;
 
@@ -262,7 +262,26 @@ begin
       wait until falling_edge(cpu_clk);
       wr_n   <= transport '1' after T_CTRL;
       iorq_n <= transport '1' after T_CTRL;
-      d      <= transport (others => 'X') after T_CTRL + T_HOLD;
+      d      <= transport (others => 'Z') after T_CTRL + T_HOLD;
+      a      <= transport (others => 'X') after TCPU / 2 + T_ADDR;
+    end procedure;
+
+    -- I/O read cycle (Zilog UM0080 figure 7): /IORQ and /RD fall after the
+    -- rising edge of T2, one automatic wait state, the CPU samples the data
+    -- bus at the falling edge of T3, and /IORQ and /RD rise at that edge.
+    procedure io_read(addr : natural; v : out std_logic_vector(7 downto 0)) is
+    begin
+      wait until rising_edge(cpu_clk);                      -- T1
+      a <= transport std_logic_vector(to_unsigned(addr, 16)) after T_ADDR;
+      wait until rising_edge(cpu_clk);                      -- T2
+      rd_n   <= transport '0' after T_CTRL;
+      iorq_n <= transport '0' after T_CTRL;
+      wait until rising_edge(cpu_clk);                      -- TW
+      wait until rising_edge(cpu_clk);                      -- T3
+      wait until falling_edge(cpu_clk);
+      v := d;
+      rd_n   <= transport '1' after T_CTRL;
+      iorq_n <= transport '1' after T_CTRL;
       a      <= transport (others => 'X') after TCPU / 2 + T_ADDR;
     end procedure;
 
@@ -349,7 +368,7 @@ begin
       reset_n <= '1';
       wait for TCPU;
       a       <= (others => 'X');
-      d       <= (others => 'X');
+      d       <= (others => 'Z');
     end procedure;
 
     -- One SMI read driven by the main process, for the desync test.
@@ -363,6 +382,7 @@ begin
     end procedure;
 
     variable hw : std_logic_vector(15 downto 0);
+    variable rb : std_logic_vector(7 downto 0);
 
   begin
     report "testbench DEPTH = " & integer'image(DEPTH);
@@ -634,6 +654,36 @@ begin
     reader_on;
     mem_write(16#4501#, 16#D2#);          expect(1, 16#0501#, 16#D2#);
     check("SYNC resets the half-word pointer");
+
+    -------------------------------------------------------------------------
+    -- ULAplus read-back of port 0xFF3B. With the mode group selected the read
+    -- returns the mode register, otherwise the last byte written to 0xFF3B.
+    -- The writes are still events. Other ports, and the bus between reads,
+    -- stay high impedance.
+    reader_on;
+    io_write(16#BF3B#, 16#40#);           expect(4, 0, 16#40#);
+    io_write(16#FF3B#, 16#01#);           expect(5, 0, 16#01#);
+    io_read(16#FF3B#, rb);
+    if rb /= x"01" then fail("ULAplus: mode read-back " & to_hstring(rb) & ", expected 01"); end if;
+    io_write(16#BF3B#, 16#05#);           expect(4, 0, 16#05#);
+    io_write(16#FF3B#, 16#9C#);           expect(5, 0, 16#9C#);
+    io_read(16#FF3B#, rb);
+    if rb /= x"9C" then fail("ULAplus: data read-back " & to_hstring(rb) & ", expected 9C"); end if;
+    io_write(16#BF3B#, 16#40#);           expect(4, 0, 16#40#);
+    io_read(16#FF3B#, rb);
+    if rb /= x"01" then fail("ULAplus: mode not kept, read " & to_hstring(rb)); end if;
+    io_read(16#BF3B#, rb);
+    if rb /= "ZZZZZZZZ" then fail("ULAplus: read of 0xBF3B drove the bus: " & to_hstring(rb)); end if;
+    io_read(16#FFFD#, rb);
+    if rb /= "ZZZZZZZZ" then fail("ULAplus: read of 0xFFFD drove the bus: " & to_hstring(rb)); end if;
+    wait for TCPU;
+    if d /= "ZZZZZZZZ" then fail("ULAplus: bus driven after the read: " & to_hstring(d)); end if;
+    check("ULAplus read-back");
+
+    pulse_reset;                          expect(0, 0, 0);
+    io_read(16#FF3B#, rb);
+    if rb /= x"00" then fail("ULAplus: read-back after reset " & to_hstring(rb) & ", expected 00"); end if;
+    check("ULAplus registers cleared by /RESET");
 
     -------------------------------------------------------------------------
     -- Results.

@@ -7,8 +7,10 @@ and queues them. The Raspberry Pi Zero 2 W reads the queue through its SMI
 are defined in [`docs/protocol.md`](../docs/protocol.md). This logic implements
 that document.
 
-The CPLD never drives the Spectrum bus. D0 to D7 and /RESET are inputs, and
-/ROMCS stays at high impedance.
+The CPLD drives the Spectrum bus only to answer a read of the ULAplus data
+port 0xFF3B (see [ULAplus read-back](#ulaplus-read-back)). At all other times
+D0 to D7 are high impedance. /RESET is an input, and /ROMCS stays at high
+impedance.
 
 ## Files
 
@@ -47,6 +49,17 @@ marks the first event after one or more drops. A reset event follows the
 same rule: if the queue is full at the end of a reset, the reset event is
 dropped, and the first event stored after it carries OVF = 1. The Pi then
 gets no reset event for that reset.
+
+### ULAplus read-back
+
+The ULAplus data port 0xFF3B is read/write, and software reads it to detect
+ULAplus. The CPLD keeps the group of the last register-port write (mode group
+or not), the mode register, and the last byte written to the data port. An
+I/O read with the 0xFF3B decode (/IORQ and /RD low, A15..A14 = 11,
+A7..A6 = 00, A2 = 0, A0 = 1) drives D0 to D7 with the mode register when the
+mode group is selected, and with the last byte written otherwise. The CPLD
+keeps no copy of the palette, so a read in the palette group does not return
+the palette entry. /RESET low clears all three registers.
 
 ### Two events from one write
 
@@ -179,7 +192,10 @@ PI_SD drives GPIO 8 to 23 all the time, not only during SOE. SD16 and SD17
 
 The pin numbers come from the upstream TK-Pie pin assignments
 (`CPLD/EPM240/CPLD_TK-Pie.qsf`). Pins 17 and 21 have no PCB track and are not
-used. Unused pins are reserved as tri-stated inputs.
+used. Unused pins are reserved as tri-stated inputs. Every input-only pin uses
+the 3.3V Schmitt-trigger input standard. The write side is clocked by /WR and
+/RESET and the read side by SOE, so a slow or noisy edge on those pins must
+give one transition only.
 
 | Port | Signal | CPLD pin |
 |---|---|---|
@@ -210,7 +226,7 @@ used. Unused pins are reserved as tri-stated inputs.
 | `BUS_MRQ` | /MREQ | 97 |
 | `BUS_IORQ_i` | /IORQ (weak pull-up) | 98 |
 | `BUS_IORQ_COPY_i` | /IORQ, second pin (weak pull-up) | 76 |
-| `BUS_RD` | /RD, not used | 99 |
+| `BUS_RD` | /RD, for ULAplus reads | 99 |
 | `BUS_WR` | /WR | 100 |
 | `BUS_RESET` | /RESET, input only | 1 |
 | `BUS_ROMCS` | /ROMCS, high impedance | 6 |
@@ -326,12 +342,12 @@ From the Quartus 13.0sp1 fitter report. A MAX II logic element (LE) has one 4-in
 | Design | Logic elements | Pins |
 |---|---|---|
 | Upstream TK-Pie CPLD | 37 | 63 |
-| This design, DEPTH 4 | 195 | 61 |
-| This design, DEPTH 2 | 125 | 61 |
+| This design, DEPTH 4 | 217 | 61 |
+| This design, DEPTH 2 | 146 | 61 |
 
 DEPTH 4 is the default. Each step of depth costs about 35 LEs.
 
-The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures are 54.6 MHz for the write clock and 84.9 MHz (DEPTH 4) for the SOE clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
+The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures are 56.9 MHz for the write clock and 68.6 MHz (DEPTH 4) for the SOE clock. Quartus promotes the write clock `wclk` to a global clock. The fitter reports no latches and no combinational loops.
 
 ## Not verified
 

@@ -83,3 +83,15 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to BUS_IORQ_COPY_i
 
 set_global_assignment -name LAST_QUARTUS_VERSION "13.0 SP1"
 set_global_assignment -name RESERVE_ALL_UNUSED_PINS_NO_OUTPUT_GND "AS INPUT TRI-STATED"
+# Schmitt-trigger inputs on every input-only pin. The write side is clocked
+# by /WR and /RESET and the read side by SOE, so slow or ringing edges on
+# those pins must not give extra clock edges.
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_WR
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_RESET
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_MRQ
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_IORQ_i
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_IORQ_COPY_i
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_RD
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to BUS_A[*]
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to PI_SOE
+set_instance_assignment -name IO_STANDARD "3.3V SCHMITT TRIGGER INPUT" -to PI_SYNC

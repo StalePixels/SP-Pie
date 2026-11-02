@@ -4,8 +4,10 @@
 -- events, queues them, and hands them to the Raspberry Pi through SMI reads.
 -- The contract with the Pi is docs/protocol.md.
 --
--- The design never drives the Spectrum bus. D0-D7 and /RESET are inputs and
--- /ROMCS is held at high impedance.
+-- The design drives the Spectrum bus only to answer a read of the ULAplus
+-- data port 0xFF3B: D0-D7 carry the answer while /IORQ and /RD are low with
+-- that port's address, and are high impedance at all other times. /RESET is
+-- an input and /ROMCS is held at high impedance.
 --
 -- Clock domains
 --
@@ -34,11 +36,11 @@ entity sp_pie_cpld is
   port (
     -- Spectrum bus (all inputs).
     BUS_A           : in  std_logic_vector(15 downto 0);
-    BUS_D           : in  std_logic_vector(7 downto 0);
+    BUS_D           : inout std_logic_vector(7 downto 0);  -- driven only for ULAplus reads
     BUS_MRQ         : in  std_logic;  -- /MREQ
     BUS_IORQ_i      : in  std_logic;  -- /IORQ, pin 98
     BUS_IORQ_COPY_i : in  std_logic;  -- /IORQ, pin 76 (same net on the board)
-    BUS_RD          : in  std_logic;  -- /RD, not used
+    BUS_RD          : in  std_logic;  -- /RD, for ULAplus reads
     BUS_WR          : in  std_logic;  -- /WR
     BUS_RESET       : in  std_logic;  -- /RESET, input only
     BUS_ROMCS       : out std_logic;  -- /ROMCS, always high impedance
@@ -141,6 +143,15 @@ architecture rtl of sp_pie_cpld is
   signal ev_dat  : std_logic_vector(7 downto 0);
   signal wr_7ffd : std_logic;
   signal wr_1ffd : std_logic;
+  signal wr_bf3b : std_logic;
+  signal wr_ff3b : std_logic;
+
+  -- ULAplus read-back: the register port group (1 = mode group), the mode
+  -- register, and the last byte written to the data port.
+  signal ulap_modegrp : std_logic := '0';
+  signal ulap_mode    : std_logic_vector(7 downto 0) := (others => '0');
+  signal ulap_last    : std_logic_vector(7 downto 0) := (others => '0');
+  signal rd_ff3b      : std_logic;
 
   signal wp_gray  : ptr_t := (others => '0');
   signal rp_wsync : ptr_t := (others => '0');  -- read pointer seen by the write side
@@ -294,6 +305,8 @@ begin
     ev_dat  <= BUS_D;
     wr_7ffd <= '0';
     wr_1ffd <= '0';
+    wr_bf3b <= '0';
+    wr_ff3b <= '0';
 
     if rst_seen = '1' then
       ev_hit <= '1';
@@ -334,8 +347,50 @@ begin
       if p_1ffd then
         wr_1ffd <= '1';
       end if;
+      if p_bf3b then
+        wr_bf3b <= '1';
+      end if;
+      if p_ff3b then
+        wr_ff3b <= '1';
+      end if;
     end if;
   end process;
+
+  -- ULAplus registers for read-back. Cleared while /RESET is low.
+  p_ulaplus : process (wclk, BUS_RESET)
+  begin
+    if BUS_RESET = '0' then
+      ulap_modegrp <= '0';
+      ulap_mode    <= (others => '0');
+      ulap_last    <= (others => '0');
+    elsif rising_edge(wclk) then
+      if wr_bf3b = '1' then
+        if BUS_D(7 downto 6) = "01" then
+          ulap_modegrp <= '1';
+        else
+          ulap_modegrp <= '0';
+        end if;
+      end if;
+      if wr_ff3b = '1' then
+        ulap_last <= BUS_D;
+        if ulap_modegrp = '1' then
+          ulap_mode <= BUS_D;
+        end if;
+      end if;
+    end if;
+  end process;
+
+  -- ULAplus read of port 0xFF3B (same decode as the write). With the mode
+  -- group selected the answer is the mode register, otherwise the last byte
+  -- written to the data port. The CPLD keeps no copy of the palette.
+  rd_ff3b <= '1' when iorq_n = '0' and BUS_RD = '0' and
+                      BUS_A(15 downto 14) = "11" and BUS_A(7 downto 6) = "00" and
+                      BUS_A(2) = '0' and BUS_A(0) = '1'
+             else '0';
+
+  BUS_D <= ulap_mode when rd_ff3b = '1' and ulap_modegrp = '1' else
+           ulap_last when rd_ff3b = '1' else
+           (others => 'Z');
 
   -- Paging registers. Cleared while /RESET is low. A write is accepted only
   -- while 0x7FFD bit 5 is clear (the decode above already includes the lock).
