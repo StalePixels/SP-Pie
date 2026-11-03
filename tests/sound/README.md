@@ -99,20 +99,19 @@ Main page:
 | HUD | 0xFF, bit 0 | H |
 | Open the GIGASCREEN page | | G |
 
-GIGASCREEN page:
+GIGASCREEN page. Each row shows its current value on a line under its label.
 
-| Row | Feature 3 | Key |
-| --- | --- | --- |
-| Detection, on or off | bit 0 | 1 |
-| Locked, on or off | bit 1 | 2 |
-| Mode: 50/50 mix, CRT-style mix, double high | bits 3 and 2 | 3 |
-| Method: per page or per line | bit 4 | 4 |
-| First bank: primary (bank 5) or secondary (bank 7) | bit 6 | 5 |
-| Back to the main page | | G, SPACE or BREAK |
+| Row | Values | Feature 3 | Key |
+| --- | --- | --- | --- |
+| Gigascreen | Off, Auto, Always | Off: bits 0 and 1 clear. Auto: bit 0 set, bit 1 clear. Always: bit 1 set, bit 0 clear. | 1 |
+| Show as | 50/50 blend, CRT blend, Double high | bits 3 and 2: 00, 01, 10 | 2 |
+| Auto watches | Whole screen, Each line | bits 5 and 4: 01, 00 | 3 |
+| Double high top | Normal screen, Shadow screen | bit 6: 0 (bank 5 first), 1 (bank 7 first) | 4 |
+| Back to the main page | | | G, SPACE or BREAK |
 
-The mode steps through the three defined modes only. The panel never sends the reserved mode, the reserved methods or bit 7.
+Each key steps its row to the next value and wraps round: Off, Auto, Always, Off for the first row. The panel never sends the reserved mode, the reserved methods or bit 7.
 
-- Cursor up and down (CAPS SHIFT with 7 and 6) move the cyan bar, and repeat while held. ENTER toggles the selected row, or steps the mode.
+- Cursor up and down (CAPS SHIFT with 7 and 6) move the cyan bar, and repeat while held. ENTER toggles or steps the selected row.
 - A row key moves the bar to that row and acts at once.
 - S sends every value again. R restores the documented defaults and sends them. Q quits. All three work on both pages.
 

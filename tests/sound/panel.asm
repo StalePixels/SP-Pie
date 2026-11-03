@@ -23,12 +23,11 @@
 ;   H                 HUD
 ;   G                 open the GIGASCREEN page
 ; Keys on the GIGASCREEN page:
-;   cursor up, down, ENTER   as on the main page; ENTER steps the mode
-;   1                 automatic interlace detection
-;   2                 mixing locked on
-;   3                 mode: 50/50 mix, CRT-style mix, double high
-;   4                 detection method: per line or per page
-;   5                 first bank of the double-high mode: primary or secondary
+;   cursor up, down, ENTER   as on the main page; ENTER steps the value
+;   1                 Gigascreen: Off, Auto, Always
+;   2                 Show as: 50/50 blend, CRT blend, Double high
+;   3                 Auto watches: Whole screen, Each line
+;   4                 Double high top: Normal screen, Shadow screen
 ;   G, SPACE, BREAK   back to the main page
 ; Keys on both pages:
 ;   S send every value again, R restore the defaults and send them, Q quit.
@@ -61,7 +60,7 @@ DISP_BANK7      EQU 0x40            ; double high: 1 bank 7 first, 0 bank 5 firs
 DISP_DEFAULT    EQU DISP_AUTO|DISP_PAGE
 
 NITEMS          EQU 8               ; main page
-NSUBITEMS       EQU 5               ; GIGASCREEN page
+NSUBITEMS       EQU 4               ; GIGASCREEN page
 ITEM_SIZE       EQU 8
 REPEAT_DELAY    EQU 25                  ; scans before a cursor key repeats
 REPEAT_RATE     EQU 5                   ; scans between repeats
@@ -335,6 +334,8 @@ activate:
         ld a,c
         or a
         jr z,.mode
+        inc a
+        jr z,.giga                      ; mask 0xFF: Off, Auto, Always
         ld d,0
         ld hl,state
         add hl,de
@@ -342,7 +343,21 @@ activate:
         xor c
         ld (hl),a
         jr .send
-.mode:  ld e,VAR_DISPLAY                ; 50/50 mix, CRT-style mix, line weave
+.giga:  ld e,VAR_DISPLAY                ; bits 1,0: 00 Off, 01 Auto, 10 Always
+        ld a,(state+VAR_DISPLAY)
+        ld b,a
+        and 3
+        inc a
+        cp 3
+        jr c,.gok
+        xor a
+.gok:   ld c,a
+        ld a,b
+        and 0xFC
+        or c
+        ld (state+VAR_DISPLAY),a
+        jr .send
+.mode:  ld e,VAR_DISPLAY                ; 50/50 blend, CRT blend, double high
         ld a,(state+VAR_DISPLAY)
         ld b,a
         rrca
@@ -482,13 +497,22 @@ draw_row:
         call put_at
         ld hl,(r_lbl)
         call print_ff
-        ld a,(r_mask)
+        ld a,(val_dy)                   ; on the GIGASCREEN page the value has its
+        or a                            ; own row under the label, inside the bar
+        jr z,.one
+        ld a,(r_row)
+        inc a
+        ld b,a
+        ld c,4
+        call put_at
+        ld hl,txt_blank
+        call print_ff
+.one:   ld a,(r_mask)
         or a
         jr z,.mode
-        ld a,(r_row)
-        ld b,a
-        ld a,(val_col)
-        ld c,a
+        inc a
+        jr z,.mode                      ; mask 0xFF
+        call val_pos
         call put_at
         ld a,(r_var)
         ld e,a
@@ -506,24 +530,37 @@ draw_row:
         ld d,(hl)
         ex de,hl
         jp print_ff
-.mode:  ld a,(r_row)
-        ld b,a
-        ld a,(val_col)
-        ld c,a
+.mode:  call val_pos
         call put_at
         ld a,(state+VAR_DISPLAY)
+        ld b,a
+        ld a,(r_mask)
+        or a
+        ld a,b
+        jr nz,.gi
         rrca
         rrca
-        and 3
+.gi:    and 3
         add a,a
         add a,a
         add a,a
         add a,a                         ; each name takes 16 bytes
         ld e,a
         ld d,0
-        ld hl,mode_names
+        ld hl,(r_vals)                  ; the names table of the item
         add hl,de
         jp print_ff
+
+; B = screen row and C = column of the value of the item being drawn.
+val_pos:
+        ld a,(val_dy)
+        ld b,a
+        ld a,(r_row)
+        add a,b
+        ld b,a
+        ld a,(val_col)
+        ld c,a
+        ret
 
 ; Show the main page.
 show_main:
@@ -535,6 +572,8 @@ show_main:
         ld (cur_n),a
         ld a,24
         ld (val_col),a
+        xor a
+        ld (val_dy),a
         ld a,(main_cursor)
         ld (cursor),a
         call clear_box
@@ -550,8 +589,10 @@ show_sub:
         ld (cur_items),hl
         ld a,NSUBITEMS
         ld (cur_n),a
-        ld a,17
+        ld a,7
         ld (val_col),a
+        ld a,1
+        ld (val_dy),a
         xor a
         ld (cursor),a
         call clear_box
@@ -647,16 +688,14 @@ items:  DB '1',3,VAR_DEVICES,0x01
         DW lbl_hud,vals_onoff
 
 subitems:
-        DB '1',3,VAR_DISPLAY,DISP_AUTO
-        DW lbl_auto,vals_onoff
-        DB '2',4,VAR_DISPLAY,DISP_LOCKED
-        DW lbl_locked,vals_onoff
-        DB '3',5,VAR_DISPLAY,0
-        DW lbl_mode,0
-        DB '4',6,VAR_DISPLAY,DISP_PAGE
-        DW lbl_method,vals_method
-        DB '5',7,VAR_DISPLAY,DISP_BANK7
-        DW lbl_bank,vals_bank
+        DB '1',3,VAR_DISPLAY,0xFF
+        DW lbl_giga,giga_names
+        DB '2',6,VAR_DISPLAY,0
+        DW lbl_show,mode_names
+        DB '3',9,VAR_DISPLAY,DISP_PAGE
+        DW lbl_watch,vals_watch
+        DB '4',12,VAR_DISPLAY,DISP_BANK7
+        DW lbl_top,vals_top
 
 lbl_ay:     DB "1 AY chip",255
 lbl_turbo:  DB "2 TurboSound",255
@@ -666,18 +705,17 @@ lbl_dd:     DB "5 Covox 0xDD",255
 lbl_df:     DB "6 Covox 0xDF",255
 lbl_border: DB "7 Extend to 16:9",255
 lbl_hud:    DB "H HUD",255
-lbl_auto:   DB "1 Detection",255
-lbl_locked: DB "2 Locked",255
-lbl_mode:   DB "3 Mode",255
-lbl_method: DB "4 Method",255
-lbl_bank:   DB "5 1st bank",255
+lbl_giga:   DB "1 Gigascreen",255
+lbl_show:   DB "2 Show as",255
+lbl_watch:  DB "3 Auto watches",255
+lbl_top:    DB "4 Double high top",255
 
 vals_onoff:
         DW txt_on,txt_off
-vals_method:
-        DW txt_page,txt_line
-vals_bank:
-        DW txt_sec,txt_pri
+vals_watch:
+        DW txt_whole,txt_each
+vals_top:
+        DW txt_shadow,txt_normal
 
 ; Documented defaults, and the feature number of each state variable.
 defaults:
@@ -694,6 +732,7 @@ cur_items:
 cur_n:  DB 0
 val_col:
         DB 0
+val_dy: DB 0                            ; rows from the label to the value
 r_vals: DW 0
 a_idx:  DB 0
 r_idx:  DB 0
@@ -709,25 +748,36 @@ txt_blank:
 txt_on: DB 16,1,"ON ",255
 txt_off:
         DB 16,2,"OFF",255
-txt_page:
-        DB 16,0,"Per page",255
-txt_line:
-        DB 16,0,"Per line",255
-txt_sec:
-        DB 16,0,"Secondary",255
-txt_pri:
-        DB 16,0,"Primary  ",255
+txt_whole:
+        DB 16,0,"Whole screen",255
+txt_each:
+        DB 16,0,"Each line",255
+txt_shadow:
+        DB 16,0,"Shadow screen",255
+txt_normal:
+        DB 16,0,"Normal screen",255
 txt_spaces:
         DB "                          ",255     ; the 26 cells of the box
 txt_clr:
         DB 17,7,16,0,19,1,255
 
-; Display mode names, 16 bytes each, in the order of mode bits 00, 01, 10, 11.
-; Each entry is padded to 16 bytes. Mode 11 is reserved and is never selected or sent.
-mode_names:
-        DB 16,0,"50/50 mix  ",255
+; Value names of the two step items, 16 bytes each, in the order of the bits.
+; Gigascreen is bits 1 and 0: 00 Off, 01 Auto, 10 Always, 11 never selected.
+; Show as is mode bits 3 and 2: 00, 01, 10, and 11 reserved, never selected or
+; sent.
+giga_names:
+        DB 16,0,"Off        ",255
         DS 2
-        DB 16,0,"CRT-style  ",255
+        DB 16,0,"Auto       ",255
+        DS 2
+        DB 16,0,"Always     ",255
+        DS 2
+        DB 16,0,"Reserved   ",255
+        DS 2
+mode_names:
+        DB 16,0,"50/50 blend",255
+        DS 2
+        DB 16,0,"CRT blend  ",255
         DS 2
         DB 16,0,"Double high",255
         DS 2
@@ -747,7 +797,7 @@ txt_main:
 txt_sub:
         DB 22,0,4,17,0,16,7,19,1,"SP-Pie Gigascreen"
         DB 22,2,4,17,7,16,1,19,1,"DISPLAY"
-        DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press 1 to 5. "
+        DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press 1 to 4. "
         DB 22,19,1,"S send R defaults G/SPACE back",255
 txt_note:
         DB 22,20,1,17,7,16,0,19,0,"This shows what the panel has"
