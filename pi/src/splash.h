@@ -48,13 +48,16 @@ public:
 	}
 
 	// One HDMI frame. bNewFrame: the presenter ran a new Spectrum frame.
-	// bLocked: the frame start is locked.
-	void Update (bool bNewFrame, bool bLocked)
+	// bLocked: the frame start is locked. bScreenWritten: the Spectrum has
+	// written to its screen memory since the Pi started or since the
+	// splash last came back; until then the Pi's copy of the screen holds
+	// nothing the Spectrum drew, so the splash stays.
+	void Update (bool bNewFrame, bool bLocked, bool bScreenWritten)
 	{
 		if (bNewFrame)
 		{
 			m_nIdleFrames = 0;
-			if (bLocked)
+			if (bLocked && bScreenWritten)
 			{
 				m_bShowing = false;
 			}

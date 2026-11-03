@@ -463,7 +463,13 @@ void CSpPieApp::RunRenderer (void)
 		// One complete Spectrum frame, or the last one again.
 		boolean bNewFrame = m_Presenter.Present ();
 		boolean bLocked = Fetch (&m_Shared.Locked) != 0;
-		Splash.Update (bNewFrame, bLocked);
+		Splash.Update (bNewFrame, bLocked, m_Presenter.ScreenWritten ());
+		if (!Splash.FramesArriving ())
+		{
+			// The Spectrum has stopped: its screen must be written again
+			// before the splash goes.
+			m_Presenter.ClearScreenWritten ();
+		}
 
 		u64 nEmpty = Fetch (&m_Shared.EmptyPairs);
 		if (nEmpty != nLastEmpty)

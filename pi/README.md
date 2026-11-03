@@ -218,7 +218,7 @@ The time from a Spectrum frame's end to its display is one to two HDMI frames.
 
 ### Splash screen
 
-`src/splash.h` and `src/splash.cpp` draw a start-up screen in place of the Spectrum picture, so the display never stays blank. It shows from start-up until an HDMI frame shows a new Spectrum frame while the frame start is locked (`LOCK` on the HUD), and again after 50 HDMI frames in a row, about 1 s, with no new Spectrum frame: the Spectrum switched off or held in reset, or the board unplugged. Short gaps, such as a repeated frame, do not bring it back. Every Spectrum frame still goes through Fuse while it shows, and so does the sound. When it goes, the presenter's next picture covers it.
+`src/splash.h` and `src/splash.cpp` draw a start-up screen in place of the Spectrum picture, so the display never stays blank. It shows from start-up until an HDMI frame shows a new Spectrum frame while the frame start is locked (`LOCK` on the HUD) and after the Spectrum has written to its screen memory (0x4000 to 0x5AFF), and again after 50 HDMI frames in a row, about 1 s, with no new Spectrum frame: the Spectrum switched off or held in reset, or the board unplugged. Until the first screen write, the Pi's copy of the screen holds nothing the Spectrum drew. When the splash comes back, the screen must be written again before it goes. Short gaps, such as a repeated frame, do not bring it back. Every Spectrum frame still goes through Fuse while it shows, and so does the sound. When it goes, the presenter's next picture covers it.
 
 It is drawn in the Spectrum's colours, on bright white paper: a black title bar with the name and the four-colour stripe of the Spectrum's packaging (bright red, yellow, green and cyan), the same stripe along the foot, and these lines:
 

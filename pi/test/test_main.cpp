@@ -2643,17 +2643,29 @@ static void TestSplashState (void)
 	CHECK (Splash.Showing ());
 	CHECK (!Splash.FramesArriving ());
 
+	// Locked frames with nothing written to the screen keep it.
+	{
+		CSplashState Unwritten;
+		for (unsigned i = 0; i < 100; i++)
+		{
+			Unwritten.Update (true, true, false);
+			CHECK (Unwritten.Showing ());
+		}
+		Unwritten.Update (true, true, true);
+		CHECK (!Unwritten.Showing ());
+	}
+
 	// Frames that complete before the first F event do not hide it.
 	for (unsigned i = 0; i < 10; i++)
 	{
-		Splash.Update (true, false);
+		Splash.Update (true, false, true);
 		CHECK (Splash.Showing ());
 		CHECK (Splash.FramesArriving ());
 	}
 	// A lock with no new frame does not either.
-	Splash.Update (false, true);
+	Splash.Update (false, true, true);
 	CHECK (Splash.Showing ());
-	Splash.Update (true, true);
+	Splash.Update (true, true, true);
 	CHECK (!Splash.Showing ());
 
 	// Repeated HDMI frames, up to StopFrames - 1 in a row, keep it away.
@@ -2661,33 +2673,33 @@ static void TestSplashState (void)
 	{
 		for (unsigned i = 0; i < nGap; i++)
 		{
-			Splash.Update (false, true);
+			Splash.Update (false, true, true);
 		}
 		CHECK (!Splash.Showing ());
-		Splash.Update (true, true);
+		Splash.Update (true, true, true);
 	}
 
 	// The Spectrum stops: back after StopFrames HDMI frames, not before.
 	for (unsigned i = 0; i + 1 < CSplashState::StopFrames; i++)
 	{
-		Splash.Update (false, true);
+		Splash.Update (false, true, true);
 	}
 	CHECK (!Splash.Showing ());
 	CHECK (Splash.FramesArriving ());
-	Splash.Update (false, true);
+	Splash.Update (false, true, true);
 	CHECK (Splash.Showing ());
 	CHECK (!Splash.FramesArriving ());
 	for (unsigned i = 0; i < 500; i++)
 	{
-		Splash.Update (false, i < 250);
+		Splash.Update (false, i < 250, true);
 	}
 	CHECK (Splash.Showing ());
 
 	// It comes back: without a lock the splash stays, with one it goes.
-	Splash.Update (true, false);
+	Splash.Update (true, false, true);
 	CHECK (Splash.Showing ());
 	CHECK (Splash.FramesArriving ());
-	Splash.Update (true, true);
+	Splash.Update (true, true, true);
 	CHECK (!Splash.Showing ());
 
 	Splash.Reset ();

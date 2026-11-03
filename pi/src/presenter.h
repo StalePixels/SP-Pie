@@ -86,6 +86,11 @@ public:
 	// The control ports as at the end of the last frame run.
 	const CControlPorts &Control (void) const { return m_Control; }
 	bool Hud (void) const			{ return m_Control.Hud (); }
+
+	// A memory write to the screen, 0x4000 to 0x5AFF, has been run since
+	// the start or since ClearScreenWritten ().
+	bool ScreenWritten (void) const		{ return m_bScreenWritten; }
+	void ClearScreenWritten (void)		{ m_bScreenWritten = false; }
 	bool BorderExtended (void) const	{ return m_Control.BorderExtended (); }
 
 private:
@@ -96,6 +101,7 @@ private:
 	CEventLog	*m_pLog;
 	CAudioFifo	*m_pAudio;
 	CControlPorts	m_Control;
+	bool		m_bScreenWritten = false;
 
 	uint32_t	*m_pOutput;		// where the picture to show goes
 	unsigned	m_nOutputPitch;

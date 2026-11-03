@@ -145,6 +145,10 @@ void CFramePresenter::RunFrame (uint32_t nFrame)
 		switch (rEvent.Kind)
 		{
 		case KindMemory:
+			if (rEvent.Address >= 0x4000 && rEvent.Address < 0x5B00)
+			{
+				m_bScreenWritten = true;
+			}
 			fuseula_memory_write (rEvent.TState, rEvent.Address, rEvent.Data);
 			break;
 
