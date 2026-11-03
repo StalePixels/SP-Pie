@@ -16,9 +16,11 @@ CAudioResampler::CAudioResampler (CAudioFifo *pFifo)
 	m_fFraction (0.0),
 	m_nLast (0),
 	m_nControlCount (0),
+	m_nFillSum (0),
 	m_fFill (0.0),
 	m_fAdjust (0.0),
-	m_nUnderruns (0)
+	m_nUnderruns (0),
+	m_nLimitHits (0)
 {
 	for (unsigned i = 0; i < 4; i++)
 	{
@@ -43,6 +45,7 @@ int32_t CAudioResampler::Next (void)
 		m_fFraction = 0.0;
 		m_fFill = m_pFifo->Available ();
 		m_nControlCount = 0;
+		m_nFillSum = 0;
 		m_bPlaying = true;
 	}
 
@@ -64,7 +67,7 @@ int32_t CAudioResampler::Next (void)
 	{
 		if (m_pFifo->Available () == 0)
 		{
-			m_nUnderruns++;
+			__atomic_store_n (&m_nUnderruns, m_nUnderruns + 1, __ATOMIC_RELAXED);
 			m_bPlaying = false;
 			return nOut;
 		}
@@ -75,6 +78,7 @@ int32_t CAudioResampler::Next (void)
 		m_x[3] = m_pFifo->Pop ();
 	}
 
+	m_nFillSum += m_pFifo->Available ();
 	if (++m_nControlCount == ControlSamples)
 	{
 		m_nControlCount = 0;
@@ -86,16 +90,15 @@ int32_t CAudioResampler::Next (void)
 
 void CAudioResampler::Control (void)
 {
-	m_fFill += ((double) m_pFifo->Available () - m_fFill) * FillSmoothing;
+	double fMean = (double) m_nFillSum / ControlSamples;
+	m_nFillSum = 0;
+	m_fFill += (fMean - m_fFill) * FillSmoothing;
 
 	double fAdjust = (m_fFill - (double) TargetFill) * Gain;
-	if (fAdjust > MaxAdjust)
+	if (fAdjust > MaxAdjust || fAdjust < -MaxAdjust)
 	{
-		fAdjust = MaxAdjust;
-	}
-	else if (fAdjust < -MaxAdjust)
-	{
-		fAdjust = -MaxAdjust;
+		fAdjust = fAdjust > 0 ? MaxAdjust : -MaxAdjust;
+		__atomic_store_n (&m_nLimitHits, m_nLimitHits + 1, __ATOMIC_RELAXED);
 	}
 	m_fAdjust = fAdjust;
 }

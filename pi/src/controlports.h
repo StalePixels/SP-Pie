@@ -10,16 +10,25 @@
 //  Feature 0, SP-Pie:            no bits yet
 //  Feature 1, attached devices:  bit 0 = AY, bit 1 = TurboSound,
 //                                bit 2 = beeper, bit 3 = Covox on 0xFB,
-//                                bit 4 = Covox on 0xDD, bit 5 = Covox on 0xDF
+//                                bit 4 = Covox on 0xDD, bit 5 = Covox on 0xDF,
+//                                bit 6 = Pentagon Gigascreen (port #EFF7)
 //  Feature 2, border:            bit 0 = border extension
 //  Feature 3, display:           bit 0 = interlace detection, bit 1 =
 //                                interlace mixing always, bits 3 and 2 =
 //                                mixing mode (00 average, 01 CRT-style,
-//                                10 double high, 11 reserved), bits 5 and
+//                                10 double high, 11 line alternate), bits 5 and
 //                                4 = detection method (00 per line, 01 per
 //                                page, 10 and 11 reserved), bit 6 = double
-//                                high first line from bank 7
+//                                high and line alternate: bank 7 first
 //  Feature 0xFF, debug:          bit 0 = HUD (the overlay in the side areas)
+//
+// Pentagon Gigascreen (port #EFF7): with feature 1 bit 6 set, an I/O write
+// to 0xEFF7, decoded on all 16 address bits, with data bit 4 = 1 turns
+// interlace mixing always on in the line alternate mode, and with bit 4 = 0
+// gives feature 3 back the value it had before. Bit 4 = 1 as "on" is an
+// assumption: the published descriptions do not give the polarity. With
+// bit 6 clear the port is ignored. It is off by default because programs
+// that decode ports on few address bits write to addresses like 0xEFF7.
 //
 // Other features and other bits are reserved: the data write is ignored,
 // or the bit is dropped. A Spectrum reset restores the defaults and
@@ -56,7 +65,8 @@ public:
 	static const uint8_t DeviceCovoxFB	= 0x08;
 	static const uint8_t DeviceCovoxDD	= 0x10;
 	static const uint8_t DeviceCovoxDF	= 0x20;
-	static const uint8_t DeviceBits		= 0x3F;
+	static const uint8_t DevicePentagonGigascreen = 0x40;	// port #EFF7
+	static const uint8_t DeviceBits		= 0x7F;
 	static const uint8_t DevicesDefault	= DeviceAy | DeviceTurboSound | DeviceBeeper;
 
 	static const uint8_t BorderExtension	= 0x01;
@@ -69,13 +79,16 @@ public:
 	static const uint8_t DisplayModeAverage	= 0x00;	// the two frames, half each
 	static const uint8_t DisplayModeCrt	= 0x04;	// the newest 5/8, the one before 3/8
 	static const uint8_t DisplayModeDoubleHigh = 0x08;	// bank 5 and bank 7 on alternate lines
-	static const uint8_t DisplayModeReserved = 0x0C;
+	static const uint8_t DisplayModeLineAlternate = 0x0C;	// one bank per line, swapping each frame
 	static const uint8_t DisplayDetectMask	= 0x30;	// the detection method
 	static const uint8_t DisplayDetectLine	= 0x00;	// each line by its own bank
 	static const uint8_t DisplayDetectPage	= 0x10;	// the whole frame when any line flips
-	static const uint8_t DisplayFirstBank7	= 0x40;	// double high: bank 7 on the first line
+	static const uint8_t DisplayFirstBank7	= 0x40;	// double high, line alternate: bank 7 first
 	static const uint8_t DisplayBits	= 0x7F;
 	static const uint8_t DisplayDefault	= DisplayInterlaceAuto | DisplayModeAverage | DisplayDetectPage;
+
+	static const uint16_t PentagonGigascreenPort = 0xEFF7;
+	static const uint8_t PentagonGigascreenOn = 0x10;	// data bit 4
 
 	static const uint8_t DebugHud		= 0x01;
 	static const uint8_t DebugBits		= 0x01;
@@ -113,7 +126,7 @@ public:
 	}
 
 	// A value that the feature takes: no reserved bit set, and for the
-	// display feature not the reserved mode.
+	// display feature not a reserved detection method.
 	static bool Valid (uint8_t nFeature, uint8_t nValue)
 	{
 		if ((nValue & ReservedBits (nFeature)) != 0)
@@ -121,8 +134,7 @@ public:
 			return false;
 		}
 		return !(nFeature == FeatureDisplay
-			 && (   (nValue & DisplayModeMask) == DisplayModeReserved
-			     || (nValue & DisplayDetectMask) > DisplayDetectPage));
+			 && (nValue & DisplayDetectMask) > DisplayDetectPage);
 	}
 
 	CControlPorts (void)
@@ -146,19 +158,26 @@ public:
 
 	const TDefaults &Defaults (void) const	{ return m_Defaults; }
 
-	// The defaults, and feature 0 selected.
+	// The defaults, feature 0 selected, and Pentagon Gigascreen off.
 	void Reset (void)
 	{
 		m_nFeature = FeatureSpPie;
+		m_bPentagonOn = false;
+		m_nDisplayBefore = m_Defaults.Display;
 		m_nDevices = m_Defaults.Devices;
 		m_nBorder = m_Defaults.Border;
 		m_nDisplay = m_Defaults.Display;
 		m_nDebug = m_Defaults.Debug;
 	}
 
-	// An I/O write. TRUE when it was to a control port.
+	// An I/O write. TRUE when it was to a control port, or to port
+	// #EFF7 with Pentagon Gigascreen on.
 	bool Write (uint16_t nPort, uint8_t nData)
 	{
+		if (nPort == PentagonGigascreenPort)
+		{
+			return WritePentagon (nData);
+		}
 		if (nPort == FeatureSelectPort)
 		{
 			m_nFeature = nData;
@@ -180,8 +199,7 @@ public:
 			break;
 
 		case FeatureDisplay:
-			// A reserved mode or detection method leaves the feature as
-			// it was.
+			// A reserved detection method leaves the feature as it was.
 			if (Valid (FeatureDisplay, nData & DisplayBits))
 			{
 				m_nDisplay = nData & DisplayBits;
@@ -207,12 +225,43 @@ public:
 	bool BorderExtended (void) const	{ return (m_nBorder & BorderExtension) != 0; }
 
 private:
+	// Port #EFF7: bit 4 = 1 keeps feature 3 as it is, then sets mixing
+	// always on and the line alternate mode; bit 4 = 0 puts the kept value
+	// back. A second bit 4 = 1 write keeps the value kept by the first;
+	// a bit 4 = 0 write with nothing kept does nothing.
+	bool WritePentagon (uint8_t nData)
+	{
+		if ((m_nDevices & DevicePentagonGigascreen) == 0)
+		{
+			return false;
+		}
+		if ((nData & PentagonGigascreenOn) != 0)
+		{
+			if (!m_bPentagonOn)
+			{
+				m_nDisplayBefore = m_nDisplay;
+				m_bPentagonOn = true;
+			}
+			m_nDisplay = (uint8_t) ((m_nDisplay & ~DisplayModeMask)
+						| DisplayInterlaceOn | DisplayModeLineAlternate);
+		}
+		else if (m_bPentagonOn)
+		{
+			m_nDisplay = m_nDisplayBefore;
+			m_bPentagonOn = false;
+		}
+		return true;
+	}
+
+private:
 	TDefaults m_Defaults;
 	uint8_t	m_nFeature;
 	uint8_t	m_nDevices;
 	uint8_t	m_nBorder;
 	uint8_t	m_nDisplay;
 	uint8_t	m_nDebug;
+	bool	m_bPentagonOn;		// port #EFF7 has turned line alternate on
+	uint8_t	m_nDisplayBefore;	// feature 3 before that
 };
 
 }

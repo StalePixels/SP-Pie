@@ -53,7 +53,7 @@ struct TFrameReport
 	unsigned	MaxFrameClocks;
 	unsigned	Machine;	// TMachine of the frame shown
 	boolean		Locked;
-	unsigned	ArmClockMHz;
+	unsigned	AudioUnderruns;	// times the audio ring ran empty
 	boolean		ClockStopped;	// the edge-connector clock stops during contention
 	unsigned	ReadPicoseconds;	// measured SMI read period
 	unsigned	Port1FFDWrite;	// write that selected the +2A/+3: address << 8 | data

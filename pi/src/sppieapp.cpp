@@ -38,6 +38,18 @@ static const unsigned BatchWords = 256;
 // The shared counters are published at most this often.
 static const u64 PublishNs = 1000000;
 
+// Core 0 runs each Spectrum frame as soon as it is complete, so that its
+// sound reaches the audio ring early (README.md, Latency): between the
+// bands of the frame buffer copy, and after the copy until VsyncGuardUs
+// before the next vertical sync is due. A vertical-sync wait that lasts
+// more than half a frame means that the sync came before the wait began:
+// the guard grows by VsyncGuardStepUs, up to VsyncGuardMaxUs. The fill
+// target of the audio ring (audiostream.h) covers the largest guard.
+static const unsigned FrameBufferBands = 10;
+static const u64 VsyncGuardUs = 2000;
+static const u64 VsyncGuardStepUs = 500;
+static const u64 VsyncGuardMaxUs = 6000;
+
 // The clock rate the intake core uses to count wraps of the 5-bit clock
 // count across a stop in the reads: the 128K-class Z80 clock. The 48K
 // clock is 1.3 % slower, which matters only for stops of hundreds of
@@ -57,7 +69,7 @@ static const uint32_t *FuseFrameTStates (void)
 
 CSpPieApp::CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffer,
 		      CSmiEventReader *pReader, CHDMISoundBaseDevice *pSound,
-		      unsigned nArmClockMHz, TMachineChoice Choice,
+		      TMachineChoice Choice,
 		      unsigned nHdmiWidth, unsigned nHdmiHeight,
 		      const CControlPorts::TDefaults &rDefaults, const char *pConfigNote,
 		      boolean bConfigIgnored)
@@ -65,7 +77,6 @@ CSpPieApp::CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffe
 	m_pFrameBuffer (pFrameBuffer),
 	m_pReader (pReader),
 	m_pSound (pSound),
-	m_nArmClockMHz (nArmClockMHz),
 	m_nHdmiWidth (nHdmiWidth),
 	m_nHdmiHeight (nHdmiHeight),
 	m_pConfigNote (pConfigNote),
@@ -428,7 +439,6 @@ void CSpPieApp::RunRenderer (void)
 	boolean bHudShown = FALSE;
 	TFrameReport Report;
 	memset (&Report, 0, sizeof Report);
-	Report.ArmClockMHz = m_nArmClockMHz;
 
 	const u64 nFrequency = TickFrequency ();
 	u64 nPrevEvents = 0, nPrevEmpty = 0, nPrevFrameEvents = 0, nPrevBusy = 0;
@@ -448,6 +458,8 @@ void CSpPieApp::RunRenderer (void)
 
 	u32 nFrame = 0;
 	unsigned nHidden = 1;		// half 0 is shown after Initialize ()
+	u64 nLastSync = 0;		// ticks at the end of the last vertical-sync wait
+	u64 nGuardUs = VsyncGuardUs;
 
 	while (1)
 	{
@@ -460,7 +472,7 @@ void CSpPieApp::RunRenderer (void)
 		// nothing behind.
 		boolean bSplash = Splash.Showing ();
 
-		// One complete Spectrum frame, or the last one again.
+		// The newest complete Spectrum frame, or the last one again.
 		boolean bNewFrame = m_Presenter.Present ();
 		boolean bLocked = Fetch (&m_Shared.Locked) != 0;
 		Splash.Update (bNewFrame, bLocked, m_Presenter.ScreenWritten ());
@@ -528,19 +540,47 @@ void CSpPieApp::RunRenderer (void)
 		// Copy into the hidden half, each display pixel as 2 x 2 frame
 		// buffer pixels. In double high the second line of each display
 		// line takes its picture from the presenter's second picture
-		// (interlace.h).
+		// (interlace.h). Between the bands, the Spectrum frames that
+		// complete run for their sound; they change neither the display
+		// nor the second picture.
 		const u32 *pSecond = bSplash ? 0 : m_Presenter.SecondPicture ();
-		WriteFrameBuffer (pDraw, pSecond,
-				  (volatile u64 *) (nBuffer + nHidden * nHalfLines * nPitchBytes),
-				  nPitchWords);
+		for (unsigned nBand = 0; nBand < FrameBufferBands; nBand++)
+		{
+			WriteFrameBufferRows (pDraw, pSecond,
+					      (volatile u64 *) (nBuffer + nHidden * nHalfLines * nPitchBytes),
+					      nPitchWords,
+					      nBand * DisplayHeight / FrameBufferBands,
+					      (nBand + 1) * DisplayHeight / FrameBufferBands);
+			m_Presenter.RunCompleted ();
+		}
 
 #if SPPIE_OVERLAY
 		u64 nDrawn = ReadTicks ();
 #endif
 
+		// Until shortly before the vertical sync is due, the frames that
+		// complete run for their sound too.
+		u64 nPeriod = Refresh.PeriodTicks ();
+		if (nPeriod != 0 && nLastSync != 0)
+		{
+			u64 nUntil = nLastSync + nPeriod - nGuardUs * nTickFrequency / 1000000;
+			while ((s64) (nUntil - ReadTicks ()) > 0)
+			{
+				m_Presenter.RunCompleted ();
+			}
+		}
+
+		u64 nWaitStart = ReadTicks ();
 		m_pFrameBuffer->SetVirtualOffset (0, nHidden * nHalfLines);
 		m_pFrameBuffer->WaitForVerticalSync ();
-		Refresh.VerticalSync (ReadTicks ());
+		u64 nSync = ReadTicks ();
+		Refresh.VerticalSync (nSync);
+		if (nPeriod != 0 && nLastSync != 0 && nSync - nWaitStart > nPeriod / 2
+		    && nGuardUs < VsyncGuardMaxUs)
+		{
+			nGuardUs += VsyncGuardStepUs;
+		}
+		nLastSync = nSync;
 
 		nHidden ^= 1;
 		nFrame++;
@@ -589,6 +629,7 @@ void CSpPieApp::RunRenderer (void)
 		Report.ReadPicoseconds = (unsigned) Fetch (&m_Shared.ReadPicoseconds);
 		Report.Port1FFDWrite = (unsigned) Fetch (&m_Shared.Port1FFDWrite);
 		Report.ResetBursts = (unsigned) Fetch (&m_Shared.ResetBursts);
+		Report.AudioUnderruns = m_Resampler.Underruns ();
 
 		nPrevEvents = nEvents;
 		nPrevEmpty = nEmpty;

@@ -6,7 +6,6 @@
 #include "kernel.h"
 #include "picture.h"
 #include <circle/bcmpropertytags.h>
-#include <circle/machineinfo.h>
 #include <circle/memory.h>
 #include <circle/util.h>
 
@@ -92,10 +91,8 @@ boolean CKernel::Initialize (void)
 		m_pSound = 0;
 	}
 
-	unsigned nArmClockMHz = CMachineInfo::Get ()->GetClockRate (CLOCK_ID_ARM) / 1000000;
-
 	m_pApp = new CSpPieApp (CMemorySystem::Get (), m_pFrameBuffer, m_pReader, m_pSound,
-				nArmClockMHz, MachineChoice (), nHdmiWidth, nHdmiHeight,
+				MachineChoice (), nHdmiWidth, nHdmiHeight,
 				m_BootConfig.Defaults, m_ConfigNote, m_BootConfig.nIgnored != 0);
 	if (m_pApp == 0 || !m_pApp->InitializeRenderer ())
 	{

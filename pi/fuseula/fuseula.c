@@ -123,6 +123,12 @@ typedef struct screen_chunk {
 
 static screen_chunk screen_chunks[ DISPLAY_HEIGHT ][ DISPLAY_WIDTH_COLS ];
 
+/* Each screen chunk of the frame last ended drawn from bank 5 ([0]) and
+   from bank 7 ([1]) with that bank's own pixel byte and attribute at the
+   end of the frame, in the colours Fuse gives them, for line alternate. */
+static screen_chunk bank_chunks[ 2 ][ DISPLAY_HEIGHT ][ DISPLAY_WIDTH_COLS ];
+static int bank_chunks_on;	/* fuseula_end_frame draws bank_chunks */
+
 /* Lookup cursor: the state at cursor_tstate, after the first cursor_next
    changes. */
 static output_state cursor;
@@ -279,7 +285,53 @@ end_line_screens( void )
   screen_change_count = 0;
 }
 
-/* --- the screen chunks for double high ------------------------------ */
+/* --- the screen chunks for double high and line alternate ----------- */
+
+/* The ULAplus ink and paper of a screen attribute: bits 7..6 select one of
+   four 16-entry groups, and FLASH does not swap ink and paper. */
+static void
+ulaplus_cell_colours( const output_state *state, libspectrum_byte attr,
+                      libspectrum_dword *ink, libspectrum_dword *paper )
+{
+  unsigned group = ( attr >> 6 ) * 16;
+
+  *ink = ulaplus_colour( state->palette[ group + ( attr & 7 ) ] );
+  *paper = ulaplus_colour( state->palette[ group + 8 + ( ( attr >> 3 ) & 7 ) ] );
+}
+
+/* Draws bank_chunks from the memory as it is at the end of the frame.
+   Called before display_frame (), which moves Fuse's FLASH phase on for
+   the next frame, so display_parse_attr gives this frame's phase. Each
+   chunk takes the ULAplus state at its beam time, as plot8 does. */
+static void
+end_bank_chunks( void )
+{
+  int b, row, column;
+
+  for( b = 0; b < 2; b++ ) {
+    unsigned bank = b ? 7 : 5;
+    for( row = 0; row < DISPLAY_HEIGHT; row++ ) {
+      for( column = 0; column < DISPLAY_WIDTH_COLS; column++ ) {
+        screen_chunk *chunk = &bank_chunks[ b ][ row ][ column ];
+        libspectrum_byte attr = RAM[ bank ][ display_attr_start[ row ] + column ];
+        const output_state *state =
+          state_at( chunk_tstate( FUSE_LEFT + DISPLAY_BORDER_WIDTH_COLS + column,
+                                  FUSE_TOP + DISPLAY_BORDER_HEIGHT + row ) );
+
+        chunk->data = RAM[ bank ][ display_line_start[ row ] + column ];
+        chunk->bank = (libspectrum_byte) bank;
+        if( state->mode & 0x01 ) {
+          ulaplus_cell_colours( state, attr, &chunk->ink, &chunk->paper );
+        } else {
+          libspectrum_byte ink, paper;
+          display_parse_attr( attr, &ink, &paper );
+          chunk->ink = normal_colours[ ink & 0x0f ];
+          chunk->paper = normal_colours[ paper & 0x0f ];
+        }
+      }
+    }
+  }
+}
 
 static void
 note_screen_chunk( int x, int y, libspectrum_byte data, libspectrum_dword ink,
@@ -313,6 +365,30 @@ fuseula_screen_line( unsigned nBank, unsigned nLine, uint32_t *pOut )
     for( i = 0; i < CHUNK_PIXELS; i++ ) {
       pOut[ column * CHUNK_PIXELS + i ] =
         ( data & ( 0x80 >> i ) ) ? chunk->ink : chunk->paper;
+    }
+  }
+}
+
+void
+fuseula_bank_lines( int bOn )
+{
+  bank_chunks_on = bOn != 0;
+}
+
+void
+fuseula_bank_line( unsigned nBank, unsigned nLine, uint32_t *pOut )
+{
+  int column, i;
+
+  if( nLine >= DISPLAY_HEIGHT || ( nBank != 5 && nBank != 7 ) ) return;
+
+  for( column = 0; column < DISPLAY_WIDTH_COLS; column++ ) {
+    const screen_chunk *chunk = &screen_chunks[ nLine ][ column ];
+    if( chunk->bank != nBank ) chunk = &bank_chunks[ nBank == 7 ][ nLine ][ column ];
+
+    for( i = 0; i < CHUNK_PIXELS; i++ ) {
+      pOut[ column * CHUNK_PIXELS + i ] =
+        ( chunk->data & ( 0x80 >> i ) ) ? chunk->ink : chunk->paper;
     }
   }
 }
@@ -370,17 +446,13 @@ uidisplay_plot8( int x, int y, libspectrum_byte data, libspectrum_byte ink,
       y >= DISPLAY_BORDER_HEIGHT && y < DISPLAY_BORDER_HEIGHT + DISPLAY_HEIGHT ) {
 
     /* Fuse read this attribute from the shown screen just before the
-       call; read it again for the bits Fuse does not pass on. In ULAplus
-       mode bits 7..6 select one of four 16-entry groups and FLASH does not
-       swap ink and paper. */
+       call; read it again for the bits Fuse does not pass on. */
     int column = x - DISPLAY_BORDER_WIDTH_COLS, row = y - DISPLAY_BORDER_HEIGHT;
     libspectrum_byte attr =
       RAM[ memory_current_screen ][ display_attr_start[ row ] + column ];
-    unsigned group = ( attr >> 6 ) * 16;
-    libspectrum_dword ulaplus_ink =
-      ulaplus_colour( state->palette[ group + ( attr & 7 ) ] );
-    libspectrum_dword ulaplus_paper =
-      ulaplus_colour( state->palette[ group + 8 + ( ( attr >> 3 ) & 7 ) ] );
+    libspectrum_dword ulaplus_ink, ulaplus_paper;
+
+    ulaplus_cell_colours( state, attr, &ulaplus_ink, &ulaplus_paper );
 
     fill_chunk( px, py, data, ulaplus_ink, ulaplus_paper );
     note_screen_chunk( x, y, data, ulaplus_ink, ulaplus_paper );
@@ -489,6 +561,7 @@ fuseula_init( uint32_t *pPicture, unsigned nPitch )
   change_count = 0;
   ulaplus_register = 0;
   ulaplus_changed = ulaplus_changed_before = 0;
+  bank_chunks_on = 0;
 
   display_context.argc = &argc;
   display_context.argv = &argv;
@@ -608,6 +681,7 @@ fuseula_end_frame( void )
      cells through the beam rule. With the beam at the end of the frame
      that would redraw every pending chunk from the memory at the end of
      the frame, and leave the next frame with no drawing at all. */
+  if( bank_chunks_on ) end_bank_chunks();
   tstates = 0;
   display_frame();
   draw_outer_border();

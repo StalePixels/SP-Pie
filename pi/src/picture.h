@@ -86,16 +86,17 @@ inline void WriteFrameBufferLines (const uint32_t *pDisplayRow, const uint32_t *
 	}
 }
 
-// The whole frame buffer from the 480 x 270 display at pDisplay
-// (DisplayWidth pixels between rows): FrameBufferHeight lines at pBuffer,
-// nPitchWords 64-bit words between lines. pSecondPicture, when not 0, is
-// the 352 x 270 picture for the second frame buffer line of each display
-// line (CFramePresenter::SecondPicture ()).
+// Display rows nFirst to nEnd - 1 of the frame buffer from the 480 x 270
+// display at pDisplay (DisplayWidth pixels between rows): two lines each
+// at pBuffer, nPitchWords 64-bit words between lines. pSecondPicture, when
+// not 0, is the 352 x 270 picture for the second frame buffer line of each
+// display line (CFramePresenter::SecondPicture ()).
 template <typename TWord>
-inline void WriteFrameBuffer (const uint32_t *pDisplay, const uint32_t *pSecondPicture,
-			      TWord *pBuffer, unsigned nPitchWords)
+inline void WriteFrameBufferRows (const uint32_t *pDisplay, const uint32_t *pSecondPicture,
+				  TWord *pBuffer, unsigned nPitchWords,
+				  unsigned nFirst, unsigned nEnd)
 {
-	for (unsigned y = 0; y < DisplayHeight; y++)
+	for (unsigned y = nFirst; y < nEnd && y < DisplayHeight; y++)
 	{
 		const uint32_t *pSecondRow = 0;
 		if (pSecondPicture != 0 && y >= PictureTop && y < PictureTop + PictureHeight)
@@ -106,6 +107,14 @@ inline void WriteFrameBuffer (const uint32_t *pDisplay, const uint32_t *pSecondP
 		WriteFrameBufferLines (pDisplay + y * DisplayWidth, pSecondRow,
 				       pFirst, pFirst + nPitchWords);
 	}
+}
+
+// The whole frame buffer: FrameBufferHeight lines at pBuffer.
+template <typename TWord>
+inline void WriteFrameBuffer (const uint32_t *pDisplay, const uint32_t *pSecondPicture,
+			      TWord *pBuffer, unsigned nPitchWords)
+{
+	WriteFrameBufferRows (pDisplay, pSecondPicture, pBuffer, nPitchWords, 0, DisplayHeight);
 }
 
 }

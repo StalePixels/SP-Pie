@@ -18,6 +18,19 @@
 // the frame (multicolour) show on both lines. The border parts of both
 // lines are Fuse's picture.
 //
+// The line alternate mode is the Pentagon Gigascreen of Dmitry Pugachev
+// (Black Crow #04, 2000): each screen line shows one bank, bank 5 or bank
+// 7, the next line the other, and the order swaps every Spectrum frame,
+// with no blending. Screen line n of Spectrum frame f takes the first bank
+// (feature 3 bit 6) when n + f is even, and the other bank when it is odd.
+// A line from a bank takes that bank's pixels and attributes
+// (fuseula_bank_line ()): for the bank Fuse drew the chunk from, the chunk
+// as Fuse drew it; for the other bank, its memory at the end of the frame.
+// So attribute changes inside the frame (multicolour) show only on the
+// lines of the bank shown at the time. The border parts are Fuse's
+// picture, and each display line stays two frame buffer lines of the same
+// picture.
+//
 // CInterlaceDetector decides line by line from the screen bank alone: for
 // each picture line of each frame, the bank Fuse showed on that line
 // (fuseula_line_screens ()). Programs write 0x7FFD in the middle of a

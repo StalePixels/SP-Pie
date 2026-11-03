@@ -68,7 +68,7 @@ void COverlay::Draw (const TFrameReport &rReport, u32 *pPixels, unsigned nPitch)
 		{ "TAMB", rReport.Ambiguous },
 		{ "P3W",  rReport.Port1FFDWrite, true },
 		{ "RDPS", rReport.ReadPicoseconds },
-		{ "C",    rReport.ArmClockMHz },
+		{ "AUR",  rReport.AudioUnderruns },
 	};
 
 	const unsigned nColumnWidth = PictureLeft - 2 * Margin;

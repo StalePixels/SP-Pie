@@ -10,14 +10,15 @@
 // at which point the picture holds that whole frame.
 //
 // The Spectrum frame rate (50.08 Hz on a 48K, 50.02 Hz on the 128K class)
-// is not the HDMI rate (50.00 Hz), so the number of complete frames waiting
-// drifts. Present () runs the oldest waiting frame. When none is waiting it
-// leaves the picture as it is, so the last frame shows again. When
-// SkipThreshold or more are waiting it runs the oldest ones too, until one
-// is left after the one shown; those are skipped: they go through Fuse, as
-// every frame must, but the picture is shown only after the last. The
-// threshold gives a frame of slack, so a late vertical sync does not cause
-// a skip followed by a repeat.
+// is not exactly the HDMI rate, so the number of complete frames between
+// two HDMI frames varies. RunCompleted () runs every complete frame waiting,
+// as soon as the caller can, so that its sound reaches the audio ring
+// early. Present () does the same and then writes the picture of the
+// newest frame run, so each HDMI frame shows the newest complete Spectrum
+// frame. Frames run since the last Present () but not the newest are
+// skipped: they go through Fuse, as every frame must, but their picture is
+// never shown. When no frame has run since the last Present (), it writes
+// the picture of the last frame again (a repeat).
 //
 // The frame's sound comes from the same events (fusesound.h): the AY,
 // TurboSound, beeper and Covox writes go to Fuse's sound generator at
@@ -46,8 +47,6 @@ namespace sppie {
 class CFramePresenter
 {
 public:
-	static const uint32_t SkipThreshold = 3;
-
 	// pAudio receives each frame's samples; 0 drops them.
 	explicit CFramePresenter (CEventLog *pLog, CAudioFifo *pAudio = 0);
 
@@ -64,10 +63,16 @@ public:
 	// Clears the counters; the next frame shown is frame nFirstFrame.
 	void Reset (uint32_t nFirstFrame = 0);
 
-	// Runs the next Spectrum frame, and any skipped before it, and writes
-	// the picture to show. FALSE when no frame was complete: the picture
-	// of the last frame is written again.
+	// Runs every complete Spectrum frame waiting, and writes the picture
+	// of the newest frame run, by this call or by RunCompleted () since the
+	// last Present (). FALSE when there was none: the picture of the last
+	// frame is written again.
 	bool Present (void);
+
+	// Runs every complete Spectrum frame waiting, for its sound, and
+	// writes no picture: the picture that Present () wrote last stays as it
+	// is. TRUE when a frame was run.
+	bool RunCompleted (void);
 
 	// Interlace mixing (interlace.h, control-port feature 3) of the
 	// picture written by the last Present (): the mode, or -1 when no
@@ -75,12 +80,15 @@ public:
 	// of lines mixing. In the double high mode the picture written holds
 	// the first line of each display line, and SecondPicture () the
 	// second (352 x 270, PictureWidth pixels between rows); lines that do
-	// not mix are the same in both. Otherwise SecondPicture () is 0.
+	// not mix are the same in both. Otherwise SecondPicture () is 0. In
+	// the line alternate mode the frame number of the last frame run
+	// gives the order of the banks (interlace.h).
 	int Mixing (void) const			{ return m_nMixing; }
 	bool LineMixed (unsigned y) const	{ return y < MixLines && m_LineMixed[y]; }
 	unsigned MixedLines (void) const	{ return m_nMixedLines; }
 	const uint32_t *SecondPicture (void) const;
 
+	// The frame whose picture the last Present () wrote.
 	uint32_t LastFrame (void) const		{ return m_nLastFrame; }
 	const TFrameRecord &LastRecord (void) const { return m_LastRecord; }
 	uint32_t Presented (void) const		{ return m_nPresented; }
@@ -119,8 +127,11 @@ private:
 	unsigned	m_nMixedLines = 0;
 
 	uint32_t	m_nNext;		// next frame to run
-	uint32_t	m_nLastFrame;
+	uint32_t	m_nRunUnshown;		// frames run since the last Present ()
+	uint32_t	m_nLastFrame;		// shown
 	TFrameRecord	m_LastRecord;
+	uint32_t	m_nRunFrame;		// run last
+	TFrameRecord	m_RunRecord;
 	uint32_t	m_nPresented;
 	uint32_t	m_nSkipped;
 	uint32_t	m_nRepeated;

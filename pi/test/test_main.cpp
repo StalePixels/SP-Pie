@@ -42,6 +42,7 @@
 #include <functional>
 #include <math.h>
 #include <memory>
+#include <random>
 #include <stdio.h>
 #include <string.h>
 #include <vector>
@@ -1230,8 +1231,8 @@ static void TestPresenterWholeFrames (void)
 	CFramePresenter Presenter (pLog.get ());
 
 	// Frames alternate between two border colours. Each HDMI frame shows
-	// one whole Spectrum frame; with frames piling up some are skipped,
-	// still run through Fuse, and the one shown is whole.
+	// the newest whole Spectrum frame; with frames piling up the older ones
+	// are skipped, still run through Fuse, and the one shown is whole.
 	CHECK (!Presenter.Present ());
 	CHECK_EQ (Presenter.Repeated (), 1u);
 
@@ -1245,15 +1246,13 @@ static void TestPresenterWholeFrames (void)
 		PushFrame (*pLog, n, n & 1 ? 4 : 2);
 	}
 	CHECK (Presenter.Present ());
-	CHECK_EQ (Presenter.Skipped (), 3u);
-	CHECK_EQ (Presenter.LastFrame (), 4u);
-	CHECK_EQ (pPicture->At (0, 0), Red);
-	CHECK_EQ (pPicture->At (8, 135), Red);
-	CHECK (Presenter.Present ());
+	CHECK_EQ (Presenter.Skipped (), 4u);
 	CHECK_EQ (Presenter.LastFrame (), 5u);
 	CHECK_EQ (pPicture->At (0, 0), Green);
+	CHECK_EQ (pPicture->At (8, 135), Green);
 	CHECK_EQ (pPicture->At (351, 269), Green);
 	CHECK (!Presenter.Present ());
+	CHECK_EQ (Presenter.Repeated (), 2u);
 	CHECK_EQ (pPicture->At (0, 0), Green);
 }
 
@@ -1712,12 +1711,12 @@ static void TestControlPorts (void)
 	CHECK_EQ (Ports.Devices (), 0x07u);	// the other features are untouched
 	CHECK_EQ (Ports.Border (), 0x00u);
 
-	// Feature 1: the devices; bits 6 and 7 are dropped.
+	// Feature 1: the devices; bit 7 is dropped.
 	CHECK (Ports.Write (0x043B, 1));
 	CHECK (Ports.Write (0x053B, 0x28));
 	CHECK_EQ (Ports.Devices (), 0x28u);
 	CHECK (Ports.Write (0x053B, 0xFF));
-	CHECK_EQ (Ports.Devices (), 0x3Fu);
+	CHECK_EQ (Ports.Devices (), 0x7Fu);
 	CHECK_EQ (Ports.Debug (), 0x00u);
 
 	// Feature 2: the border extension; bits 1 to 7 are dropped.
@@ -1727,7 +1726,7 @@ static void TestControlPorts (void)
 	CHECK_EQ (Ports.Border (), 0x00u);
 	CHECK (Ports.Write (0x053B, 0x01));
 	CHECK (Ports.BorderExtended ());
-	CHECK_EQ (Ports.Devices (), 0x3Fu);
+	CHECK_EQ (Ports.Devices (), 0x7Fu);
 
 	// Feature 0 and the reserved features: the data is ignored.
 	for (unsigned nFeature = 0; nFeature < 0xFF; nFeature++)
@@ -1740,7 +1739,7 @@ static void TestControlPorts (void)
 		CHECK (Ports.Write (0x053B, 0x00));
 		CHECK (Ports.Write (0x053B, 0xFF));
 	}
-	CHECK_EQ (Ports.Devices (), 0x3Fu);
+	CHECK_EQ (Ports.Devices (), 0x7Fu);
 	CHECK_EQ (Ports.Border (), 0x01u);
 	CHECK_EQ (Ports.Debug (), 0x00u);
 
@@ -2510,8 +2509,8 @@ static void TestSoundThroughPresenter (void)
 	CHECK_EQ (Presenter.Control ().Feature (), 0u);
 	CHECK_EQ (fusesound_current_devices (), (unsigned) FUSESOUND_DEFAULT);
 	pLog->Complete (5, Machine128K, true);
-	CHECK (Presenter.Present ());
-	CHECK (Presenter.Present ());
+	CHECK (Presenter.Present ());			// frames 3 and 4
+	CHECK (!Presenter.Present ());
 	Samples = Take ();
 	CHECK_EQ (Samples.size () > 1900, true);
 	CHECK (NearZero (Samples, 0, Samples.size ()));
@@ -2614,6 +2613,7 @@ static void TestResampler (void)
 		if (fOffset < 2e-3)
 		{
 			CHECK_EQ (Resampler.Underruns (), 0u);
+			CHECK_EQ (Resampler.LimitHits (), 0u);
 			CHECK_EQ (pFifo->Dropped (), 0u);
 			CHECK (nMinFill + 1920 > CAudioResampler::TargetFill);
 			CHECK (nMaxFill < CAudioResampler::TargetFill + 1920);
@@ -2625,6 +2625,7 @@ static void TestResampler (void)
 		{
 			CHECK (pFifo->Dropped () > 0);
 			CHECK (fabs (Resampler.Adjust () - CAudioResampler::MaxAdjust) < 1e-9);
+			CHECK (Resampler.LimitHits () > 0);
 		}
 		printf ("    clocks %+.0f ppm: tone %.4f Hz, fill %u to %u, ratio %+.0f to %+.0f ppm, mean %+.1f ppm\n", fOffset * 1e6, MeasureFrequency (Tail, 0),
 			nMinFill, nMaxFill, fAdjustMin * 1e6, fAdjustMax * 1e6,
@@ -3302,12 +3303,9 @@ static void TestInterlaceSkip (void)
 			Check ();
 			if (n == 23)
 			{
-				// Frames 20 to 23 waited: 20 and 21 were skipped,
-				// 22 shown; 23 waits for the next HDMI frame.
-				CHECK_EQ (Rig.Presenter.Skipped (), 2u);
-				CHECK_EQ (Rig.Presenter.LastFrame (), 22u + 1);
-				CHECK (Rig.Presenter.Present ());
-				Check ();
+				// Frames 20 to 23 waited: 20, 21 and 22 were
+				// skipped, and 23, the newest, shown.
+				CHECK_EQ (Rig.Presenter.Skipped (), 3u);
 				CHECK_EQ (Rig.Presenter.LastFrame (), 23u + 1);
 			}
 		     });
@@ -3319,8 +3317,8 @@ static void TestInterlaceSkip (void)
 	CHECK (Rig.Output == Before);
 	CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);
 
-	// Frames 2 to 29, less the two skipped.
-	CHECK_EQ (nChecked, nFrames - 2 - 2);
+	// Frames 2 to 29, less the three skipped.
+	CHECK_EQ (nChecked, nFrames - 2 - 3);
 	CHECK_EQ (nBadPixels, 0u);
 	CHECK_EQ (nNotMixed, 0u);
 }
@@ -3341,12 +3339,15 @@ static void TestInterlaceModes (void)
 	CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);	// always: every line
 	CHECK (Rig.Presenter.SecondPicture () == nullptr);
 
-	// The reserved mode (11), the reserved detection methods (10, 11)
-	// leave the feature as it was; bit 7 is dropped.
+	// The reserved detection methods (10, 11) leave the feature as it
+	// was; bit 7 is dropped. Mode 11 (line alternate) is taken.
+	Rig.Feature (3, 0x4D);				// detection, line alternate, bank 7 first
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x4Du);
 	Rig.Feature (3, 0x49);				// detection, double high, bank 7 first
 	Rig.End ();
 	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x49u);
-	for (uint8_t nReserved : { (uint8_t) 0x4D, (uint8_t) 0x69, (uint8_t) 0x79, (uint8_t) 0x0F })
+	for (uint8_t nReserved : { (uint8_t) 0x6D, (uint8_t) 0x69, (uint8_t) 0x79, (uint8_t) 0x2F })
 	{
 		Rig.Feature (3, nReserved);
 		Rig.End ();
@@ -3629,6 +3630,396 @@ static void TestDoubleHighOff (void)
 	CHECK_EQ (PictureRow (Rig.Output.data (), ScreenTop)[ScreenLeft], Blue);
 }
 
+// --- line alternate and Pentagon Gigascreen -------------------------------
+
+// The bank of screen line n in Spectrum frame f in the line alternate
+// mode: the first bank (bit 6) when n + f is even.
+static bool LineAlternateBank7 (unsigned n, uint32_t f, bool bBank7First)
+{
+	return (((n + f) & 1) == 0) == bBank7First;
+}
+
+// Line alternate, with bank 5 and bank 7 holding different pixel bytes
+// and attributes: each screen line shows one bank with that bank's own
+// pixels and colours, the next line the other, and the order swaps every
+// frame; bit 6 gives the first bank on even frames. Mixing always on with
+// bank 5 shown, and detection with the screens flipping every frame, so
+// each bank is drawn both as Fuse drew it and from its memory. The border
+// parts are Fuse's picture, and each display line is two equal frame
+// buffer lines.
+static void TestLineAlternate (void)
+{
+	for (uint8_t nDisplay : { (uint8_t) 0x0E, (uint8_t) 0x4E, (uint8_t) 0x1D, (uint8_t) 0x5D })
+	{
+		bool bBank7First = (nDisplay & 0x40) != 0;
+		bool bFlips = (nDisplay & 0x02) == 0;
+		CInterlaceRig Rig;
+		DoubleHighScreens (Rig);
+		Rig.Feature (3, nDisplay);
+		Rig.End ();
+		unsigned nChecked = 0, nWrong = 0, nEven = 0, nOdd = 0, nShown7 = 0;
+		for (unsigned n = 1; n < 12; n++)
+		{
+			bool bShown7 = bFlips && (n & 1) != 0;
+			if (bFlips)
+			{
+				Rig.Push (0, KindIo, 0x7FFD, bShown7 ? 0x0F : 0x07);
+			}
+			Rig.End ();
+			if (n < 3)
+			{
+				continue;
+			}
+			CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeLineAlternate);
+			CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);
+			CHECK (Rig.Presenter.SecondPicture () == nullptr);
+
+			uint32_t nFrame = Rig.Presenter.LastFrame ();
+			nEven += (nFrame & 1) == 0;
+			nOdd += (nFrame & 1) != 0;
+			nShown7 += bShown7;
+			const uint32_t *pPicture = Rig.Output.data ();
+			for (unsigned y = ScreenTop; y < ScreenTop + ScreenHeight; y++)
+			{
+				bool bBank7 = LineAlternateBank7 (y - ScreenTop, nFrame, bBank7First);
+				// Bank 5: 0xF0 in blue on red; bank 7: 0x0F in yellow
+				// on green.
+				uint32_t nLeft = bBank7 ? Green : Blue, nRight = bBank7 ? Yellow : Red;
+				for (unsigned x = 0; x < ScreenWidth; x++)
+				{
+					nWrong += PictureRow (pPicture, y)[ScreenLeft + x] != ((x & 7) < 4 ? nLeft : nRight);
+				}
+				nWrong += PictureRow (pPicture, y)[0] != Colour (3);
+				nWrong += PictureRow (pPicture, y)[PictureWidth - 1] != Colour (3);
+			}
+			nWrong += PictureRow (pPicture, 10)[100] != Colour (3);
+			nChecked++;
+
+			// In the frame buffer: lines 2y and 2y + 1 are display line y.
+			std::vector<uint32_t> Display = RigDisplay (Rig, 0xFF123456u);
+			std::vector<uint64_t> Buffer = RenderFrameBuffer (Display, nullptr);
+			for (unsigned y = ScreenTop + 98; y < ScreenTop + 100; y++)
+			{
+				bool bBank7 = LineAlternateBank7 (y - ScreenTop, nFrame, bBank7First);
+				unsigned x = PictureLeft + ScreenLeft + 16 * 8;
+				for (unsigned k = 0; k < 2; k++)
+				{
+					CHECK_EQ (FrameBufferPixel (Buffer, 2 * x, 2 * y + k), bBank7 ? Green : Blue);
+					CHECK_EQ (FrameBufferPixel (Buffer, 2 * x + 1, 2 * y + k), bBank7 ? Green : Blue);
+				}
+			}
+		}
+		CHECK_EQ (nChecked, 9u);
+		CHECK_EQ (nWrong, 0u);
+		CHECK (nEven > 0 && nOdd > 0);
+		CHECK (bFlips ? nShown7 > 0 : nShown7 == 0);
+	}
+}
+
+// Port #EFF7 in CControlPorts: ignored with feature 1 bit 6 clear (the
+// default) and on every address but the full 0xEFF7; with bit 6 set, data
+// bit 4 = 1 turns mixing always on in the line alternate mode and bit 4 = 0
+// gives feature 3 back its value from before; a reset clears it.
+static void TestPentagonPort (void)
+{
+	CControlPorts Ports;
+	CHECK_EQ (Ports.Devices (), 0x07u);
+	CHECK_EQ (Ports.Display (), 0x11u);
+	CHECK (!Ports.Write (0xEFF7, 0x10));
+	CHECK (!Ports.Write (0xEFF7, 0xFF));
+	CHECK_EQ (Ports.Display (), 0x11u);
+
+	CHECK (Ports.Write (0x043B, 1));
+	CHECK (Ports.Write (0x053B, 0x47));
+	CHECK_EQ (Ports.Devices (), 0x47u);
+
+	// Ports that a decode on fewer address bits would take for #EFF7.
+	const uint16_t NearMisses[] = { 0x00F7, 0xFFF7, 0xEFF6, 0xEFF3, 0xEFE7, 0xEF77,
+					0xEEF7, 0xE7F7, 0x6FF7, 0xAFF7, 0x00FF, 0xEF00 };
+	for (uint16_t nPort : NearMisses)
+	{
+		CHECK (!Ports.Write (nPort, 0xFF));
+		CHECK_EQ (Ports.Display (), 0x11u);
+	}
+
+	// On: always (bit 1), line alternate (bits 3, 2 = 11), the other bits
+	// kept. Only data bit 4 counts. Off: the value from before.
+	CHECK (Ports.Write (0xEFF7, 0x10));
+	CHECK_EQ (Ports.Display (), 0x1Fu);
+	CHECK (Ports.Write (0xEFF7, 0xFF));
+	CHECK_EQ (Ports.Display (), 0x1Fu);
+	CHECK (Ports.Write (0xEFF7, 0xEF));
+	CHECK_EQ (Ports.Display (), 0x11u);
+	CHECK (Ports.Write (0xEFF7, 0x00));
+	CHECK_EQ (Ports.Display (), 0x11u);
+
+	// From another value: a second "on" keeps the first value kept.
+	CHECK (Ports.Write (0x043B, 3));
+	CHECK (Ports.Write (0x053B, 0x49));
+	CHECK (Ports.Write (0xEFF7, 0x10));
+	CHECK_EQ (Ports.Display (), 0x4Fu);
+	CHECK (Ports.Write (0xEFF7, 0x10));
+	CHECK (Ports.Write (0xEFF7, 0x00));
+	CHECK_EQ (Ports.Display (), 0x49u);
+
+	// A reset clears it: the defaults, the device off, nothing kept.
+	CHECK (Ports.Write (0xEFF7, 0x10));
+	CHECK_EQ (Ports.Display (), 0x4Fu);
+	Ports.Reset ();
+	CHECK_EQ (Ports.Devices (), 0x07u);
+	CHECK_EQ (Ports.Display (), 0x11u);
+	CHECK (!Ports.Write (0xEFF7, 0x10));
+	CHECK_EQ (Ports.Display (), 0x11u);
+	CHECK (Ports.Write (0x043B, 1));
+	CHECK (Ports.Write (0x053B, 0x40));
+	CHECK (Ports.Write (0x043B, 3));
+	CHECK (Ports.Write (0x053B, 0x05));
+	CHECK (Ports.Write (0xEFF7, 0x00));
+	CHECK_EQ (Ports.Display (), 0x05u);
+
+	// Bit 6 cleared again: ignored.
+	CHECK (Ports.Write (0x043B, 1));
+	CHECK (Ports.Write (0x053B, 0x07));
+	CHECK (!Ports.Write (0xEFF7, 0x10));
+	CHECK_EQ (Ports.Display (), 0x05u);
+}
+
+// Port #EFF7 through the presenter: a lazily decoded port and a write with
+// the device off change nothing; with the device on, line alternate shows
+// from the frame of the write, and bit 4 = 0 and a reset end it.
+static void TestPentagonThroughPresenter (void)
+{
+	CInterlaceRig Rig;
+	DoubleHighScreens (Rig);
+	Rig.Push (20, KindIo, 0xEFF7, 0x10);			// device off
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Mixing (), -1);
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x11u);
+
+	Rig.Feature (1, 0x47);
+	Rig.Push (20, KindIo, 0x00F7, 0x10);
+	Rig.Push (20, KindIo, 0xFFF7, 0x10);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Mixing (), -1);
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x11u);
+
+	Rig.Push (20, KindIo, 0xEFF7, 0x10);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeLineAlternate);
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x1Fu);
+	uint32_t nFrame = Rig.Presenter.LastFrame ();
+	CHECK_EQ (PictureRow (Rig.Output.data (), ScreenTop)[ScreenLeft],
+		  LineAlternateBank7 (0, nFrame, false) ? Green : Blue);
+	CHECK_EQ (PictureRow (Rig.Output.data (), ScreenTop + 1)[ScreenLeft],
+		  LineAlternateBank7 (1, nFrame, false) ? Green : Blue);
+
+	Rig.Push (20, KindIo, 0xEFF7, 0x00);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Mixing (), -1);
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x11u);
+
+	Rig.Push (20, KindIo, 0xEFF7, 0x10);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x1Fu);
+	Rig.Push (100, KindReset, 0, 0);
+	Rig.Push (200, KindIo, 0xEFF7, 0x10);			// the device is off again
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x11u);
+	CHECK_EQ (Rig.Presenter.Control ().Devices (), 0x07u);
+	CHECK_EQ (Rig.Presenter.Mixing (), -1);
+}
+
+// --- latency ------------------------------------------------------------
+
+// The fill target against the way the renderer core writes the ring
+// (README.md, Latency): each Spectrum frame's samples go in within PollMs
+// of the frame's end, except in a window around each vertical sync, from
+// GuardMs before it (the guard and the wake-up of the vertical-sync wait)
+// to between AfterMinMs and AfterMaxMs after it (the presenter, the side
+// areas and the first band of the frame buffer). A frame that ends in the
+// window goes in at its end. The guard is the largest the renderer allows.
+// For Spectrum clocks 300 ppm fast and slow and exact, on the 128K and the
+// 48K, and for phases of the frames against the vertical sync across a
+// whole HDMI frame: no underrun and the ratio never at its limit. Writing
+// once per vertical sync only, as without the early writes, underruns
+// with this target.
+struct TPushModel
+{
+	double	fGuardMs, fAfterMinMs, fAfterMaxMs, fPollMs;
+};
+
+static void RunFillModel (const TPushModel &rModel, double fFrameSeconds, double fOffset,
+			  unsigned nPhase, unsigned nPhases,
+			  uint32_t &rUnderruns, uint32_t &rLimitHits, uint32_t &rMinFill)
+{
+	const double fHdmi = 1.0 / 50.0211;		// config.txt's frame period
+	std::mt19937 Rng (nPhase * 131 + (unsigned) (fOffset * 1e6 + 1000));
+	std::uniform_real_distribution<double> Unit (0.0, 1.0);
+	std::unique_ptr<CAudioFifo> pFifo (new CAudioFifo);
+	CAudioResampler Resampler (pFifo.get ());
+	std::vector<int32_t> Silence (2048, 0);
+
+	const double fFrameSamples = fFrameSeconds * 48000;
+	const double fFrame = fFrameSeconds / (1 + fOffset);	// in Pi seconds
+	double fEnd = nPhase * fHdmi / nPhases + fFrame;	// end of the next frame
+	double fProduced = 0;
+	uint64_t nInput = 0;
+	struct TWrite { double fAt; uint32_t nCount; };
+	std::deque<TWrite> Writes;
+
+	const uint64_t nOutputs = 48000ull * 150, nSettled = 48000ull * 60;
+	rMinFill = UINT32_MAX;
+	for (uint64_t t = 0; t < nOutputs; t++)
+	{
+		double fNow = t / 48000.0;
+		while (fEnd <= fNow + 0.1)
+		{
+			double fNextSync = ceil (fEnd / fHdmi) * fHdmi;
+			double fAfter = (rModel.fAfterMinMs + (rModel.fAfterMaxMs - rModel.fAfterMinMs)
+					 * Unit (Rng)) * 1e-3;
+			double fAt = fEnd;
+			if (fEnd >= fNextSync - rModel.fGuardMs * 1e-3)
+			{
+				fAt = fNextSync + fAfter;
+			}
+			else if (fEnd < fNextSync - fHdmi + fAfter)
+			{
+				fAt = fNextSync - fHdmi + fAfter;
+			}
+			fAt += rModel.fPollMs * 1e-3 * Unit (Rng);
+			fProduced += fFrameSamples;
+			uint32_t nCount = (uint32_t) ((uint64_t) fProduced - nInput);
+			nInput += nCount;
+			Writes.push_back ({ fAt, nCount });
+			fEnd += fFrame;
+		}
+		while (!Writes.empty () && Writes.front ().fAt <= fNow)
+		{
+			pFifo->Write (Silence.data (), Writes.front ().nCount);
+			Writes.pop_front ();
+		}
+		Resampler.Next ();
+		if (t >= nSettled)
+		{
+			rMinFill = std::min (rMinFill, pFifo->Available ());
+		}
+	}
+	rUnderruns = Resampler.Underruns ();
+	rLimitHits = Resampler.LimitHits ();
+}
+
+static void TestAudioFillTarget (void)
+{
+	const TPushModel Early = { 6.5, 1.0, 4.0, 1.0 };
+	const double FrameSeconds[] = { 70908.0 / 3546900, 69888.0 / 3500000 };
+	const unsigned nPhases = 16;
+	uint32_t nUnderruns = 0, nLimitHits = 0, nMinFill = UINT32_MAX;
+	for (double fFrameSeconds : FrameSeconds)
+	{
+		for (double fOffset : { 300e-6, -300e-6, 0.0 })
+		{
+			for (unsigned nPhase = 0; nPhase < nPhases; nPhase++)
+			{
+				uint32_t nU, nL, nMin;
+				RunFillModel (Early, fFrameSeconds, fOffset, nPhase, nPhases, nU, nL, nMin);
+				nUnderruns += nU;
+				nLimitHits += nL;
+				nMinFill = std::min (nMinFill, nMin);
+			}
+		}
+	}
+	CHECK_EQ (nUnderruns, 0u);
+	CHECK_EQ (nLimitHits, 0u);
+	CHECK (nMinFill > 0);
+	printf ("    early writes: lowest fill %u of target %u\n", nMinFill, CAudioResampler::TargetFill);
+
+	// Once per vertical sync: a frame that ends just before it can miss it
+	// and wait a whole HDMI frame.
+	const TPushModel SyncOnly = { 1.0, 0.0, 1.0, 0.3 };
+	uint32_t nSyncUnderruns = 0;
+	for (unsigned nPhase = 0; nPhase < nPhases; nPhase++)
+	{
+		uint32_t nU, nL, nMin;
+		TPushModel Model = SyncOnly;
+		Model.fGuardMs = 1000.0 / 50.0211;		// no write between syncs
+		RunFillModel (Model, FrameSeconds[0], -300e-6, nPhase, nPhases, nU, nL, nMin);
+		nSyncUnderruns += nU;
+	}
+	CHECK (nSyncUnderruns > 0);
+}
+
+// Newest-frame presentation with early runs: RunCompleted () runs the
+// frames that are complete and puts their sound in the ring at once, but
+// leaves the picture; Present () then shows the newest frame, mixed with
+// the frame just before it, and counts the others as skipped.
+static void TestPresenterEarlyRun (void)
+{
+	std::unique_ptr<CAudioFifo> pAudio (new CAudioFifo);
+	std::unique_ptr<CEventLog> pLog (new CEventLog);
+	CFramePresenter Presenter (pLog.get (), pAudio.get ());
+	std::vector<uint32_t> Output (PictureWidth * PictureHeight, 0);
+	CHECK (Presenter.Initialize (Output.data (), PictureWidth));
+
+	PushFrame (*pLog, 0, 2);
+	CHECK (Presenter.Present ());
+	CHECK_EQ (Output[0], Red);
+	CHECK_EQ (Presenter.LastFrame (), 0u);
+	uint32_t nAudio = pAudio->Available ();
+	CHECK (nAudio >= 958);
+
+	// Frame 1 completes: run at once, its sound in the ring, the picture
+	// still frame 0's, LastFrame () still the frame shown.
+	PushFrame (*pLog, 1, 4);
+	CHECK (Presenter.RunCompleted ());
+	CHECK (!Presenter.RunCompleted ());
+	CHECK (pAudio->Available () >= nAudio + 958);
+	CHECK_EQ (Output[0], Red);
+	CHECK_EQ (Presenter.LastFrame (), 0u);
+
+	// Frame 2 completes before the vertical sync: Present () runs it and
+	// shows it; frame 1 was not shown.
+	PushFrame (*pLog, 2, 6);
+	CHECK (Presenter.Present ());
+	CHECK_EQ (Output[0], Yellow);
+	CHECK_EQ (Presenter.LastFrame (), 2u);
+	CHECK_EQ (Presenter.Skipped (), 1u);
+	CHECK_EQ (Presenter.Presented (), 2u);
+
+	// A frame run early and nothing after it: shown at the next Present ().
+	PushFrame (*pLog, 3, 4);
+	CHECK (Presenter.RunCompleted ());
+	CHECK (Presenter.Present ());
+	CHECK_EQ (Output[0], Green);
+	CHECK_EQ (Presenter.LastFrame (), 3u);
+	CHECK_EQ (Presenter.Skipped (), 1u);
+	CHECK (!Presenter.Present ());
+	CHECK_EQ (Presenter.Repeated (), 1u);
+	CHECK_EQ (pAudio->Dropped (), 0u);
+
+	// Mixing: frames run early still blend the newest frame with the one
+	// just before it.
+	CInterlaceRig Rig;
+	Rig.Feature (3, 0x02);				// always, average
+	for (unsigned i = 0; i < 0x1800; i++)
+	{
+		Rig.Push (0, KindMemory, (uint16_t) (0x4000 + i), 0);
+	}
+	Rig.Attributes (0x5800, PaperRed);
+	Rig.End ();
+	Rig.Attributes (0x5800, PaperGreen);
+	Rig.End (false);
+	CHECK (Rig.Presenter.RunCompleted ());
+	Rig.Attributes (0x5800, PaperRed);
+	Rig.End (false);
+	CHECK (Rig.Presenter.RunCompleted ());
+	std::vector<uint32_t> Before = Rig.Output;
+	Rig.Attributes (0x5800, PaperGreen);
+	Rig.End ();					// the newest, green, after red
+	CHECK_EQ (Rig.Screen (), MixPixels (Green, Red));
+	CHECK (Rig.Output != Before);
+	CHECK_EQ (Rig.Presenter.Skipped (), 2u);
+}
+
 // --- config.txt -----------------------------------------------------------
 
 static TBootConfig ParseConfig (const char *pText)
@@ -3673,12 +4064,12 @@ static void TestBootConfig (void)
 
 	// Invalid lines are ignored, and the first is kept; the valid ones
 	// still apply. A key given twice takes the last value.
-	Config = ParseConfig ("[sp-pie]\nfeature1=0x40\nfeature2=2\nfeature3=0x0c\nfeature3=0x20\n"
+	Config = ParseConfig ("[sp-pie]\nfeature1=0x80\nfeature2=2\nfeature3=0x2c\nfeature3=0x20\n"
 			      "feature4=0\nfeature0=1\nfeature255=0x81\nfeature1=0x100\nfeature1=zz\n"
 			      "feature1=\nfeature=1\nfeaturex=1\nmachine=16\nvolume=3\njunk\n"
 			      "feature2=0x01\nfeature1=0x05\nfeature1=0x0f\nfeature3=0x05\n");
 	CHECK_EQ (Config.nIgnored, 15u);
-	CHECK (strcmp (Config.Ignored, "feature1=0x40") == 0);
+	CHECK (strcmp (Config.Ignored, "feature1=0x80") == 0);
 	CHECK_EQ (Config.Defaults.Devices, 0x0Fu);
 	CHECK_EQ (Config.Defaults.Border, 0x01u);
 	CHECK_EQ (Config.Defaults.Display, 0x05u);
@@ -3917,9 +4308,14 @@ int main (void)
 	Run ("double high: bank 5 and bank 7 lines in the order of bit 6", TestDoubleHighOrder);
 	Run ("double high: multicolour on both lines", TestDoubleHighMulticolour);
 	Run ("double high: off without detection or lock", TestDoubleHighOff);
+	Run ("line alternate: one bank per line, own attributes, order by frame", TestLineAlternate);
+	Run ("Pentagon Gigascreen: port #EFF7 decode, on, off, reset", TestPentagonPort);
+	Run ("Pentagon Gigascreen: port #EFF7 through the presenter", TestPentagonThroughPresenter);
 	Run ("config.txt: the [sp-pie] section and the defaults", TestBootConfig);
 	Run ("audio: resampler interpolation", TestResamplerLine);
 	Run ("audio: resampler against clock differences", TestResampler);
+	Run ("audio: fill target against the renderer's writes, no underrun", TestAudioFillTarget);
+	Run ("presenter: early runs for the sound, newest frame shown", TestPresenterEarlyRun);
 
 	ReportCost ();
 

@@ -138,6 +138,19 @@ void CFramePresenter::WritePicture (void)
 			}
 			break;
 
+		case CControlPorts::DisplayModeLineAlternate:
+			// One bank per screen line, the order swapping every
+			// Spectrum frame: screen line n of frame f takes the first
+			// bank when n + f is even.
+			memcpy (pOut, pNew, PictureWidth * sizeof *pOut);
+			if (y >= ScreenTop && y < ScreenTop + ScreenHeight)
+			{
+				unsigned nLine = y - ScreenTop;
+				fuseula_bank_line (((nLine + m_nLastFrame) & 1) == 0 ? nFirstBank : nSecondBank,
+						   nLine, pOut + ScreenLeft);
+			}
+			break;
+
 		default:	// not mixing
 			memcpy (pOut, pNew, PictureWidth * sizeof *pOut);
 			if (bDoubleHigh)
@@ -153,10 +166,13 @@ void CFramePresenter::WritePicture (void)
 void CFramePresenter::Reset (uint32_t nFirstFrame)
 {
 	m_nNext = nFirstFrame;
+	m_nRunUnshown = 0;
 	m_nLastFrame = nFirstFrame - 1;
 	m_LastRecord.Frame = m_nLastFrame;
 	m_LastRecord.Machine = Machine48K;
 	m_LastRecord.Locked = 0;
+	m_nRunFrame = m_nLastFrame;
+	m_RunRecord = m_LastRecord;
 	m_nPresented = 0;
 	m_nSkipped = 0;
 	m_nRepeated = 0;
@@ -210,6 +226,10 @@ void CFramePresenter::RunFrame (uint32_t nFrame)
 	}
 	m_pLog->Release (Span);
 
+	// The line alternate mode draws from both banks as they are at the
+	// end of the frame.
+	fuseula_bank_lines ((m_Control.Display () & CControlPorts::DisplayModeMask)
+			    == CControlPorts::DisplayModeLineAlternate);
 	fuseula_end_frame ();
 	if (m_pFuse != 0)
 	{
@@ -223,43 +243,46 @@ void CFramePresenter::RunFrame (uint32_t nFrame)
 		m_pAudio->Write (pSamples, nSamples);
 	}
 
-	m_nLastFrame = nFrame;
-	m_LastRecord = Record;
+	m_nRunFrame = nFrame;
+	m_RunRecord = Record;
+}
+
+bool CFramePresenter::RunCompleted (void)
+{
+	bool bRun = false;
+	while ((int32_t) (m_pLog->Completed () - m_nNext) > 0)
+	{
+		RunFrame (m_nNext);
+		m_nNext++;
+		m_nRunUnshown++;
+		bRun = true;
+	}
+	return bRun;
 }
 
 bool CFramePresenter::Present (void)
 {
-	uint32_t nCompleted = m_pLog->Completed ();
-	int32_t nWaiting = (int32_t) (nCompleted - m_nNext);
+	RunCompleted ();
 
-	if (nWaiting <= 0)
+	bool bNew = m_nRunUnshown != 0;
+	if (bNew)
+	{
+		m_nSkipped += m_nRunUnshown - 1;
+		m_nLastFrame = m_nRunFrame;
+		m_LastRecord = m_RunRecord;
+		m_nPresented++;
+		m_nRunUnshown = 0;
+	}
+	else
 	{
 		m_nRepeated++;
-		if (m_pOutput != 0)
-		{
-			WritePicture ();
-		}
-		return false;
 	}
-
-	if ((uint32_t) nWaiting >= SkipThreshold)
-	{
-		for (; nWaiting > 2; nWaiting--, m_nNext++)
-		{
-			RunFrame (m_nNext);
-			m_nSkipped++;
-		}
-	}
-
-	RunFrame (m_nNext);
-	m_nNext++;
-	m_nPresented++;
 	if (m_pOutput != 0)
 	{
 		WritePicture ();
 	}
 
-	return true;
+	return bNew;
 }
 
 }

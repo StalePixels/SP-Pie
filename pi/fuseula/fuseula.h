@@ -107,6 +107,20 @@ const uint8_t *fuseula_line_screens (void);
    of the bank now (after the frame last ended). */
 void fuseula_screen_line (unsigned nBank, unsigned nLine, uint32_t *pOut);
 
+/* Draws screen line nLine (0 to 191) of RAM bank nBank (5 or 7) with that
+   bank's own pixel bytes and attributes, 256 pixels into pOut, in
+   0xAARRGGBB. An 8-pixel chunk that Fuse drew from nBank is as Fuse drew
+   it, at its beam time. Any other chunk takes the pixel byte and the
+   attribute in the bank at the end of the frame last ended, in the colours
+   Fuse gives that attribute: BRIGHT, FLASH in that frame's phase, and
+   ULAplus as it was at the chunk's beam time. The frame must have ended
+   with fuseula_bank_lines () on. */
+void fuseula_bank_line (unsigned nBank, unsigned nLine, uint32_t *pOut);
+
+/* Whether fuseula_end_frame () draws both banks for fuseula_bank_line ()
+   (about as much work as drawing the screen twice). Off at start. */
+void fuseula_bank_lines (int bOn);
+
 /* State, for the tests. */
 uint8_t fuseula_ram (unsigned nBank, unsigned nOffset);
 uint8_t fuseula_border (void);

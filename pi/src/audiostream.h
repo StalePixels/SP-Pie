@@ -16,8 +16,12 @@
 // The HDMI output takes 48,000 per second of the Pi's clock. The two
 // clocks come from different crystals, so the ring would slowly fill or
 // empty. The resampler keeps it near TargetFill: every ControlSamples
-// outputs it averages the fill level and sets the ratio to
-// 1 + (average fill - TargetFill) x Gain, limited to MaxAdjust either way.
+// outputs it takes the mean fill level over those outputs, smooths it, and
+// sets the ratio to 1 + (smoothed fill - TargetFill) x Gain, limited to
+// MaxAdjust either way. The fill rises by a frame of samples at each write
+// and falls between writes; the mean over every output, not a reading
+// every ControlSamples, follows its true average whatever the phase of
+// the writes.
 // A ring that holds more than the target is read a little faster. The
 // fill error then falls with a time constant of 1 / (48,000 x Gain), about
 // 21 seconds, and a constant clock difference leaves an offset of the
@@ -115,7 +119,12 @@ private:
 class CAudioResampler
 {
 public:
-	static const uint32_t TargetFill	= 2048;		// samples, about 43 ms
+	// 30 ms. The renderer core writes each Spectrum frame's samples
+	// within about 1 ms of the frame's end, except for a few ms around each
+	// vertical sync (sppieapp.cpp), so the fill falls to about one frame
+	// below its mean, plus that wait, plus the offset of a 300 ppm clock
+	// difference (about 307 samples). README.md, Latency, gives the bound.
+	static const uint32_t TargetFill	= 1440;
 	static const uint32_t ControlSamples	= 480;		// 10 ms of output
 	static constexpr double MaxAdjust	= 1e-3;		// 1,000 ppm
 	static constexpr double Gain		= MaxAdjust / 1024.0;	// per sample of fill error
@@ -128,7 +137,11 @@ public:
 
 	double Adjust (void) const		{ return m_fAdjust; }	// ratio - 1
 	double AverageFill (void) const		{ return m_fFill; }
-	uint32_t Underruns (void) const		{ return m_nUnderruns; }
+
+	// Times the ring ran empty, and control steps at which the ratio was
+	// held at MaxAdjust. Another core may read them.
+	uint32_t Underruns (void) const		{ return __atomic_load_n (&m_nUnderruns, __ATOMIC_RELAXED); }
+	uint32_t LimitHits (void) const		{ return __atomic_load_n (&m_nLimitHits, __ATOMIC_RELAXED); }
 	bool Playing (void) const		{ return m_bPlaying; }
 
 private:
@@ -142,9 +155,11 @@ private:
 	double		m_fFraction;	// position between m_x[1] and m_x[2]
 	int32_t		m_nLast;	// the last output
 	uint32_t	m_nControlCount;
+	uint64_t	m_nFillSum;	// fill levels of this control step's outputs
 	double		m_fFill;	// average fill level
 	double		m_fAdjust;
 	uint32_t	m_nUnderruns;
+	uint32_t	m_nLimitHits;
 };
 
 }

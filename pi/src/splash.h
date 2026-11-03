@@ -103,6 +103,16 @@ public:
 		}
 	}
 
+	// The mean period in ticks; 0 until Frames frames have been timed.
+	uint64_t PeriodTicks (void) const
+	{
+		if (m_nCount < Frames + 1)
+		{
+			return 0;
+		}
+		return (m_Ticks[(m_nNext + Frames) % (Frames + 1)] - m_Ticks[m_nNext]) / Frames;
+	}
+
 	// In 1/100 Hz, rounded; 0 until Frames frames have been timed.
 	unsigned CentiHz (uint64_t nTickFrequency) const
 	{

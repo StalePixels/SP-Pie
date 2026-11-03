@@ -103,7 +103,7 @@ public:
 	// was ignored.
 	CSpPieApp (CMemorySystem *pMemorySystem, CBcmFrameBuffer *pFrameBuffer,
 		   CSmiEventReader *pReader, CHDMISoundBaseDevice *pSound,
-		   unsigned nArmClockMHz, TMachineChoice Choice,
+		   TMachineChoice Choice,
 		   unsigned nHdmiWidth, unsigned nHdmiHeight,
 		   const CControlPorts::TDefaults &rDefaults, const char *pConfigNote,
 		   boolean bConfigIgnored);
@@ -125,7 +125,6 @@ private:
 	CBcmFrameBuffer	*m_pFrameBuffer;
 	CSmiEventReader	*m_pReader;
 	CHDMISoundBaseDevice *m_pSound;
-	unsigned	m_nArmClockMHz;
 	unsigned	m_nHdmiWidth;
 	unsigned	m_nHdmiHeight;
 	const char	*m_pConfigNote;
