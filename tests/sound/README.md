@@ -18,7 +18,7 @@ Write the feature number to the select port, then the value to the data port. Th
 | Feature | Use | Default |
 | --- | --- | --- |
 | 0x00 | Reserved. | |
-| 0x01 | Attached devices. Bit 0 AY, bit 1 TurboSound, bit 2 beeper, bit 3 Covox 0xFB, bit 4 Covox 0xDD, bit 5 Covox 0xDF, bit 6 Pentagon Gigascreen (port 0xEFF7). | 0x07 |
+| 0x01 | Attached devices. Bit 0 AY, bit 1 TurboSound, bit 2 beeper, bit 3 Covox 0xFB, bit 4 Covox 0xDD, bit 5 SpecDrum 0xDF, bit 6 Pentagon Gigascreen (port 0xEFF7). | 0x07 |
 | 0x02 | Border. Bit 0 extends the border to 16:9. | 0x00 |
 | 0x03 | Display. The bits are in the list below. | 0x11 |
 | 0xFF | Debug. Bit 0 shows the HUD. | 0x01 |
@@ -79,9 +79,9 @@ From BASIC, without `spctl`, write the ports directly. Port 0x043B is 1083 and p
 OUT 1083,255: OUT 1339,0
 ```
 
-## panel
+## spppanel
 
-A control panel for the board, drawn like the Spectrum 128K boot menu: a black title bar with a rainbow at the right end, a white menu box, and a cyan bar on the selected row. Every change goes to the board at once, as the feature number to port 0x043B and then the value to port 0x053B.
+The SP-Pie panel: a control panel for the board, drawn like the Spectrum 128K boot menu. The black title bar ends with four rainbow stripes, a diagonal triangle and a final black block. The menu box is white, not bright, with a 1-pixel black border, and a blank line separates it from the help text. A cyan bar marks the selected row. The tape file is `build/tap/spppanel.tap` and the ESXDOS dot command is `.spppanel`. Every change goes to the board at once, as the feature number to port 0x043B and then the value to port 0x053B.
 
 The main page has the devices, the border and the debug item. The display settings (feature 3) are on the GIGASCREEN page, which G opens from the main page.
 
@@ -94,7 +94,7 @@ Main page:
 | Beeper | 1, bit 2 | 3 |
 | Covox 0xFB | 1, bit 3 | 4 |
 | Covox 0xDD | 1, bit 4 | 5 |
-| Covox 0xDF | 1, bit 5 | 6 |
+| SpecDrum 0xDF | 1, bit 5 | 6 |
 | Pentagon Gigascreen (port #EFF7). The screen shows "Penta.Gigascreen". | 1, bit 6 | 7 |
 | Extend to 16:9 | 2, bit 0 | 8 |
 | HUD | 0xFF, bit 0 | H |
@@ -196,7 +196,7 @@ Draws eight horizontal stripes in the border, then switches the border extension
 - With the extension on, each line of the areas left and right of the picture takes the colour of that line's edge pixel, so the stripes fill the 16:9 screen.
 - The extension is off at the end.
 
-The `mame/panel_keys.lua` script runs the panel in MAME and presses CAPS SHIFT with 6 and 7, and ENTER, through the emulated keyboard matrix. The `mame/panel_pages.lua` script opens and closes the GIGASCREEN page, presses each of its keys and takes a screenshot after each one. It prints the panel's own state table at each screenshot. Set `STATE_ADDR` to the address of the label `state` in `build/lst/panel-tap.lst`. Use both with `-autoboot_script`.
+The `mame/panel_keys.lua` script runs the panel in MAME and presses CAPS SHIFT with 6 and 7, and ENTER, through the emulated keyboard matrix. The `mame/panel_pages.lua` script opens and closes the GIGASCREEN page, presses each of its keys and takes a screenshot after each one. It prints the panel's own state table at each screenshot. Set `STATE_ADDR` to the address of the label `state` in `build/lst/spppanel-tap.lst`. Use both with `-autoboot_script`.
 
 ## Reference sounds from MAME
 

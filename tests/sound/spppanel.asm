@@ -1,4 +1,4 @@
-; panel: SP-Pie control panel, drawn like a Spectrum 128K boot menu: a black
+; spppanel: SP-Pie control panel, drawn like a Spectrum 128K boot menu: a black
 ; title bar with a rainbow at the right end, a white menu box, and a cyan bar
 ; on the selected row. The program draws the screen itself with the attribute
 ; memory, a few pixel bytes, and the ROM character set through RST 0x10.
@@ -18,7 +18,7 @@
 ; Keys on the main page:
 ;   cursor up, down   move the cyan bar (CAPS SHIFT with 7 and 6); they repeat
 ;   ENTER             toggle the selected item
-;   1 to 7            devices: AY, TurboSound, beeper, Covox 0xFB, 0xDD, 0xDF,
+;   1 to 7            devices: AY, TurboSound, beeper, Covox 0xFB, 0xDD, SpecDrum 0xDF,
 ;                     Pentagon Gigascreen
 ;   8                 border extension to 16:9
 ;   H                 HUD
@@ -481,9 +481,13 @@ draw_row:
         ld a,(r_idx)
         cp b
         ld a,PAPER_WHITE
+        ld b,0                          ; the bar is bright, the box is not
         jr nz,.p
         ld a,PAPER_CYAN
+        ld b,1
 .p:     ld (colbuf+1),a
+        ld a,b
+        ld (colbuf+5),a
         ld hl,colbuf
         call print_ff
         ld a,(r_row)
@@ -606,7 +610,7 @@ show_sub:
         call print_ff
         jp draw_all_rows
 
-; Blank the 26 cells of the 17 menu rows: bright white paper, black ink.
+; Blank the 26 cells of the 16 menu rows: white paper, black ink.
 clear_box:
         ld hl,txt_clr
         call print_ff
@@ -619,21 +623,22 @@ clear_box:
         call print_ff
         pop af
         inc a
-        cp 18
+        cp 17
         jr nz,.l
         ret
 
-; Colour the box and draw the rainbow. Attribute 0x78 is bright white paper
-; with black ink, 0x47 is a black bar with bright white ink.
+; Colour the box and draw the title bar end, then the 1-pixel black border.
+; Attribute 0x38 is non-bright white paper with black ink, 0x47 is a black bar
+; with bright white ink. The menu body is rows 1 to 16, columns 3 to 28.
 draw_box:
         ld hl,ATTR_SCREEN+3
         ld a,0x47
         ld b,26
         call fill_attr
         ld hl,ATTR_SCREEN+32+3
-        ld c,17
+        ld c,16
 .row:   push hl
-        ld a,0x78
+        ld a,0x38
         ld b,26
         call fill_attr
         pop hl
@@ -641,17 +646,17 @@ draw_box:
         add hl,de
         dec c
         jr nz,.row
-        ld hl,rainbow_attr              ; four cells of stripes, then cyan
-        ld de,ATTR_SCREEN+24
-        ld bc,5
+        ld hl,rainbow_attr              ; four stripes, the triangle, a black block
+        ld de,ATTR_SCREEN+23
+        ld bc,6
         ldir
-        ld hl,diagonal                  ; each stripe cell is a slanted edge
-        ld de,0x4000+24
+        ld hl,diagonal                  ; each of the first five cells is a slanted edge
+        ld de,0x4000+23
         ld b,8
 .y:     ld a,(hl)
         inc hl
         push de
-        ld c,4
+        ld c,5
 .x:     ld (de),a
         inc de
         dec c
@@ -659,6 +664,41 @@ draw_box:
         pop de
         inc d                           ; next pixel line of the cell
         djnz .y
+        ; Border: the right-most pixel of column 2 and the left-most pixel of
+        ; column 29 beside rows 0 to 16, and one pixel line under the body.
+        ld c,0
+.brow:  ld a,c
+        and 0x18
+        or 0x40
+        ld h,a
+        ld a,c
+        and 7
+        rrca
+        rrca
+        rrca
+        ld l,a
+        ld b,8
+.bline: push hl
+        inc hl
+        inc hl
+        set 0,(hl)
+        ld de,27
+        add hl,de
+        set 7,(hl)
+        pop hl
+        inc h
+        djnz .bline
+        inc c
+        ld a,c
+        cp 17
+        jr nz,.brow
+        ld hl,0x5020+2                  ; row 17, pixel line 0
+        set 0,(hl)
+        inc hl
+        ld a,0xFF
+        ld b,26
+        call fill_attr
+        set 7,(hl)
         ret
 
 fill_attr:
@@ -668,9 +708,10 @@ fill_attr:
         ret
 
 ; Bright cells: paper is the colour before, ink the colour of the stripe.
-; Black to red, red to yellow, yellow to green, green to cyan, then cyan.
+; Black to red, red to yellow, yellow to green, green to cyan, cyan to black
+; (the triangle), then the final black block.
 rainbow_attr:
-        DB 0x42,0x56,0x74,0x65,0x6D
+        DB 0x42,0x56,0x74,0x65,0x68,0x47
 diagonal:
         DB 0x01,0x03,0x07,0x0F,0x1F,0x3F,0x7F,0xFF
 
@@ -692,7 +733,7 @@ items:  DB '1',3,VAR_DEVICES,0x01
         DW lbl_pent,vals_onoff
         DB '8',11,VAR_BORDER,0x01
         DW lbl_border,vals_onoff
-        DB 'h',17,VAR_DEBUG,0x01
+        DB 'h',16,VAR_DEBUG,0x01
         DW lbl_hud,vals_onoff
 
 subitems:
@@ -710,7 +751,7 @@ lbl_turbo:  DB "2 TurboSound",255
 lbl_beeper: DB "3 Beeper",255
 lbl_fb:     DB "4 Covox 0xFB",255
 lbl_dd:     DB "5 Covox 0xDD",255
-lbl_df:     DB "6 Covox 0xDF",255
+lbl_df:     DB "6 SpecDrum 0xDF",255
 lbl_pent:   DB "7 Penta.Gigascreen",255
 lbl_border: DB "8 Extend to 16:9",255
 lbl_hud:    DB "H HUD",255
@@ -770,7 +811,7 @@ txt_normal:
 txt_spaces:
         DB "                          ",255     ; the 26 cells of the box
 txt_clr:
-        DB 17,7,16,0,19,1,255
+        DB 17,7,16,0,19,0,255
 
 ; Value names of the two step items, 16 bytes each, in the order of the bits.
 ; Gigascreen is bits 1 and 0: 00 Off, 01 Auto, 10 Always, 11 never selected.
@@ -797,16 +838,16 @@ mode_names:
 ; AT is 22,row,column. INK is 16, PAPER 17, BRIGHT 19.
 txt_main:
         DB 22,0,4,17,0,16,7,19,1,"SP-Pie Panel     "
-        DB 22,2,4,17,7,16,1,19,1,"DEVICES"
+        DB 22,2,4,17,7,16,1,19,0,"DEVICES"
         DB 22,10,4,"BORDER"
         DB 22,13,4,"GIGASCREEN"
-        DB 22,14,5,17,7,16,0,19,1,"G Display settings"
-        DB 22,16,4,16,1,"DEBUG"
+        DB 22,14,5,17,7,16,0,19,0,"G Display settings"
+        DB 22,15,4,16,1,"DEBUG"
         DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press a key.  "
         DB 22,19,1,"S send all  R defaults  Q quit",255
 txt_sub:
         DB 22,0,4,17,0,16,7,19,1,"SP-Pie Gigascreen"
-        DB 22,2,4,17,7,16,1,19,1,"DISPLAY"
+        DB 22,2,4,17,7,16,1,19,0,"DISPLAY"
         DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press 1 to 4. "
         DB 22,19,1,"S send R defaults G/SPACE back",255
 txt_note:
@@ -815,4 +856,4 @@ txt_note:
 
         INCLUDE "snd_lib.inc"
 prog_end:
-        SND_FINISH "build/tap/panel.tap", "build/dot/panel", "panel"
+        SND_FINISH "build/tap/spppanel.tap", "build/dot/spppanel", "spppanel"

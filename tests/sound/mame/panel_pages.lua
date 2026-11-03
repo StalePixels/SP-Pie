@@ -4,7 +4,7 @@
 -- At each screenshot it prints the four bytes of the panel's own state
 -- table (devices, border, display, debug) as "STATE xx xx xx xx".
 -- Environment: TYPE_TEXT, as in drive.lua. STATE_ADDR, the address of the
--- label "state" in build/lst/panel-tap.lst, as a hex number without prefix.
+-- label "state" in build/lst/spppanel-tap.lst, as a hex number without prefix.
 local text = (os.getenv("TYPE_TEXT") or "\r"):gsub("\\r", "\r")
 
 local function field(prefix)
