@@ -26,7 +26,7 @@ This selects the debug feature and turns the HUD off.
 | 0 | SP-Pie | Reserved. | 0x00 |
 | 1 | Attached devices | Bit 0: AY. Bit 1: TurboSound, a second AY. Bit 2: beeper. Bit 3: Covox on port 0xFB. Bit 4: Covox on port 0xDD. Bit 5: Covox on port 0xDF. Bits 6 and 7 are reserved. | 0x07: AY, TurboSound and beeper on, every Covox off |
 | 2 | Border | Bit 0: border extension. Bits 1 to 7 are reserved for later border functions. | 0x00: off |
-| 3 | Display | Bit 0: interlace detection. Bit 1: interlace mixing always on. Bits 3 and 2: mixing mode, 00 average, 01 CRT-style, 10 line weave; 11 is reserved. Bits 4 to 7 are reserved. | 0x01: detection on, average |
+| 3 | Display | Bit 0: interlace detection. Bit 1: interlace mixing always on. Bits 3 and 2: mixing mode, 00 average, 01 CRT-style, 10 line weave; 11 is reserved. Bits 5 and 4: detection method, 00 per line, 01 per page; 10 and 11 are reserved. Bits 6 and 7 are reserved. | 0x11: detection on, average, per page |
 | 0xFF | Debug | Bit 0: HUD. Bits 1 to 7 are reserved for later debug flags and parameters. | 0x01: HUD on |
 
 Every other feature number is reserved. SP-Pie ignores data writes to a reserved feature and ignores reserved bits. Write 0 to reserved bits: a later version can give them a meaning.
@@ -83,7 +83,11 @@ The border feature applies from the Spectrum frame that holds the data write.
 
 Feature 3 sets interlace mixing. Some programs show two pictures in turn, one in each frame, by flipping between the normal and the shadow screen (port 0x7FFD bit 3), so that the eye mixes them on a CRT: more colours or finer detail than one frame holds. On HDMI the same program flickers, and a frame that SP-Pie skips or repeats shows one of the two pictures twice. Mixing shows the last two complete Spectrum frames together instead.
 
-With bit 0 set, SP-Pie decides line by line, from the screen bank alone. For each line of the 352 x 270 picture in each frame, it records the screen bank that the line was drawn from: 0x7FFD bit 3 at the time the line's first screen pixels are drawn. A program can write 0x7FFD in the middle of a frame, so different lines of one frame can come from different banks. A line flips when its bank differs from its bank in the frame before. A line starts to mix after 2 frames in a row in which it flips, and stops after 4 frames in a row in which it does not flip. Only the lines that mix are mixed; the other lines show the newest frame. SP-Pie does not compare the pictures. A program that rewrites one screen with two pictures in turn is not mixed, and a game that flips the screens every frame, with a new picture each time, is mixed. On a 48K, which has no shadow screen, no line flips. With bit 1 set, SP-Pie mixes every line all the time, whatever bit 0 says.
+No detection method suits every program, so bits 5 and 4 choose one. Both use the screen bank alone, and neither compares the pictures.
+
+**Per page (01, the default).** When any line of a frame flips (below), every line of the picture mixes, after 2 such frames in a row, and stops after 4 frames in a row with no flipping line. Lines that alternate in another way while the screen flips, such as a border colour that alternates below the last bank switch, mix too. A split screen whose other part animates is mixed there as well.
+
+**Per line (00).** With bit 0 set, SP-Pie decides line by line, from the screen bank alone. For each line of the 352 x 270 picture in each frame, it records the screen bank that the line was drawn from: 0x7FFD bit 3 at the time the line's first screen pixels are drawn. A program can write 0x7FFD in the middle of a frame, so different lines of one frame can come from different banks. A line flips when its bank differs from its bank in the frame before. A line starts to mix after 2 frames in a row in which it flips, and stops after 4 frames in a row in which it does not flip. Only the lines that mix are mixed; the other lines show the newest frame. SP-Pie does not compare the pictures. A program that rewrites one screen with two pictures in turn is not mixed, and a game that flips the screens every frame, with a new picture each time, is mixed. On a 48K, which has no shadow screen, no line flips. With bit 1 set, SP-Pie mixes every line all the time, whatever bit 0 says.
 
 Bits 3 and 2 give the mix:
 

@@ -3210,6 +3210,27 @@ static void TestInterlaceSplit (void)
 	}
 }
 
+// The per-page method (feature 3 bits 4-5 = 01): when any line flips, every
+// line mixes, from the second flipping frame.
+static void TestInterlacePage (void)
+{
+	const unsigned nFrames = 14;
+	s_nSplitLine = 39 + 100;
+	s_bUpperFlips = false;
+	s_nSplitDelay = 3;
+	CInterlaceRig Rig;
+	unsigned nBad = 0;
+	RunScenario (Rig, ScenarioSplit, nFrames, 0x11, [] (unsigned) { return true; },
+		     [&] (unsigned n) {
+			for (unsigned y = 0; y < PictureHeight; y++)
+			{
+				nBad += Rig.Presenter.LineMixed (y) != (n >= 2);
+			}
+		     });
+	CHECK_EQ (nBad, 0u);
+	CHECK_EQ (Rig.Presenter.MixedLines (), (unsigned) PictureHeight);
+}
+
 // Without screen flips nothing mixes: a block that moves every frame, and
 // one screen rewritten with two pictures in turn.
 static void TestInterlaceNoFlips (void)
@@ -3409,7 +3430,7 @@ static void TestBootConfig (void)
 
 	// Invalid lines are ignored, and the first is kept; the valid ones
 	// still apply. A key given twice takes the last value.
-	Config = ParseConfig ("[sp-pie]\nfeature1=0x40\nfeature2=2\nfeature3=0x0c\nfeature3=0x10\n"
+	Config = ParseConfig ("[sp-pie]\nfeature1=0x40\nfeature2=2\nfeature3=0x0c\nfeature3=0x20\n"
 			      "feature4=0\nfeature0=1\nfeature255=0x81\nfeature1=0x100\nfeature1=zz\n"
 			      "feature1=\nfeature=1\nfeaturex=1\nmachine=16\nvolume=3\njunk\n"
 			      "feature2=0x01\nfeature1=0x05\nfeature1=0x0f\nfeature3=0x05\n");
@@ -3648,6 +3669,7 @@ int main (void)
 	Run ("splash: the picture whole again after it", TestSplashThenPicture);
 	Run ("interlace: screen flips every frame, on after 2, off after 4", TestInterlacePageFlip);
 	Run ("interlace: a mid-frame split, only the lines that flip mix", TestInterlaceSplit);
+	Run ("interlace: per-page method mixes every line when any flips", TestInterlacePage);
 	Run ("interlace: no screen flips, no mixing", TestInterlaceNoFlips);
 	Run ("interlace: skipped and repeated frames blend the right frames", TestInterlaceSkip);
 	Run ("interlace: CRT-style, line weave, always, reserved mode", TestInterlaceModes);

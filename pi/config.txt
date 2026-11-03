@@ -38,6 +38,6 @@ hdmi_drive=2
 [sp-pie]
 feature1=0x07
 feature2=0x00
-feature3=0x01
+feature3=0x11
 feature255=0x01
 machine=auto

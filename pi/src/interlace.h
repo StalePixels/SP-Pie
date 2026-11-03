@@ -90,68 +90,85 @@ public:
 		m_bFirst = true;
 		for (unsigned y = 0; y < MaxLines; y++)
 		{
-			m_Line[y].nBank = 0;
-			m_Line[y].nRun = 0;
-			m_Line[y].nMiss = 0;
-			m_Line[y].bOn = false;
+			m_Line[y] = TState ();
 		}
+		m_Page = TState ();
 	}
 
 	// The screen bank of each line, pBanks[0] to pBanks[nLines - 1], of
 	// each complete Spectrum frame, in order.
+	//
+	// Two detectors use the same hysteresis. Per line: a line flips when
+	// its bank differs from the frame before. Per page: the frame flips
+	// when any of its lines flips; with that method every line mixes, so
+	// lines that alternate in another way while the screen flips (a
+	// border colour that alternates below the last bank switch, for
+	// example) mix too. Control-port feature 3 bits 4 and 5 choose the
+	// method.
 	void Frame (const uint8_t *pBanks, unsigned nLines)
 	{
 		if (nLines > MaxLines)
 		{
 			nLines = MaxLines;
 		}
+		bool bPageFlips = false;
 		for (unsigned y = 0; y < nLines; y++)
 		{
-			TLine &rLine = m_Line[y];
+			TState &rLine = m_Line[y];
 			bool bFlips = !m_bFirst && pBanks[y] != rLine.nBank;
 			rLine.nBank = pBanks[y];
-
-			if (bFlips)
-			{
-				rLine.nMiss = 0;
-				if (rLine.nRun < OnFrames)
-				{
-					rLine.nRun++;
-				}
-				if (rLine.nRun >= OnFrames)
-				{
-					rLine.bOn = true;
-				}
-			}
-			else
-			{
-				rLine.nRun = 0;
-				if (rLine.nMiss < OffFrames)
-				{
-					rLine.nMiss++;
-				}
-				if (rLine.nMiss >= OffFrames)
-				{
-					rLine.bOn = false;
-				}
-			}
+			Step (rLine, bFlips);
+			bPageFlips = bPageFlips || bFlips;
 		}
+		Step (m_Page, bPageFlips);
 		m_bFirst = false;
 	}
+
+	// The whole page is mixing.
+	bool PageOn (void) const	{ return m_Page.bOn; }
 
 	// Line y is mixing.
 	bool On (unsigned y) const	{ return y < MaxLines && m_Line[y].bOn; }
 
 private:
-	struct TLine
+	struct TState
 	{
-		uint8_t		nBank;		// the bank in the frame before
-		uint8_t		nRun;		// flipping frames in a row, up to OnFrames
-		uint8_t		nMiss;		// other frames in a row, up to OffFrames
-		bool		bOn;
+		uint8_t		nBank = 0;	// the bank in the frame before (lines only)
+		uint8_t		nRun = 0;	// flipping frames in a row, up to OnFrames
+		uint8_t		nMiss = 0;	// other frames in a row, up to OffFrames
+		bool		bOn = false;
 	};
 
-	TLine		m_Line[MaxLines];
+	static void Step (TState &rState, bool bFlips)
+	{
+		if (bFlips)
+		{
+			rState.nMiss = 0;
+			if (rState.nRun < OnFrames)
+			{
+				rState.nRun++;
+			}
+			if (rState.nRun >= OnFrames)
+			{
+				rState.bOn = true;
+			}
+		}
+		else
+		{
+			rState.nRun = 0;
+			if (rState.nMiss < OffFrames)
+			{
+				rState.nMiss++;
+			}
+			if (rState.nMiss >= OffFrames)
+			{
+				rState.bOn = false;
+			}
+		}
+	}
+
+	TState		m_Line[MaxLines];
+	TState		m_Page;
 	bool		m_bFirst;	// no frame seen yet
 };
 

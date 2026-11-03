@@ -83,6 +83,7 @@ A control panel for the board, drawn like the Spectrum 128K boot menu: a black t
 | Auto interlace | 3, bit 0 | 8 |
 | Mixing always on | 3, bit 1 | 9 |
 | Mode: 50/50 mix, CRT-style mix, line weave | 3, bits 2 and 3 | M |
+| Detection per page (off: per line) | 3, bit 4 | P |
 | HUD | 0xFF, bit 0 | H |
 
 - Cursor up and down (CAPS SHIFT with 7 and 6) move the cyan bar, and repeat while held. ENTER toggles the selected row, or steps the display mode.

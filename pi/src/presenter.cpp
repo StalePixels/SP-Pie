@@ -91,6 +91,7 @@ void CFramePresenter::WritePicture (void)
 	uint8_t nDisplay = m_Control.Display ();
 	bool bAlways = (nDisplay & CControlPorts::DisplayInterlaceOn) != 0;
 	bool bAuto = (nDisplay & CControlPorts::DisplayInterlaceAuto) != 0;
+	bool bPage = (nDisplay & CControlPorts::DisplayDetectMask) == CControlPorts::DisplayDetectPage;
 	int nMode = nDisplay & CControlPorts::DisplayModeMask;
 	m_nMixedLines = 0;
 
@@ -100,7 +101,7 @@ void CFramePresenter::WritePicture (void)
 		const uint32_t *pOld = m_pPrevious + y * PictureWidth;
 		uint32_t *pOut = m_pOutput + y * m_nOutputPitch;
 
-		bool bMix = bAlways || (bAuto && m_Interlace.On (y));
+		bool bMix = bAlways || (bAuto && (bPage ? m_Interlace.PageOn () : m_Interlace.On (y)));
 		m_LineMixed[y] = bMix;
 		m_nMixedLines += bMix;
 

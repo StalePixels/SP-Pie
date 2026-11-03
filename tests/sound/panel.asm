@@ -20,6 +20,7 @@
 ;   8                 automatic interlace detection
 ;   9                 mixing always on
 ;   M                 step the display mode: 50/50 mix, CRT-style mix, line weave
+;   P                 interlace detection per page (on) or per line (off)
 ;   H                 HUD
 ;   S                 send every value again
 ;   R                 restore the defaults and send them
@@ -48,8 +49,9 @@ VAR_DEBUG       EQU 3
 DISP_AUTO       EQU 0x01
 DISP_ALWAYS     EQU 0x02
 DISP_MODE_MASK  EQU 0x0C
+DISP_PAGE       EQU 0x10            ; detection method: 1 per page, 0 per line
 
-NITEMS          EQU 11
+NITEMS          EQU 12
 REPEAT_DELAY    EQU 25                  ; scans before a cursor key repeats
 REPEAT_RATE     EQU 5                   ; scans between repeats
 PAPER_WHITE     EQU 7
@@ -545,7 +547,9 @@ items:  DB '1',3,VAR_DEVICES,0x01
         DW lbl_mix
         DB 'm',14,VAR_DISPLAY,0
         DW lbl_mode
-        DB 'h',16,VAR_DEBUG,0x01
+        DB 'p',15,VAR_DISPLAY,DISP_PAGE
+        DW lbl_page
+        DB 'h',17,VAR_DEBUG,0x01
         DW lbl_hud
 
 lbl_ay:     DB "1 AY chip",255
@@ -558,11 +562,12 @@ lbl_border: DB "7 Extend to 16:9",255
 lbl_auto:   DB "8 Auto interlace",255
 lbl_mix:    DB "9 Mixing always on",255
 lbl_mode:   DB "M Mode",255
+lbl_page:   DB "P Detect per page",255
 lbl_hud:    DB "H HUD",255
 
 ; Documented defaults, and the feature number of each state variable.
 defaults:
-        DB FEAT_DEFAULT, 0x00, DISP_AUTO, 0x01
+        DB FEAT_DEFAULT, 0x00, DISP_AUTO|DISP_PAGE, 0x01
 featnums:
         DB 1, 2, 3, 0xFF
 state:  DS 4
@@ -595,7 +600,7 @@ txt_static:
         DB 22,2,4,17,7,16,1,19,1,"DEVICES"
         DB 22,9,4,"BORDER"
         DB 22,11,4,"DISPLAY"
-        DB 22,15,4,"DEBUG"
+        DB 22,16,4,"DEBUG"
         DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press a key."
         DB 22,19,1,"S send all  R defaults  Q quit"
         DB 22,20,1,"This shows what the panel has"

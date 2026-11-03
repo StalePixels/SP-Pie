@@ -67,8 +67,11 @@ public:
 	static const uint8_t DisplayModeCrt	= 0x04;	// the newest 5/8, the one before 3/8
 	static const uint8_t DisplayModeWeave	= 0x08;	// alternate lines of the two
 	static const uint8_t DisplayModeReserved = 0x0C;
-	static const uint8_t DisplayBits	= 0x0F;
-	static const uint8_t DisplayDefault	= DisplayInterlaceAuto | DisplayModeAverage;
+	static const uint8_t DisplayDetectMask	= 0x30;	// the detection method
+	static const uint8_t DisplayDetectLine	= 0x00;	// each line by its own bank
+	static const uint8_t DisplayDetectPage	= 0x10;	// the whole frame when any line flips
+	static const uint8_t DisplayBits	= 0x3F;
+	static const uint8_t DisplayDefault	= DisplayInterlaceAuto | DisplayModeAverage | DisplayDetectPage;
 
 	static const uint8_t DebugHud		= 0x01;
 	static const uint8_t DebugBits		= 0x01;
@@ -114,7 +117,8 @@ public:
 			return false;
 		}
 		return !(nFeature == FeatureDisplay
-			 && (nValue & DisplayModeMask) == DisplayModeReserved);
+			 && (   (nValue & DisplayModeMask) == DisplayModeReserved
+			     || (nValue & DisplayDetectMask) > DisplayDetectPage));
 	}
 
 	CControlPorts (void)
@@ -172,8 +176,9 @@ public:
 			break;
 
 		case FeatureDisplay:
-			// The reserved mode leaves the feature as it was.
-			if ((nData & DisplayModeMask) != DisplayModeReserved)
+			// A reserved mode or detection method leaves the feature as
+			// it was.
+			if (Valid (FeatureDisplay, nData & DisplayBits))
 			{
 				m_nDisplay = nData & DisplayBits;
 			}
