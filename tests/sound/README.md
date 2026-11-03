@@ -200,7 +200,7 @@ The `mame/panel_keys.lua` script runs the panel in MAME and presses CAPS SHIFT w
 
 ## Reference sounds from MAME
 
-The `mame/` folder holds scripts that run each `.tap` in a headless MAME and measure the recorded sound. MAME needs the drivers `spectrum` and `spec128`, and the ROMs for them. A MAME with only these drivers builds from upstream source in a few minutes: `make SUBTARGET=spectrum SOURCES=src/mame/sinclair/spectrum.cpp,src/mame/sinclair/spec128.cpp,src/mame/sinclair/specpls3.cpp REGENIE=1 NOWERROR=1`. Every run must stay headless: set `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy`, and pass `-video none -sound none -nothrottle -skip_gameinfo -seconds_to_run N`; screenshots come from Lua (`manager.machine.video:snapshot()`), which needs no window.
+The `mame/` folder holds scripts that run each `.tap` in a headless MAME and measure the recorded sound. MAME needs the drivers `spectrum` and `spec128`, and the ROMs for them.
 
 ```
 MAME=/path/to/mame ROMPATH=/path/to/roms mame/run_refs.sh /path/to/output
