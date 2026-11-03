@@ -95,7 +95,7 @@ Main page:
 | Covox 0xFB | 1, bit 3 | 4 |
 | Covox 0xDD | 1, bit 4 | 5 |
 | Covox 0xDF | 1, bit 5 | 6 |
-| Pentagon Gigascreen (port #EFF7). The screen shows "Pentagon Giga". | 1, bit 6 | 7 |
+| Pentagon Gigascreen (port #EFF7). The screen shows "Penta.Gigascreen". | 1, bit 6 | 7 |
 | Extend to 16:9 | 2, bit 0 | 8 |
 | HUD | 0xFF, bit 0 | H |
 | Open the GIGASCREEN page | | G |

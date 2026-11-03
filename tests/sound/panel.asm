@@ -711,7 +711,7 @@ lbl_beeper: DB "3 Beeper",255
 lbl_fb:     DB "4 Covox 0xFB",255
 lbl_dd:     DB "5 Covox 0xDD",255
 lbl_df:     DB "6 Covox 0xDF",255
-lbl_pent:   DB "7 Pentagon Giga",255
+lbl_pent:   DB "7 Penta.Gigascreen",255
 lbl_border: DB "8 Extend to 16:9",255
 lbl_hud:    DB "H HUD",255
 lbl_giga:   DB "1 Gigascreen",255
