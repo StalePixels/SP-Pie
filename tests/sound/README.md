@@ -81,7 +81,7 @@ OUT 1083,255: OUT 1339,0
 
 ## spppanel
 
-The SP-Pie panel: a control panel for the board, drawn like the Spectrum 128K boot menu. The black title bar ends with four rainbow stripes, a diagonal triangle and a final black block. The menu box is white, not bright, with a 1-pixel black border, and a blank line separates it from the help text. A cyan bar marks the selected row. The tape file is `build/tap/spppanel.tap` and the ESXDOS dot command is `.spppanel`. Every change goes to the board at once, as the feature number to port 0x043B and then the value to port 0x053B.
+The SP-Pie panel: a control panel for the board, drawn like the Spectrum 128K boot menu. The black title bar ends with four rainbow stripes, a diagonal triangle and a final black block. The menu box is bright white with black text and a 1-pixel black border, as on the 128K menu, and a blank line separates it from the help text. A cyan bar marks the selected row. The dot commands go in the ESXDOS card's `/BIN` folder. The tape file is `build/tap/spppanel.tap` and the ESXDOS dot command is `.spppanel`. Every change goes to the board at once, as the feature number to port 0x043B and then the value to port 0x053B.
 
 The main page has the devices, the border and the debug item. The display settings (feature 3) are on the GIGASCREEN page, which G opens from the main page.
 
