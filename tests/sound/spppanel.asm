@@ -481,7 +481,7 @@ draw_row:
         ld a,(r_idx)
         cp b
         ld a,PAPER_WHITE
-        ld b,0                          ; the bar is bright, the box is not
+        ld b,1                          ; the box and the bar are bright
         jr nz,.p
         ld a,PAPER_CYAN
         ld b,1
@@ -628,7 +628,7 @@ clear_box:
         ret
 
 ; Colour the box and draw the title bar end, then the 1-pixel black border.
-; Attribute 0x38 is non-bright white paper with black ink, 0x47 is a black bar
+; Attribute 0x78 is bright white paper with black ink, 0x47 is a black bar
 ; with bright white ink. The menu body is rows 1 to 16, columns 3 to 28.
 draw_box:
         ld hl,ATTR_SCREEN+3
@@ -638,7 +638,7 @@ draw_box:
         ld hl,ATTR_SCREEN+32+3
         ld c,16
 .row:   push hl
-        ld a,0x38
+        ld a,0x78
         ld b,26
         call fill_attr
         pop hl
@@ -797,9 +797,9 @@ r_lbl:  DW 0
 colbuf: DB 17,7,16,0,19,1,255
 txt_blank:
         DB "                        ",255     ; the 24 cells of the bar
-txt_on: DB 16,1,"ON ",255
+txt_on: DB 16,0,"ON ",255
 txt_off:
-        DB 16,2,"OFF",255
+        DB 16,0,"OFF",255
 txt_whole:
         DB 16,0,"Whole screen",255
 txt_each:
@@ -811,7 +811,7 @@ txt_normal:
 txt_spaces:
         DB "                          ",255     ; the 26 cells of the box
 txt_clr:
-        DB 17,7,16,0,19,0,255
+        DB 17,7,16,0,19,1,255
 
 ; Value names of the two step items, 16 bytes each, in the order of the bits.
 ; Gigascreen is bits 1 and 0: 00 Off, 01 Auto, 10 Always, 11 never selected.
@@ -838,16 +838,16 @@ mode_names:
 ; AT is 22,row,column. INK is 16, PAPER 17, BRIGHT 19.
 txt_main:
         DB 22,0,4,17,0,16,7,19,1,"SP-Pie Panel     "
-        DB 22,2,4,17,7,16,1,19,0,"DEVICES"
+        DB 22,2,4,17,7,16,0,19,1,"DEVICES"
         DB 22,10,4,"BORDER"
         DB 22,13,4,"GIGASCREEN"
-        DB 22,14,5,17,7,16,0,19,0,"G Display settings"
-        DB 22,15,4,16,1,"DEBUG"
+        DB 22,14,5,17,7,16,0,19,1,"G Display settings"
+        DB 22,15,4,16,0,"DEBUG"
         DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press a key.  "
         DB 22,19,1,"S send all  R defaults  Q quit",255
 txt_sub:
         DB 22,0,4,17,0,16,7,19,1,"SP-Pie Gigascreen"
-        DB 22,2,4,17,7,16,1,19,0,"DISPLAY"
+        DB 22,2,4,17,7,16,0,19,1,"DISPLAY"
         DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press 1 to 4. "
         DB 22,19,1,"S send R defaults G/SPACE back",255
 txt_note:
