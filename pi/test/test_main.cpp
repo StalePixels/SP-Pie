@@ -3005,9 +3005,10 @@ static void TwoScreens (CInterlaceRig &rRig)
 	}
 }
 
-// Flipping between the two screens every frame starts mixing after
-// OnFrames alternating frames, and the average shows. Stopping stops it
-// after OffFrames frames.
+// Flipping between the two screens at the start of every frame flips
+// every line: all of them start mixing with the second flipping frame,
+// and the average shows. When the flips stop, mixing stops after 4
+// frames.
 static void TestInterlacePageFlip (void)
 {
 	CInterlaceRig Rig;
@@ -3023,10 +3024,10 @@ static void TestInterlacePageFlip (void)
 			nOnAt = n;
 		}
 	}
-	// Frame 2 is the first to equal the frame two back and differ from
-	// the one before; mixing starts with the OnFrames-th such frame.
-	CHECK_EQ (nOnAt, 9u);		// the 8th alternating frame
+	// Frame 1 is the first to flip; mixing starts with frame 2.
+	CHECK_EQ (nOnAt, 2u);
 	CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeAverage);
+	CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);
 	CHECK_EQ (Rig.Screen (), MixPixels (Red, Green));
 	CHECK_EQ (Rig.Screen (), 0xFF505000u);
 
@@ -3034,36 +3035,189 @@ static void TestInterlacePageFlip (void)
 	for (unsigned n = 1; n < 4; n++)
 	{
 		Rig.End ();
-		CHECK (Rig.Presenter.Mixing () >= 0);
+		CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);
 	}
 	Rig.End ();
 	CHECK_EQ (Rig.Presenter.Mixing (), -1);
+	CHECK_EQ (Rig.Presenter.MixedLines (), 0u);
 	CHECK (Rig.Screen () == Red || Rig.Screen () == Green);
 }
 
-// Rewriting one screen with two pictures in turn mixes the same way.
-static void TestInterlaceSameBank (void)
+// A scenario: the events of its frame n, from frame 0.
+typedef void TInterlaceScenario (CInterlaceRig &rRig, unsigned n);
+
+// Runs nFrames frames of a scenario after one frame that sets feature 3
+// to nDisplay. Show (n) tells whether frame n is shown when it ends; a
+// frame not shown waits, and the presenter runs it with the next. After
+// (n) runs when frame n has been shown.
+static void RunScenario (CInterlaceRig &rRig, TInterlaceScenario *pScenario, unsigned nFrames,
+			 uint8_t nDisplay, const std::function<bool (unsigned)> &Show,
+			 const std::function<void (unsigned)> &After)
 {
-	CInterlaceRig Rig;
-	for (unsigned n = 0; n < 16; n++)
+	rRig.Feature (3, nDisplay);
+	rRig.End ();
+	for (unsigned n = 0; n < nFrames; n++)
 	{
-		Rig.Attributes (0x5800, (n & 1) ? PaperGreen : PaperRed);
-		Rig.End ();
+		pScenario (rRig, n);
+		bool bShow = Show (n);
+		rRig.End (bShow);
+		if (bShow)
+		{
+			After (n);
+		}
 	}
-	CHECK (Rig.Presenter.Mixing () >= 0);
-	CHECK_EQ (Rig.Screen (), MixPixels (Red, Green));
 }
 
-// Normal animation never mixes: a block that moves every frame, and a
-// double-buffered animation that flips screens every frame with a new
-// picture each time. Two pictures that alternate but break the pattern
-// once in every OnFrames frames do not mix either.
-static void TestInterlaceNotAnimation (void)
+// Each frame of a scenario as Fuse drew it: the output with mixing off.
+static std::vector<std::vector<uint32_t>> DrawnFrames (TInterlaceScenario *pScenario,
+						       unsigned nFrames)
+{
+	std::vector<std::vector<uint32_t>> Frames;
+	CInterlaceRig Rig;
+	RunScenario (Rig, pScenario, nFrames, 0x00, [] (unsigned) { return true; },
+		     [&] (unsigned n) {
+			CHECK_EQ (Rig.Presenter.LastFrame (), n + 1);
+			Frames.push_back (Rig.Output);
+		     });
+	return Frames;
+}
+
+// The output of rRig, after it showed scenario frame n, against the rule:
+// the lines in rMixed blend frame n with frame n - 1 by the mode of
+// nDisplay, the others show frame n. The number of wrong pixels.
+static unsigned WrongPixels (const CInterlaceRig &rRig, const std::vector<std::vector<uint32_t>> &rFrames,
+			     unsigned n, const std::vector<bool> &rMixed, uint8_t nDisplay)
+{
+	unsigned nWrong = 0;
+	bool bCrt = (nDisplay & CControlPorts::DisplayModeMask) == CControlPorts::DisplayModeCrt;
+	for (unsigned y = 0; y < PictureHeight; y++)
+	{
+		for (unsigned x = 0; x < PictureWidth; x++)
+		{
+			unsigned i = y * PictureWidth + x;
+			uint32_t nNew = rFrames[n][i];
+			uint32_t nExpected = nNew;
+			if (rMixed[y])
+			{
+				uint32_t nOld = rFrames[n - 1][i];
+				nExpected = bCrt ? MixPixelsCrt (nNew, nOld) : MixPixels (nNew, nOld);
+			}
+			nWrong += rRig.Output[i] != nExpected;
+		}
+	}
+	return nWrong;
+}
+
+// The first T-state of picture line y's first screen chunk, on the
+// selected machine: Fuse's area starts 15 lines down and 2 chunks in, and
+// its screen 4 chunks further in.
+static uint32_t FirstScreenTState (unsigned y)
+{
+	const unsigned FuseTop = (PictureHeight - 240) / 2;
+	return fuseula_top_left_border_tstate () + (y - FuseTop) * fuseula_line_tstates () + 4 * 4;
+}
+
+// A 0x7FFD write in the middle of each frame splits the screen at
+// s_nSplitLine. With s_bUpperFlips the top part flips between the two
+// screens each frame and the lower part shows bank 5; otherwise the
+// other way round. The write is s_nSplitDelay T-states after the first
+// screen chunk of the split line starts.
+static unsigned s_nSplitLine;
+static uint32_t s_nSplitDelay;
+static bool s_bUpperFlips;
+
+static void ScenarioSplit (CInterlaceRig &rRig, unsigned n)
+{
+	if (n == 0)
+	{
+		TwoScreens (rRig);
+		rRig.Push (0, KindIo, 0x00FE, 0x00);
+	}
+	uint8_t nFlip = (n & 1) ? 0x0F : 0x07;
+	rRig.Push (0, KindIo, 0x7FFD, s_bUpperFlips ? nFlip : 0x07);
+	rRig.Push (FirstScreenTState (s_nSplitLine) + s_nSplitDelay, KindIo, 0x7FFD,
+		   s_bUpperFlips ? 0x07 : nFlip);
+}
+
+// A mid-frame 0x7FFD write splits the screen, and only the lines on one
+// side of the split flip: exactly those lines mix, from the second frame
+// that flips, by the average and by the CRT-style weight, each with the
+// same line of the frame before; the others show the newest frame. The
+// line's bank is the one Fuse drew its first screen chunk from: a write
+// 3 T-states after the chunk starts reaches the chunk, a write 4
+// T-states after does not.
+static void TestInterlaceSplit (void)
+{
+	const unsigned nFrames = 14;
+	const unsigned nSplit = 39 + 100;	// inside character row 12
+	for (unsigned nCase = 0; nCase < 4; nCase++)
+	{
+		s_nSplitLine = nSplit;
+		s_bUpperFlips = (nCase & 1) != 0;
+		s_nSplitDelay = (nCase & 2) ? 4 : 3;
+
+		// The first line with its first chunk drawn after the write.
+		unsigned nFirstAfter = nSplit + ((nCase & 2) ? 1 : 0);
+		std::vector<bool> Flips (PictureHeight);
+		for (unsigned y = 0; y < PictureHeight; y++)
+		{
+			Flips[y] = s_bUpperFlips ? y < nFirstAfter : y >= nFirstAfter;
+		}
+
+		std::vector<std::vector<uint32_t>> Frames = DrawnFrames (ScenarioSplit, nFrames);
+		CHECK_EQ (Frames.size (), (size_t) nFrames);
+		if (Frames.size () != nFrames)
+		{
+			continue;
+		}
+
+		// Fuse drew the split where the line banks put it. In frame 1
+		// the side that flips shows bank 7, green paper.
+		const std::vector<uint32_t> &rOne = Frames[1];
+		CHECK_EQ (rOne[(nSplit - 1) * PictureWidth + 48], s_bUpperFlips ? Green : Red);
+		CHECK_EQ (rOne[(nSplit + 1) * PictureWidth + 48], s_bUpperFlips ? Red : Green);
+		CHECK_EQ (rOne[nSplit * PictureWidth + 48], Flips[nSplit] ? Green : Red);
+		CHECK_EQ (rOne[nSplit * PictureWidth + 56], s_bUpperFlips ? Red : Green);
+
+		for (uint8_t nDisplay : { (uint8_t) 0x01, (uint8_t) 0x05 })
+		{
+			CInterlaceRig Rig;
+			unsigned nBadLines = 0, nBadPixels = 0, nChecked = 0;
+			RunScenario (Rig, ScenarioSplit, nFrames, nDisplay, [] (unsigned) { return true; },
+				     [&] (unsigned n) {
+					// Frame 1 flips the first time; nothing mixes yet.
+					std::vector<bool> Mixed (PictureHeight, false);
+					if (n >= 2)
+					{
+						Mixed = Flips;
+					}
+					for (unsigned y = 0; y < PictureHeight; y++)
+					{
+						nBadLines += Rig.Presenter.LineMixed (y) != Mixed[y];
+					}
+					if (n >= 1)
+					{
+						nBadPixels += WrongPixels (Rig, Frames, n, Mixed, nDisplay);
+						nChecked++;
+					}
+				     });
+			CHECK_EQ (nChecked, nFrames - 1);
+			CHECK_EQ (nBadLines, 0u);
+			CHECK_EQ (nBadPixels, 0u);
+			CHECK_EQ (Rig.Presenter.MixedLines (),
+				  (unsigned) std::count (Flips.begin (), Flips.end (), true));
+		}
+	}
+}
+
+// Without screen flips nothing mixes: a block that moves every frame, and
+// one screen rewritten with two pictures in turn.
+static void TestInterlaceNoFlips (void)
 {
 	{
 		CInterlaceRig Rig;
 		Rig.Attributes (0x5800, 0x38);
-		for (unsigned n = 0; n < 60; n++)
+		for (unsigned n = 0; n < 30; n++)
 		{
 			Rig.Push (0, KindMemory, (uint16_t) (0x5800 + n), PaperRed);
 			Rig.End ();
@@ -3072,73 +3226,82 @@ static void TestInterlaceNotAnimation (void)
 	}
 	{
 		CInterlaceRig Rig;
-		TwoScreens (Rig);
-		Rig.End ();
-		for (unsigned n = 1; n < 60; n++)
+		for (unsigned n = 0; n < 30; n++)
 		{
-			// Draw into the screen not shown, then show it.
-			uint16_t nHidden = (n & 1) ? 0xD800 : 0x5800;
-			Rig.Push (0, KindIo, 0x7FFD, (n & 1) ? 0x07 : 0x0F);
-			Rig.Push (0, KindMemory, (uint16_t) (nHidden + n), 0x08);
-			Rig.Push (0, KindIo, 0x7FFD, (n & 1) ? 0x0F : 0x07);
-			Rig.End ();
-			CHECK_EQ (Rig.Presenter.Mixing (), -1);
-		}
-	}
-	{
-		CInterlaceRig Rig;
-		for (unsigned n = 0; n < 60; n++)
-		{
-			bool bBreak = n % 8 == 0;
-			Rig.Attributes (0x5800, bBreak ? 0x08 : (n & 1) ? PaperGreen : PaperRed);
+			Rig.Attributes (0x5800, (n & 1) ? PaperGreen : PaperRed);
 			Rig.End ();
 			CHECK_EQ (Rig.Presenter.Mixing (), -1);
 		}
 	}
 }
 
-// With two pictures in turn, a frame the presenter skips shows one of
-// them twice in a row without mixing; with mixing the shown picture stays
-// the same.
+// Screen flips at the start of every frame, and a border colour of its
+// own in each frame of 7, so that frames two apart differ too.
+static void ScenarioFlip (CInterlaceRig &rRig, unsigned n)
+{
+	if (n == 0)
+	{
+		TwoScreens (rRig);
+	}
+	else
+	{
+		rRig.Push (0, KindIo, 0x7FFD, (n & 1) ? 0x0F : 0x07);
+	}
+	rRig.Push (0, KindIo, 0x00FE, (uint8_t) (n % 7));
+}
+
+// A skipped frame and a repeated one. Each picture shown blends the frame
+// shown with the frame just before it, a skipped one too, so it stays the
+// same; a repeat shows the same picture again.
 static void TestInterlaceSkip (void)
 {
-	for (int nMix = 0; nMix < 2; nMix++)
+	const unsigned nFrames = 30;
+	std::vector<std::vector<uint32_t>> Frames = DrawnFrames (ScenarioFlip, nFrames);
+	CHECK_EQ (Frames.size (), (size_t) nFrames);
+	if (Frames.size () != nFrames)
 	{
-		CInterlaceRig Rig;
-		if (!nMix)
-		{
-			Rig.Feature (3, 0x00);		// no mixing
-		}
-		std::vector<uint32_t> Shown;
-		for (unsigned n = 0; n < 30; n++)
-		{
-			Rig.Attributes (0x5800, (n & 1) ? PaperGreen : PaperRed);
-			bool bSkipNext = n == 20;
-			Rig.End (!bSkipNext && n != 21 && n != 22);
-			if (n == 22)
-			{
-				CHECK (Rig.Presenter.Present ());	// skips 20, shows 21
-				CHECK_EQ (Rig.Presenter.Skipped (), 1u);
-			}
-			if (n >= 12 && !(n >= 20 && n < 22))
-			{
-				Shown.push_back (Rig.Screen ());
-			}
-		}
-		bool bSteady = std::all_of (Shown.begin (), Shown.end (),
-					    [] (uint32_t c) { return c == MixPixels (Red, Green); });
-		CHECK_EQ (bSteady, nMix == 1);
-		if (!nMix)
-		{
-			// Alternating, and the skip shows the same picture twice.
-			unsigned nRepeats = 0;
-			for (size_t i = 1; i < Shown.size (); i++)
-			{
-				nRepeats += Shown[i] == Shown[i - 1];
-			}
-			CHECK_EQ (nRepeats, 1u);
-		}
+		return;
 	}
+
+	CInterlaceRig Rig;
+	std::vector<bool> All (PictureHeight, true);
+	unsigned nBadPixels = 0, nChecked = 0, nNotMixed = 0;
+	auto Check = [&] (void) {
+		uint32_t nShown = Rig.Presenter.LastFrame () - 1;	// the scenario's frame
+		if (nShown >= 2)
+		{
+			nBadPixels += WrongPixels (Rig, Frames, nShown, All, 0x01);
+			nNotMixed += Rig.Presenter.MixedLines () != PictureHeight;
+			nChecked++;
+		}
+	};
+	RunScenario (Rig, ScenarioFlip, nFrames, 0x01,
+		     [] (unsigned n) { return n < 20 || n > 22; },
+		     [&] (unsigned n) {
+			Check ();
+			if (n == 23)
+			{
+				// Frames 20 to 23 waited: 20 and 21 were skipped,
+				// 22 shown; 23 waits for the next HDMI frame.
+				CHECK_EQ (Rig.Presenter.Skipped (), 2u);
+				CHECK_EQ (Rig.Presenter.LastFrame (), 22u + 1);
+				CHECK (Rig.Presenter.Present ());
+				Check ();
+				CHECK_EQ (Rig.Presenter.LastFrame (), 23u + 1);
+			}
+		     });
+	CHECK (Rig.Screen () == MixPixels (Red, Green));
+
+	// A repeat: no frame waiting, the same picture again.
+	std::vector<uint32_t> Before = Rig.Output;
+	CHECK (!Rig.Presenter.Present ());
+	CHECK (Rig.Output == Before);
+	CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);
+
+	// Frames 2 to 29, less the two skipped.
+	CHECK_EQ (nChecked, nFrames - 2 - 2);
+	CHECK_EQ (nBadPixels, 0u);
+	CHECK_EQ (nNotMixed, 0u);
 }
 
 // The modes: the CRT-style mix (the newest 5/8), the line weave (the
@@ -3155,6 +3318,7 @@ static void TestInterlaceModes (void)
 	CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeCrt);
 	CHECK_EQ (Rig.Screen (), MixPixelsCrt (Green, Red));
 	CHECK_EQ (Rig.Screen (), 0xFF3C6400u);		// 3/8 and 5/8 of 0xA0
+	CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);	// always: every line
 	CHECK (Rig.Presenter.WeavePicture () == nullptr);
 
 	Rig.Feature (3, 0x0A);				// always, line weave
@@ -3196,6 +3360,7 @@ static void TestInterlaceModes (void)
 	Rig.Attributes (0x5800, PaperGreen);
 	Rig.End ();
 	CHECK_EQ (Rig.Presenter.Mixing (), -1);
+	CHECK_EQ (Rig.Presenter.MixedLines (), 0u);
 	CHECK_EQ (Rig.Screen (), Green);
 	CHECK (Rig.Presenter.WeavePicture () == nullptr);
 }
@@ -3378,9 +3543,9 @@ static void ReportCost (void)
 	}
 	auto t8 = std::chrono::steady_clock::now ();
 
-	// Core 0's picture path: one frame with its snapshot, hash and
-	// output, not mixed, averaged and CRT-style; and the frame buffer
-	// lines of the weave.
+	// Core 0's picture path: one frame with its snapshot, line banks and
+	// output, not mixed, averaged and CRT-style (every line); the frame
+	// buffer lines of the weave; and the detector.
 	double PictureUs[3];
 	const uint8_t Displays[3] = { 0x00, 0x02, 0x06 };
 	for (unsigned m = 0; m < 3; m++)
@@ -3411,11 +3576,29 @@ static void ReportCost (void)
 		}
 	}
 	auto td = std::chrono::steady_clock::now ();
+
+	// The detector alone: the banks of 270 lines, every line flipping.
+	CInterlaceDetector Detector;
+	uint8_t Banks[2][PictureHeight];
+	memset (Banks[0], 5, PictureHeight);
+	memset (Banks[1], 7, PictureHeight);
+	const unsigned nDetectFrames = 10000;
+	unsigned nOnSink = 0;
+	auto te = std::chrono::steady_clock::now ();
+	for (unsigned f = 0; f < nDetectFrames; f++)
+	{
+		Detector.Frame (Banks[f & 1], PictureHeight);
+		nOnSink += Detector.On (f % PictureHeight);
+	}
+	auto tf = std::chrono::steady_clock::now ();
+
 	printf ("cost (host): picture path on core 0 %.0f us per frame unmixed, %.0f averaged, "
-		"%.0f CRT-style; weave lines %.0f us per frame (%llu)\n",
+		"%.0f CRT-style; weave lines %.0f us per frame (%llu); detector %.2f us per frame (%u)\n",
 		PictureUs[0], PictureUs[1], PictureUs[2],
 		std::chrono::duration<double, std::micro> (td - tc).count () / nFramesRun,
-		(unsigned long long) (nWeaveSink & 1));
+		(unsigned long long) (nWeaveSink & 1),
+		std::chrono::duration<double, std::micro> (tf - te).count () / nDetectFrames,
+		nOnSink & 1);
 
 	printf ("cost (host): sound on core 0 %.0f us per quiet frame, %.0f us per busy frame; "
 		"resampler on core 3 %.1f us per frame of output (%lld)\n",
@@ -3463,10 +3646,10 @@ int main (void)
 	Run ("splash: HDMI frame rate from the vertical sync", TestRefreshMeter);
 	Run ("splash: the rendered pixels", TestSplashPixels);
 	Run ("splash: the picture whole again after it", TestSplashThenPicture);
-	Run ("interlace: screen flips every frame, on and off", TestInterlacePageFlip);
-	Run ("interlace: one screen rewritten every frame", TestInterlaceSameBank);
-	Run ("interlace: normal animation never mixes", TestInterlaceNotAnimation);
-	Run ("interlace: a skipped frame does not change the mix", TestInterlaceSkip);
+	Run ("interlace: screen flips every frame, on after 2, off after 4", TestInterlacePageFlip);
+	Run ("interlace: a mid-frame split, only the lines that flip mix", TestInterlaceSplit);
+	Run ("interlace: no screen flips, no mixing", TestInterlaceNoFlips);
+	Run ("interlace: skipped and repeated frames blend the right frames", TestInterlaceSkip);
 	Run ("interlace: CRT-style, line weave, always, reserved mode", TestInterlaceModes);
 	Run ("config.txt: the [sp-pie] section and the defaults", TestBootConfig);
 	Run ("audio: resampler interpolation", TestResamplerLine);

@@ -91,6 +91,22 @@ static unsigned change_count;
 static int ulaplus_changed;		/* palette or mode changed this frame */
 static int ulaplus_changed_before;	/* ... or in the frame before */
 
+/* The screen bank shown (5 or 7, 0x7FFD bit 3) at the start of the frame,
+   now, the changes since the start, and the bank of each picture line of
+   the frame last ended. More changes than MAX_SCREEN_CHANGES in one frame
+   are left out of the line banks. */
+#define MAX_SCREEN_CHANGES 1024
+
+typedef struct screen_change {
+  libspectrum_dword tstate;
+  libspectrum_byte bank;
+} screen_change;
+
+static int screen_start, screen_current;
+static screen_change screen_changes[ MAX_SCREEN_CHANGES ];
+static unsigned screen_change_count;
+static uint8_t line_screens[ FUSEULA_PICTURE_HEIGHT ];
+
 /* Lookup cursor: the state at cursor_tstate, after the first cursor_next
    changes. */
 static output_state cursor;
@@ -201,6 +217,50 @@ fill_chunk( int x, int y, libspectrum_byte data, libspectrum_dword ink,
   for( i = 0; i < CHUNK_PIXELS; i++ ) {
     out[i] = ( data & ( 0x80 >> i ) ) ? ink : paper;
   }
+}
+
+/* --- the screen bank of each line ------------------------------------ */
+
+/* Notes a change of the shown screen bank by the write just run. */
+static void
+note_screen( void )
+{
+  if( memory_current_screen == screen_current ) return;
+
+  screen_current = memory_current_screen;
+  if( screen_change_count < MAX_SCREEN_CHANGES ) {
+    screen_changes[ screen_change_count ].tstate = tstates;
+    screen_changes[ screen_change_count ].bank = (libspectrum_byte) screen_current;
+    screen_change_count++;
+  }
+}
+
+/* The bank of each picture line: the bank Fuse drew the line's first
+   screen chunk (Fuse's column 4) from. Fuse changes the screen bank after
+   drawing every chunk the beam has passed (display_update_critical), so by
+   the beam rule a change at T-state t applies to the chunk that starts at
+   T when t <= T + 3, as for the border. The lines above and below the
+   screen take the bank at the same place in their line. */
+static void
+end_line_screens( void )
+{
+  unsigned next = 0;
+  int bank = screen_start;
+  int y;
+
+  for( y = 0; y < FUSEULA_PICTURE_HEIGHT; y++ ) {
+    libspectrum_signed_dword t =
+      chunk_tstate( FUSE_LEFT + DISPLAY_BORDER_WIDTH_COLS, y ) + CHUNK_TSTATES - 1;
+    while( next < screen_change_count &&
+           (libspectrum_signed_dword) screen_changes[ next ].tstate <= t ) {
+      bank = screen_changes[ next ].bank;
+      next++;
+    }
+    line_screens[ y ] = (uint8_t) bank;
+  }
+
+  screen_start = screen_current;
+  screen_change_count = 0;
 }
 
 /* --- Fuse's drawing calls ---------------------------------------------- */
@@ -393,6 +453,10 @@ fuseula_init( uint32_t *pPicture, unsigned nPitch )
   current.border = display_lores_border;
   frame_start = current;
 
+  screen_start = screen_current = memory_current_screen;
+  screen_change_count = 0;
+  memset( line_screens, screen_current, sizeof line_screens );
+
   return 0;
 }
 
@@ -403,6 +467,9 @@ fuseula_select( enum fuseula_machine Machine )
 
   if( machine_select( fuse_machines[ Machine ] ) ) return;
   current_machine = Machine;
+
+  screen_start = screen_current = memory_current_screen;
+  screen_change_count = 0;
 }
 
 enum fuseula_machine
@@ -448,6 +515,7 @@ fuseula_io_write( uint32_t nTState, uint16_t nPort, uint8_t nData )
   tstates = nTState;
   writeport_internal( nPort, nData );
   ulaplus_write( nPort, nData );
+  note_screen();
 
   if( display_lores_border != current.border ) {
     current.border = display_lores_border;
@@ -460,6 +528,7 @@ fuseula_reset( uint32_t nTState )
 {
   tstates = nTState;
   machine_reset( 0 );
+  note_screen();
 
   ulaplus_register = 0;
   if( current.mode != 0 ) {
@@ -482,6 +551,7 @@ fuseula_end_frame( void )
   tstates = 0;
   display_frame();
   draw_outer_border();
+  end_line_screens();
 
   /* The next frame starts from the state at the end of this one. */
   frame_start = current;
@@ -505,6 +575,12 @@ uint8_t
 fuseula_border( void )
 {
   return display_lores_border;
+}
+
+const uint8_t *
+fuseula_line_screens( void )
+{
+  return line_screens;
 }
 
 unsigned

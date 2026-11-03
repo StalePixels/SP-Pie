@@ -69,9 +69,16 @@ bool CFramePresenter::Initialize (uint32_t *pPicture, unsigned nPitch)
 	fusesound_devices (0, m_Control.Devices ());
 	m_Interlace.Reset ();
 	m_nMixing = -1;
+	m_nMixedLines = 0;
+	for (unsigned y = 0; y < PictureHeight; y++)
+	{
+		m_LineMixed[y] = false;
+	}
 
 	return true;
 }
+
+static_assert (CInterlaceDetector::MaxLines == PictureHeight, "a detector line per picture line");
 
 const uint32_t *CFramePresenter::WeavePicture (void) const
 {
@@ -80,10 +87,12 @@ const uint32_t *CFramePresenter::WeavePicture (void) const
 
 void CFramePresenter::WritePicture (void)
 {
+	// Mixing always mixes every line; detection, the lines that flip.
 	uint8_t nDisplay = m_Control.Display ();
-	bool bMix = (nDisplay & CControlPorts::DisplayInterlaceOn)
-		    || ((nDisplay & CControlPorts::DisplayInterlaceAuto) && m_Interlace.On ());
-	m_nMixing = bMix ? nDisplay & CControlPorts::DisplayModeMask : -1;
+	bool bAlways = (nDisplay & CControlPorts::DisplayInterlaceOn) != 0;
+	bool bAuto = (nDisplay & CControlPorts::DisplayInterlaceAuto) != 0;
+	int nMode = nDisplay & CControlPorts::DisplayModeMask;
+	m_nMixedLines = 0;
 
 	for (unsigned y = 0; y < PictureHeight; y++)
 	{
@@ -91,7 +100,11 @@ void CFramePresenter::WritePicture (void)
 		const uint32_t *pOld = m_pPrevious + y * PictureWidth;
 		uint32_t *pOut = m_pOutput + y * m_nOutputPitch;
 
-		switch (m_nMixing)
+		bool bMix = bAlways || (bAuto && m_Interlace.On (y));
+		m_LineMixed[y] = bMix;
+		m_nMixedLines += bMix;
+
+		switch (bMix ? nMode : -1)
 		{
 		case CControlPorts::DisplayModeAverage:
 			for (unsigned x = 0; x < PictureWidth; x++)
@@ -112,6 +125,7 @@ void CFramePresenter::WritePicture (void)
 			break;
 		}
 	}
+	m_nMixing = m_nMixedLines != 0 ? nMode : -1;
 }
 
 void CFramePresenter::Reset (uint32_t nFirstFrame)
@@ -177,7 +191,7 @@ void CFramePresenter::RunFrame (uint32_t nFrame)
 	fuseula_end_frame ();
 	if (m_pFuse != 0)
 	{
-		m_Interlace.Frame (PictureHash (m_pFuse, PictureWidth, PictureWidth, PictureHeight));
+		m_Interlace.Frame (fuseula_line_screens (), PictureHeight);
 	}
 
 	const int32_t *pSamples;

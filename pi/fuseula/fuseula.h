@@ -87,6 +87,13 @@ void fuseula_reset (uint32_t nTState);
    border outside Fuse's area. The picture then holds the whole frame. */
 void fuseula_end_frame (void);
 
+/* The screen bank, 5 or 7 (port 0x7FFD bit 3), that Fuse showed on each of
+   the FUSEULA_PICTURE_HEIGHT picture lines of the frame last ended: the
+   bank of the line's first screen chunk, at that chunk's T-state. Lines
+   above and below the screen take the bank at the same place in their
+   line. A 48K always shows bank 5. */
+const uint8_t *fuseula_line_screens (void);
+
 /* State, for the tests. */
 uint8_t fuseula_ram (unsigned nBank, unsigned nOffset);
 uint8_t fuseula_border (void);

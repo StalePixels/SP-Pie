@@ -81,16 +81,16 @@ The border feature applies from the Spectrum frame that holds the data write.
 
 ## Display
 
-Feature 3 sets interlace mixing. Some programs show two pictures in turn, one in each frame, so that the eye mixes them on a CRT: more colours or finer detail than one frame holds. On HDMI the same program flickers, and a frame that SP-Pie skips or repeats shows one of the two pictures twice. Mixing shows the last two complete Spectrum frames together instead.
+Feature 3 sets interlace mixing. Some programs show two pictures in turn, one in each frame, by flipping between the normal and the shadow screen (port 0x7FFD bit 3), so that the eye mixes them on a CRT: more colours or finer detail than one frame holds. On HDMI the same program flickers, and a frame that SP-Pie skips or repeats shows one of the two pictures twice. Mixing shows the last two complete Spectrum frames together instead.
 
-With bit 0 set, SP-Pie mixes when it finds the alternation. A frame alternates when its picture is the same as the picture two frames before and differs from the one just before; the program can flip between the normal and the shadow screen (port 0x7FFD bit 3) or rewrite one screen. Mixing starts after 8 alternating frames in a row and stops after 4 frames in a row that do not alternate. A screen flip on its own is not taken as alternation: a game that draws into one screen while it shows the other flips every frame too, with a new picture each time, and must not be mixed. With bit 1 set, SP-Pie mixes all the time, whatever bit 0 says.
+With bit 0 set, SP-Pie decides line by line, from the screen bank alone. For each line of the 352 x 270 picture in each frame, it records the screen bank that the line was drawn from: 0x7FFD bit 3 at the time the line's first screen pixels are drawn. A program can write 0x7FFD in the middle of a frame, so different lines of one frame can come from different banks. A line flips when its bank differs from its bank in the frame before. A line starts to mix after 2 frames in a row in which it flips, and stops after 4 frames in a row in which it does not flip. Only the lines that mix are mixed; the other lines show the newest frame. SP-Pie does not compare the pictures. A program that rewrites one screen with two pictures in turn is not mixed, and a game that flips the screens every frame, with a new picture each time, is mixed. On a 48K, which has no shadow screen, no line flips. With bit 1 set, SP-Pie mixes every line all the time, whatever bit 0 says.
 
 Bits 3 and 2 give the mix:
 
 | Bits 3, 2 | Mode | What the display shows |
 |---|---|---|
-| 00 | Average | Each pixel half of the newest frame and half of the frame before. |
-| 01 | CRT-style | 5/8 of the newest frame and 3/8 of the frame before. On a CRT the eye sees the picture that the beam has just drawn brighter than the one before it, which has faded. This weight leans towards the newest frame while both stay clearly visible. It is a chosen weight, not a measurement. |
+| 00 | Average | Each pixel of a line that mixes is half of the newest frame and half of the same pixel in the frame before. |
+| 01 | CRT-style | 5/8 of the newest frame and 3/8 of the frame before, on each line that mixes. On a CRT the eye sees the picture that the beam has just drawn brighter than the one before it, which has faded. This weight leans towards the newest frame while both stay clearly visible. It is a chosen weight, not a measurement. |
 | 10 | Line weave | Not available: it needs a frame buffer with two lines for each display line, and the firmware does not stretch such a buffer. It shows the newest frame. |
 | 11 | Reserved | A data write with this mode is ignored. |
 

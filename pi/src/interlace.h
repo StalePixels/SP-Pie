@@ -2,24 +2,27 @@
 // interlace.h
 //
 // Interlace mixing (control-port feature 3). Some programs show two
-// pictures in turn, one each frame, so that the eye mixes them: more
-// colours, or finer detail, than one Spectrum frame holds. They either
-// flip between the normal and the shadow screen (port 0x7FFD bit 3) or
-// rewrite one screen each frame. On a CRT the eye mixes them; on HDMI the
-// alternation shows as flicker, and a skipped or repeated frame shows one
-// of the two pictures twice. Mixing shows the average of the last two
-// complete Spectrum frames instead: half each, the CRT-style weight, or
-// the two frames on alternate lines of the frame buffer (the line weave).
+// pictures in turn, one each frame, by flipping between the normal and the
+// shadow screen (port 0x7FFD bit 3), so that the eye mixes them: more
+// colours, or finer detail, than one Spectrum frame holds. On a CRT the eye
+// mixes them; on HDMI the alternation shows as flicker, and a skipped or
+// repeated frame shows one of the two pictures twice. Mixing shows, on each
+// line that flips, that line of the newest complete Spectrum frame blended
+// with the same line of the frame before: half each, or the CRT-style
+// weight. The line weave mode needs a second frame buffer line for each
+// display line, which the frame buffer does not have (picture.h), so it
+// shows the newest frame.
 //
-// CInterlaceDetector decides from the pictures themselves, whichever
-// screen they come from. A frame alternates when its picture equals the
-// picture two frames back and differs from the one just before. Mixing
-// starts after OnFrames alternating frames in a row and stops after
-// OffFrames frames in a row that do not alternate. Normal animation,
-// double-buffered at 50 frames per second included, shows a new picture
-// each frame, which is never the one two frames back, so it does not
-// start mixing. A screen flip alone is not taken as alternation for this
-// reason. The pictures are compared by a 64-bit hash.
+// CInterlaceDetector decides line by line from the screen bank alone: for
+// each picture line of each frame, the bank Fuse showed on that line
+// (fuseula_line_screens ()). Programs write 0x7FFD in the middle of a
+// frame, so the lines of one frame can come from different banks. A line
+// flips when its bank differs from its bank in the frame before. A line
+// starts mixing after OnFrames frames in a row in which it flips, and stops
+// after OffFrames frames in a row in which it does not. The pictures are
+// not compared: a program that rewrites one screen with two pictures in
+// turn does not mix, and a program that flips screens every frame does,
+// whatever the screens hold.
 //
 // No platform dependencies.
 //
@@ -31,33 +34,6 @@
 #include <stdint.h>
 
 namespace sppie {
-
-// A hash of nCount pixels.
-inline uint64_t PictureHash (const uint32_t *pPixels, unsigned nPitch, unsigned nWidth,
-			     unsigned nHeight)
-{
-	// Four independent multiply-xor lanes, so the multiplies overlap.
-	const uint64_t Prime = 0x100000001B3ull;
-	uint64_t h[4] = { 0xCBF29CE484222325ull, 0x84222325CBF29CE4ull,
-			  0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full };
-	for (unsigned y = 0; y < nHeight; y++)
-	{
-		const uint32_t *pRow = pPixels + y * nPitch;
-		unsigned x = 0;
-		for (; x + 4 <= nWidth; x += 4)
-		{
-			for (unsigned i = 0; i < 4; i++)
-			{
-				h[i] = (h[i] ^ pRow[x + i]) * Prime;
-			}
-		}
-		for (; x < nWidth; x++)
-		{
-			h[0] = (h[0] ^ pRow[x]) * Prime;
-		}
-	}
-	return h[0] ^ (h[1] * 3) ^ (h[2] * 5) ^ (h[3] * 7);
-}
 
 // The average of two 0xAARRGGBB pixels, each channel rounded down.
 inline uint32_t MixPixels (uint32_t a, uint32_t b)
@@ -103,65 +79,80 @@ inline void WeaveLine (const uint32_t *pDisplayRow, const uint32_t *pWeaveRow,
 class CInterlaceDetector
 {
 public:
-	static const unsigned OnFrames	= 8;	// alternating frames in a row to start
+	static const unsigned MaxLines	= 270;	// lines of the picture
+	static const unsigned OnFrames	= 2;	// flipping frames in a row to start
 	static const unsigned OffFrames	= 4;	// other frames in a row to stop
 
 	CInterlaceDetector (void)	{ Reset (); }
 
 	void Reset (void)
 	{
-		m_nHashes = 0;
-		m_nRun = 0;
-		m_nMiss = 0;
-		m_bOn = false;
+		m_bFirst = true;
+		for (unsigned y = 0; y < MaxLines; y++)
+		{
+			m_Line[y].nBank = 0;
+			m_Line[y].nRun = 0;
+			m_Line[y].nMiss = 0;
+			m_Line[y].bOn = false;
+		}
 	}
 
-	// The hash of each complete Spectrum frame's picture, in order.
-	void Frame (uint64_t nHash)
+	// The screen bank of each line, pBanks[0] to pBanks[nLines - 1], of
+	// each complete Spectrum frame, in order.
+	void Frame (const uint8_t *pBanks, unsigned nLines)
 	{
-		bool bAlternates = m_nHashes >= 2 && nHash == m_Hash[1] && nHash != m_Hash[0];
+		if (nLines > MaxLines)
+		{
+			nLines = MaxLines;
+		}
+		for (unsigned y = 0; y < nLines; y++)
+		{
+			TLine &rLine = m_Line[y];
+			bool bFlips = !m_bFirst && pBanks[y] != rLine.nBank;
+			rLine.nBank = pBanks[y];
 
-		m_Hash[1] = m_Hash[0];
-		m_Hash[0] = nHash;
-		if (m_nHashes < 2)
-		{
-			m_nHashes++;
-		}
-
-		if (bAlternates)
-		{
-			m_nMiss = 0;
-			if (m_nRun < OnFrames)
+			if (bFlips)
 			{
-				m_nRun++;
+				rLine.nMiss = 0;
+				if (rLine.nRun < OnFrames)
+				{
+					rLine.nRun++;
+				}
+				if (rLine.nRun >= OnFrames)
+				{
+					rLine.bOn = true;
+				}
 			}
-			if (m_nRun >= OnFrames)
+			else
 			{
-				m_bOn = true;
-			}
-		}
-		else
-		{
-			m_nRun = 0;
-			if (m_nMiss < OffFrames)
-			{
-				m_nMiss++;
-			}
-			if (m_nMiss >= OffFrames)
-			{
-				m_bOn = false;
+				rLine.nRun = 0;
+				if (rLine.nMiss < OffFrames)
+				{
+					rLine.nMiss++;
+				}
+				if (rLine.nMiss >= OffFrames)
+				{
+					rLine.bOn = false;
+				}
 			}
 		}
+		m_bFirst = false;
 	}
 
-	bool On (void) const	{ return m_bOn; }
+	// Line y is mixing.
+	bool On (unsigned y) const	{ return y < MaxLines && m_Line[y].bOn; }
 
 private:
-	uint64_t	m_Hash[2];	// the last frame's, and the one before
-	unsigned	m_nHashes;
-	unsigned	m_nRun;
-	unsigned	m_nMiss;
-	bool		m_bOn;
+	struct TLine
+	{
+		uint8_t		nBank;		// the bank in the frame before
+		uint8_t		nRun;		// flipping frames in a row, up to OnFrames
+		uint8_t		nMiss;		// other frames in a row, up to OffFrames
+		bool		bOn;
+	};
+
+	TLine		m_Line[MaxLines];
+	bool		m_bFirst;	// no frame seen yet
 };
 
 }
