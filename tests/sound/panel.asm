@@ -18,14 +18,15 @@
 ; Keys on the main page:
 ;   cursor up, down   move the cyan bar (CAPS SHIFT with 7 and 6); they repeat
 ;   ENTER             toggle the selected item
-;   1 to 6            devices: AY, TurboSound, beeper, Covox 0xFB, 0xDD, 0xDF
-;   7                 border extension to 16:9
+;   1 to 7            devices: AY, TurboSound, beeper, Covox 0xFB, 0xDD, 0xDF,
+;                     Pentagon Gigascreen
+;   8                 border extension to 16:9
 ;   H                 HUD
 ;   G                 open the GIGASCREEN page
 ; Keys on the GIGASCREEN page:
 ;   cursor up, down, ENTER   as on the main page; ENTER steps the value
 ;   1                 Gigascreen: Off, Auto, Always
-;   2                 Show as: 50/50 blend, CRT blend, Double high
+;   2                 Show as: 50/50 blend, CRT blend, Double high, Line alternate
 ;   3                 Auto watches: Whole screen, Each line
 ;   4                 Double high top: Normal screen, Shadow screen
 ;   G, SPACE, BREAK   back to the main page
@@ -59,7 +60,7 @@ DISP_PAGE       EQU 0x10            ; detection method: 1 per page, 0 per line
 DISP_BANK7      EQU 0x40            ; double high: 1 bank 7 first, 0 bank 5 first
 DISP_DEFAULT    EQU DISP_AUTO|DISP_PAGE
 
-NITEMS          EQU 8               ; main page
+NITEMS          EQU 9               ; main page
 NSUBITEMS       EQU 4               ; GIGASCREEN page
 ITEM_SIZE       EQU 8
 REPEAT_DELAY    EQU 25                  ; scans before a cursor key repeats
@@ -357,14 +358,14 @@ activate:
         or c
         ld (state+VAR_DISPLAY),a
         jr .send
-.mode:  ld e,VAR_DISPLAY                ; 50/50 blend, CRT blend, double high
+.mode:  ld e,VAR_DISPLAY                ; 50/50 blend, CRT blend, double high, line alternate
         ld a,(state+VAR_DISPLAY)
         ld b,a
         rrca
         rrca
         and 3
         inc a
-        cp 3
+        cp 4
         jr c,.ok
         xor a
 .ok:    add a,a
@@ -493,7 +494,8 @@ draw_row:
         call print_ff
         ld a,(r_row)
         ld b,a
-        ld c,5
+        ld a,(lbl_col)
+        ld c,a
         call put_at
         ld hl,(r_lbl)
         call print_ff
@@ -572,6 +574,8 @@ show_main:
         ld (cur_n),a
         ld a,24
         ld (val_col),a
+        ld a,5
+        ld (lbl_col),a
         xor a
         ld (val_dy),a
         ld a,(main_cursor)
@@ -591,6 +595,8 @@ show_sub:
         ld (cur_n),a
         ld a,7
         ld (val_col),a
+        ld a,5
+        ld (lbl_col),a
         ld a,1
         ld (val_dy),a
         xor a
@@ -682,9 +688,11 @@ items:  DB '1',3,VAR_DEVICES,0x01
         DW lbl_dd,vals_onoff
         DB '6',8,VAR_DEVICES,0x20
         DW lbl_df,vals_onoff
-        DB '7',10,VAR_BORDER,0x01
+        DB '7',9,VAR_DEVICES,0x40
+        DW lbl_pent,vals_onoff
+        DB '8',11,VAR_BORDER,0x01
         DW lbl_border,vals_onoff
-        DB 'h',16,VAR_DEBUG,0x01
+        DB 'h',17,VAR_DEBUG,0x01
         DW lbl_hud,vals_onoff
 
 subitems:
@@ -703,7 +711,8 @@ lbl_beeper: DB "3 Beeper",255
 lbl_fb:     DB "4 Covox 0xFB",255
 lbl_dd:     DB "5 Covox 0xDD",255
 lbl_df:     DB "6 Covox 0xDF",255
-lbl_border: DB "7 Extend to 16:9",255
+lbl_pent:   DB "7 Pentagon Giga",255
+lbl_border: DB "8 Extend to 16:9",255
 lbl_hud:    DB "H HUD",255
 lbl_giga:   DB "1 Gigascreen",255
 lbl_show:   DB "2 Show as",255
@@ -731,6 +740,8 @@ cur_items:
         DW 0
 cur_n:  DB 0
 val_col:
+        DB 0
+lbl_col:
         DB 0
 val_dy: DB 0                            ; rows from the label to the value
 r_vals: DW 0
@@ -763,35 +774,34 @@ txt_clr:
 
 ; Value names of the two step items, 16 bytes each, in the order of the bits.
 ; Gigascreen is bits 1 and 0: 00 Off, 01 Auto, 10 Always, 11 never selected.
-; Show as is mode bits 3 and 2: 00, 01, 10, and 11 reserved, never selected or
-; sent.
+; Show as is mode bits 3 and 2: 00, 01, 10, 11.
 giga_names:
-        DB 16,0,"Off        ",255
-        DS 2
-        DB 16,0,"Auto       ",255
-        DS 2
-        DB 16,0,"Always     ",255
-        DS 2
-        DB 16,0,"Reserved   ",255
-        DS 2
+        DB "Off",255
+        DS 12
+        DB "Auto",255
+        DS 11
+        DB "Always",255
+        DS 9
+        DB "Reserved",255
+        DS 7
 mode_names:
-        DB 16,0,"50/50 blend",255
-        DS 2
-        DB 16,0,"CRT blend  ",255
-        DS 2
-        DB 16,0,"Double high",255
-        DS 2
-        DB 16,0,"Reserved   ",255
-        DS 2
+        DB "50/50 blend",255
+        DS 4
+        DB "CRT blend",255
+        DS 6
+        DB "Double high",255
+        DS 4
+        DB "Line alternate",255
+        DS 1
 
 ; AT is 22,row,column. INK is 16, PAPER 17, BRIGHT 19.
 txt_main:
         DB 22,0,4,17,0,16,7,19,1,"SP-Pie Panel     "
         DB 22,2,4,17,7,16,1,19,1,"DEVICES"
-        DB 22,9,4,"BORDER"
-        DB 22,12,4,"GIGASCREEN"
-        DB 22,13,5,17,7,16,0,19,1,"G Display settings"
-        DB 22,15,4,16,1,"DEBUG"
+        DB 22,10,4,"BORDER"
+        DB 22,13,4,"GIGASCREEN"
+        DB 22,14,5,17,7,16,0,19,1,"G Display settings"
+        DB 22,16,4,16,1,"DEBUG"
         DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press a key.  "
         DB 22,19,1,"S send all  R defaults  Q quit",255
 txt_sub:

@@ -18,7 +18,7 @@ Write the feature number to the select port, then the value to the data port. Th
 | Feature | Use | Default |
 | --- | --- | --- |
 | 0x00 | Reserved. | |
-| 0x01 | Attached devices. Bit 0 AY, bit 1 TurboSound, bit 2 beeper, bit 3 Covox 0xFB, bit 4 Covox 0xDD, bit 5 Covox 0xDF. | 0x07 |
+| 0x01 | Attached devices. Bit 0 AY, bit 1 TurboSound, bit 2 beeper, bit 3 Covox 0xFB, bit 4 Covox 0xDD, bit 5 Covox 0xDF, bit 6 Pentagon Gigascreen (port 0xEFF7). | 0x07 |
 | 0x02 | Border. Bit 0 extends the border to 16:9. | 0x00 |
 | 0x03 | Display. The bits are in the list below. | 0x11 |
 | 0xFF | Debug. Bit 0 shows the HUD. | 0x01 |
@@ -29,7 +29,7 @@ Feature 3, display:
 | --- | --- |
 | 0 | Automatic interlace detection. Default on. |
 | 1 | Mixing locked on, whatever the detection says. |
-| 3 and 2 | Mode. 00 is the 50/50 mix, 01 the CRT-style mix, 10 double high: both screens interleaved as alternate lines, 256 x 384 at 50 fps. 11 is reserved and must not be sent. |
+| 3 and 2 | Mode. 00 is the 50/50 mix, 01 the CRT-style mix, 10 double high: both screens interleaved as alternate lines, 256 x 384 at 50 fps. 11 is line alternate. |
 | 5 and 4 | Detection method. 00 per line, 01 per page. Default per page. 10 and 11 are reserved and must not be sent. |
 | 6 | First bank of the double-high mode. 0 is bank 5 (primary) first, 1 is bank 7 (secondary) first. Default 0. |
 | 7 | Reserved. |
@@ -95,7 +95,8 @@ Main page:
 | Covox 0xFB | 1, bit 3 | 4 |
 | Covox 0xDD | 1, bit 4 | 5 |
 | Covox 0xDF | 1, bit 5 | 6 |
-| Extend to 16:9 | 2, bit 0 | 7 |
+| Pentagon Gigascreen (port #EFF7). The screen shows "Pentagon Giga". | 1, bit 6 | 7 |
+| Extend to 16:9 | 2, bit 0 | 8 |
 | HUD | 0xFF, bit 0 | H |
 | Open the GIGASCREEN page | | G |
 
@@ -104,12 +105,12 @@ GIGASCREEN page. Each row shows its current value on a line under its label.
 | Row | Values | Feature 3 | Key |
 | --- | --- | --- | --- |
 | Gigascreen | Off, Auto, Always | Off: bits 0 and 1 clear. Auto: bit 0 set, bit 1 clear. Always: bit 1 set, bit 0 clear. | 1 |
-| Show as | 50/50 blend, CRT blend, Double high | bits 3 and 2: 00, 01, 10 | 2 |
+| Show as | 50/50 blend, CRT blend, Double high, Line alternate | bits 3 and 2: 00, 01, 10, 11 | 2 |
 | Auto watches | Whole screen, Each line | bits 5 and 4: 01, 00 | 3 |
 | Double high top | Normal screen, Shadow screen | bit 6: 0 (bank 5 first), 1 (bank 7 first) | 4 |
 | Back to the main page | | | G, SPACE or BREAK |
 
-Each key steps its row to the next value and wraps round: Off, Auto, Always, Off for the first row. The panel never sends the reserved mode, the reserved methods or bit 7.
+Each key steps its row to the next value and wraps round: Off, Auto, Always, Off for the first row. The panel never sends the reserved methods or bit 7.
 
 - Cursor up and down (CAPS SHIFT with 7 and 6) move the cyan bar, and repeat while held. ENTER toggles or steps the selected row.
 - A row key moves the bar to that row and acts at once.
