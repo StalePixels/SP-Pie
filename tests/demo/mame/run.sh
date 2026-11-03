@@ -13,9 +13,9 @@ rm -rf "$out"; mkdir -p "$out"
 cd "$mame_dir"
 extra=""
 [ "$machine" = spec128 ] && extra="-ay_slot ay_turbosound"
-START=${3:-30} MANIFEST=$out/manifest.txt TYPE_TEXT='\r' timeout 300 ./mame-sinclair "$machine" \
+START=${3:-240} MANIFEST=$out/manifest.txt TYPE_TEXT='\r' timeout 300 ./mame-sinclair "$machine" \
     -rompath "$PWD/roms" $extra -cass "$here/../build/demo.tap" \
     -video none -sound none -nothrottle -skip_gameinfo \
-    -autoboot_script "$here/demo_keys.lua" -seconds_to_run $(( ${3:-30} + 18 )) \
+    -autoboot_script "$here/demo_keys.lua" -seconds_to_run $(( ${3:-240} + 24 )) \
     -snapshot_directory "$out" -snapname %i > "$out/mame.log" 2>&1
 cat "$out/manifest.txt"
