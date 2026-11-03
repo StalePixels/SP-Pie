@@ -20,7 +20,19 @@ Write the feature number to the select port, then the value to the data port. Th
 | 0x00 | Reserved. | |
 | 0x01 | Attached devices. Bit 0 AY, bit 1 TurboSound, bit 2 beeper, bit 3 Covox 0xFB, bit 4 Covox 0xDD, bit 5 Covox 0xDF. | 0x07 |
 | 0x02 | Border. Bit 0 extends the border to 16:9. | 0x00 |
+| 0x03 | Display. The bits are in the list below. | 0x11 |
 | 0xFF | Debug. Bit 0 shows the HUD. | 0x01 |
+
+Feature 3, display:
+
+| Bits | Use |
+| --- | --- |
+| 0 | Automatic interlace detection. Default on. |
+| 1 | Mixing locked on, whatever the detection says. |
+| 3 and 2 | Mode. 00 is the 50/50 mix, 01 the CRT-style mix, 10 double high: both screens interleaved as alternate lines, 256 x 384 at 50 fps. 11 is reserved and must not be sent. |
+| 5 and 4 | Detection method. 00 per line, 01 per page. Default per page. 10 and 11 are reserved and must not be sent. |
+| 6 | First bank of the double-high mode. 0 is bank 5 (primary) first, 1 is bank 7 (secondary) first. Default 0. |
+| 7 | Reserved. |
 
 A Spectrum reset restores the defaults.
 
@@ -71,6 +83,10 @@ OUT 1083,255: OUT 1339,0
 
 A control panel for the board, drawn like the Spectrum 128K boot menu: a black title bar with a rainbow at the right end, a white menu box, and a cyan bar on the selected row. Every change goes to the board at once, as the feature number to port 0x043B and then the value to port 0x053B.
 
+The main page has the devices, the border and the debug item. The display settings (feature 3) are on the GIGASCREEN page, which G opens from the main page.
+
+Main page:
+
 | Row | Feature | Key |
 | --- | --- | --- |
 | AY chip | 1, bit 0 | 1 |
@@ -80,15 +96,25 @@ A control panel for the board, drawn like the Spectrum 128K boot menu: a black t
 | Covox 0xDD | 1, bit 4 | 5 |
 | Covox 0xDF | 1, bit 5 | 6 |
 | Extend to 16:9 | 2, bit 0 | 7 |
-| Auto interlace | 3, bit 0 | 8 |
-| Mixing always on | 3, bit 1 | 9 |
-| Mode: 50/50 mix, CRT-style mix, line weave | 3, bits 2 and 3 | M |
-| Detection per page (off: per line) | 3, bit 4 | P |
 | HUD | 0xFF, bit 0 | H |
+| Open the GIGASCREEN page | | G |
 
-- Cursor up and down (CAPS SHIFT with 7 and 6) move the cyan bar, and repeat while held. ENTER toggles the selected row, or steps the display mode.
+GIGASCREEN page:
+
+| Row | Feature 3 | Key |
+| --- | --- | --- |
+| Detection, on or off | bit 0 | 1 |
+| Locked, on or off | bit 1 | 2 |
+| Mode: 50/50 mix, CRT-style mix, double high | bits 3 and 2 | 3 |
+| Method: per page or per line | bit 4 | 4 |
+| First bank: primary (bank 5) or secondary (bank 7) | bit 6 | 5 |
+| Back to the main page | | G, SPACE or BREAK |
+
+The mode steps through the three defined modes only. The panel never sends the reserved mode, the reserved methods or bit 7.
+
+- Cursor up and down (CAPS SHIFT with 7 and 6) move the cyan bar, and repeat while held. ENTER toggles the selected row, or steps the mode.
 - A row key moves the bar to that row and acts at once.
-- S sends every value again. R restores the documented defaults and sends them. Q quits.
+- S sends every value again. R restores the documented defaults and sends them. Q quits. All three work on both pages.
 
 The ports are write-only, so the panel cannot read the board. It keeps its own copy of each value, starting at the documented defaults, and shows that copy. A panel that started after another program changed a feature, or after a board that did not reset, can differ from the board. Press R or S to make them agree.
 
@@ -170,7 +196,7 @@ Draws eight horizontal stripes in the border, then switches the border extension
 - With the extension on, each line of the areas left and right of the picture takes the colour of that line's edge pixel, so the stripes fill the 16:9 screen.
 - The extension is off at the end.
 
-The `mame/panel_keys.lua` script runs the panel in MAME and presses CAPS SHIFT with 6 and 7, and ENTER, through the emulated keyboard matrix. Use it with `-autoboot_script`.
+The `mame/panel_keys.lua` script runs the panel in MAME and presses CAPS SHIFT with 6 and 7, and ENTER, through the emulated keyboard matrix. The `mame/panel_pages.lua` script opens and closes the GIGASCREEN page, presses each of its keys and takes a screenshot after each one. It prints the panel's own state table at each screenshot. Set `STATE_ADDR` to the address of the label `state` in `build/lst/panel-tap.lst`. Use both with `-autoboot_script`.
 
 ## Reference sounds from MAME
 

@@ -12,19 +12,26 @@
 ; 0x053B and 0xFE (through the ROM, for the border), so no write can page a
 ; 128K or reach the AY.
 ;
-; Keys:
+; The main page has the devices, the border and the debug item. The display
+; settings (feature 3) are on the GIGASCREEN page, opened with G.
+;
+; Keys on the main page:
 ;   cursor up, down   move the cyan bar (CAPS SHIFT with 7 and 6); they repeat
-;   ENTER             toggle the selected item, or step the display mode
+;   ENTER             toggle the selected item
 ;   1 to 6            devices: AY, TurboSound, beeper, Covox 0xFB, 0xDD, 0xDF
 ;   7                 border extension to 16:9
-;   8                 automatic interlace detection
-;   9                 mixing always on
-;   M                 step the display mode: 50/50 mix, CRT-style mix, line weave
-;   P                 interlace detection per page (on) or per line (off)
 ;   H                 HUD
-;   S                 send every value again
-;   R                 restore the defaults and send them
-;   Q                 quit
+;   G                 open the GIGASCREEN page
+; Keys on the GIGASCREEN page:
+;   cursor up, down, ENTER   as on the main page; ENTER steps the mode
+;   1                 automatic interlace detection
+;   2                 mixing locked on
+;   3                 mode: 50/50 mix, CRT-style mix, double high
+;   4                 detection method: per line or per page
+;   5                 first bank of the double-high mode: primary or secondary
+;   G, SPACE, BREAK   back to the main page
+; Keys on both pages:
+;   S send every value again, R restore the defaults and send them, Q quit.
 ; A number or letter key moves the bar to its row and acts at once.
 ;
 ; The program scans the keyboard itself: IN from port 0xFE with one half-row
@@ -46,12 +53,16 @@ VAR_DISPLAY     EQU 2
 VAR_DEBUG       EQU 3
 
 ; Feature 3 bits.
-DISP_AUTO       EQU 0x01
-DISP_ALWAYS     EQU 0x02
-DISP_MODE_MASK  EQU 0x0C
+DISP_AUTO       EQU 0x01            ; automatic interlace detection
+DISP_LOCKED     EQU 0x02            ; mixing locked on
+DISP_MODE_MASK  EQU 0x0C            ; 00 50/50 mix, 01 CRT-style mix, 10 double high
 DISP_PAGE       EQU 0x10            ; detection method: 1 per page, 0 per line
+DISP_BANK7      EQU 0x40            ; double high: 1 bank 7 first, 0 bank 5 first
+DISP_DEFAULT    EQU DISP_AUTO|DISP_PAGE
 
-NITEMS          EQU 12
+NITEMS          EQU 8               ; main page
+NSUBITEMS       EQU 5               ; GIGASCREEN page
+ITEM_SIZE       EQU 8
 REPEAT_DELAY    EQU 25                  ; scans before a cursor key repeats
 REPEAT_RATE     EQU 5                   ; scans between repeats
 PAPER_WHITE     EQU 7
@@ -70,11 +81,13 @@ PAPER_CYAN      EQU 5
         ld (SYS_MASK_P),a
         ld (SYS_MASK_T),a
         ld (cursor),a
+        ld (page),a
+        ld (main_cursor),a
         call snd_init
         call draw_box
-        ld hl,txt_static
+        ld hl,txt_note
         call print_ff
-        call draw_all_rows
+        call show_main
 
 key_loop:
         call frame_delay
@@ -87,6 +100,10 @@ key_loop:
         jp z,do_send_all
         cp 'r'
         jp z,do_defaults
+        cp 'g'
+        jp z,do_g
+        cp ' '
+        jp z,do_space
         cp 13
         jp z,do_enter
         cp 10
@@ -94,16 +111,18 @@ key_loop:
         cp 11
         jp z,do_up
         ld b,a                          ; look the key up in the item table
-        ld hl,items
+        ld hl,(cur_items)
         ld c,0
 .find:  ld a,(hl)
         cp b
         jr z,.hit
-        ld de,6
+        ld de,ITEM_SIZE
         add hl,de
         inc c
+        ld a,(cur_n)
+        ld d,a
         ld a,c
-        cp NITEMS
+        cp d
         jr nz,.find
         jp key_loop
 .hit:   ld a,(cursor)                   ; move the bar to the row, then act
@@ -118,6 +137,21 @@ key_loop:
         call activate
         jp key_loop
 
+do_g:   ld a,(page)
+        or a
+        jr nz,do_space
+        ld a,(cursor)
+        ld (main_cursor),a
+        call show_sub
+        jp key_loop
+
+do_space:
+        ld a,(page)
+        or a
+        jp z,key_loop
+        call show_main
+        jp key_loop
+
 do_enter:
         ld a,(cursor)
         call activate
@@ -127,7 +161,11 @@ do_down:
         ld a,(cursor)
         ld b,a
         inc a
-        cp NITEMS
+        ld c,a
+        ld a,(cur_n)
+        ld d,a
+        ld a,c
+        cp d
         jr c,move
         xor a
         jr move
@@ -136,7 +174,7 @@ do_up:  ld a,(cursor)
         ld b,a
         or a
         jr nz,.dec
-        ld a,NITEMS
+        ld a,(cur_n)
 .dec:   dec a
 move:   ld (cursor),a
         push af
@@ -260,15 +298,17 @@ scan_keys:
         ret
 
 ; Half-rows: the high byte of the port address, then the codes of bits 0 to 4.
-; 0 means a key the panel does not use.
+; 0 means a key the panel does not use. Every key the panel acts on is in
+; this table: 1 to 9, Q, R, S, G, H, ENTER and SPACE (BREAK is CAPS SHIFT with
+; SPACE).
 keymap: DB 0xF7,'1','2','3','4','5'
         DB 0xEF,0,'9','8','7','6'
         DB 0xFB,'q',0,0,'r',0
-        DB 0xDF,'p',0,0,0,0
-        DB 0xFD,0,'s',0,0,0
+        DB 0xDF,0,0,0,0,0
+        DB 0xFD,0,'s',0,0,'g'
         DB 0xBF,13,0,0,0,'h'
         DB 0xFE,0,0,0,0,0
-        DB 0x7F,0,0,'m',0,0
+        DB 0x7F,' ',0,0,0,0
 
 prev_raw:
         DB 0
@@ -282,12 +322,10 @@ activate:
         ld (a_idx),a
         ld l,a
         ld h,0
-        ld d,h
-        ld e,l
         add hl,hl
-        add hl,de
         add hl,hl
-        ld de,items
+        add hl,hl                       ; ITEM_SIZE is 8
+        ld de,(cur_items)
         add hl,de
         inc hl                          ; skip the key
         inc hl                          ; skip the row
@@ -385,7 +423,10 @@ draw_all_rows:
         call draw_row
         pop af
         inc a
-        cp NITEMS
+        ld b,a
+        ld a,(cur_n)
+        cp b
+        ld a,b
         jr nz,.l
         ret
 
@@ -395,12 +436,10 @@ draw_row:
         ld (r_idx),a
         ld l,a
         ld h,0
-        ld d,h
-        ld e,l
         add hl,hl
-        add hl,de
         add hl,hl
-        ld de,items
+        add hl,hl
+        ld de,(cur_items)
         add hl,de
         inc hl
         ld a,(hl)
@@ -416,6 +455,11 @@ draw_row:
         inc hl
         ld d,(hl)
         ld (r_lbl),de
+        inc hl
+        ld e,(hl)
+        inc hl
+        ld d,(hl)
+        ld (r_vals),de
         ld a,(cursor)
         ld b,a
         ld a,(r_idx)
@@ -443,7 +487,8 @@ draw_row:
         jr z,.mode
         ld a,(r_row)
         ld b,a
-        ld c,24
+        ld a,(val_col)
+        ld c,a
         call put_at
         ld a,(r_var)
         ld e,a
@@ -452,13 +497,19 @@ draw_row:
         add hl,de
         ld a,(r_mask)
         and (hl)
-        ld hl,txt_on
+        ld hl,(r_vals)                  ; the flags still hold the bit test
         jr nz,.val
-        ld hl,txt_off
-.val:   jp print_ff
+        inc hl                          ; the second word is the text for a clear bit
+        inc hl
+.val:   ld e,(hl)
+        inc hl
+        ld d,(hl)
+        ex de,hl
+        jp print_ff
 .mode:  ld a,(r_row)
         ld b,a
-        ld c,13
+        ld a,(val_col)
+        ld c,a
         call put_at
         ld a,(state+VAR_DISPLAY)
         rrca
@@ -473,6 +524,57 @@ draw_row:
         ld hl,mode_names
         add hl,de
         jp print_ff
+
+; Show the main page.
+show_main:
+        xor a
+        ld (page),a
+        ld hl,items
+        ld (cur_items),hl
+        ld a,NITEMS
+        ld (cur_n),a
+        ld a,24
+        ld (val_col),a
+        ld a,(main_cursor)
+        ld (cursor),a
+        call clear_box
+        ld hl,txt_main
+        call print_ff
+        jp draw_all_rows
+
+; Show the GIGASCREEN page, with the bar on its first row.
+show_sub:
+        ld a,1
+        ld (page),a
+        ld hl,subitems
+        ld (cur_items),hl
+        ld a,NSUBITEMS
+        ld (cur_n),a
+        ld a,17
+        ld (val_col),a
+        xor a
+        ld (cursor),a
+        call clear_box
+        ld hl,txt_sub
+        call print_ff
+        jp draw_all_rows
+
+; Blank the 26 cells of the 17 menu rows: bright white paper, black ink.
+clear_box:
+        ld hl,txt_clr
+        call print_ff
+        ld a,1
+.l:     push af
+        ld b,a
+        ld c,3
+        call put_at
+        ld hl,txt_spaces
+        call print_ff
+        pop af
+        inc a
+        cp 18
+        jr nz,.l
+        ret
 
 ; Colour the box and draw the rainbow. Attribute 0x78 is bright white paper
 ; with black ink, 0x47 is a black bar with bright white ink.
@@ -526,31 +628,35 @@ diagonal:
         DB 0x01,0x03,0x07,0x0F,0x1F,0x3F,0x7F,0xFF
 
 ; Item table: key, screen row, state variable, bit mask (0 = display mode),
-; label address.
+; label address, address of the value texts (two words: bit set, bit clear).
 items:  DB '1',3,VAR_DEVICES,0x01
-        DW lbl_ay
+        DW lbl_ay,vals_onoff
         DB '2',4,VAR_DEVICES,0x02
-        DW lbl_turbo
+        DW lbl_turbo,vals_onoff
         DB '3',5,VAR_DEVICES,0x04
-        DW lbl_beeper
+        DW lbl_beeper,vals_onoff
         DB '4',6,VAR_DEVICES,0x08
-        DW lbl_fb
+        DW lbl_fb,vals_onoff
         DB '5',7,VAR_DEVICES,0x10
-        DW lbl_dd
+        DW lbl_dd,vals_onoff
         DB '6',8,VAR_DEVICES,0x20
-        DW lbl_df
+        DW lbl_df,vals_onoff
         DB '7',10,VAR_BORDER,0x01
-        DW lbl_border
-        DB '8',12,VAR_DISPLAY,DISP_AUTO
-        DW lbl_auto
-        DB '9',13,VAR_DISPLAY,DISP_ALWAYS
-        DW lbl_mix
-        DB 'm',14,VAR_DISPLAY,0
-        DW lbl_mode
-        DB 'p',15,VAR_DISPLAY,DISP_PAGE
-        DW lbl_page
-        DB 'h',17,VAR_DEBUG,0x01
-        DW lbl_hud
+        DW lbl_border,vals_onoff
+        DB 'h',16,VAR_DEBUG,0x01
+        DW lbl_hud,vals_onoff
+
+subitems:
+        DB '1',3,VAR_DISPLAY,DISP_AUTO
+        DW lbl_auto,vals_onoff
+        DB '2',4,VAR_DISPLAY,DISP_LOCKED
+        DW lbl_locked,vals_onoff
+        DB '3',5,VAR_DISPLAY,0
+        DW lbl_mode,0
+        DB '4',6,VAR_DISPLAY,DISP_PAGE
+        DW lbl_method,vals_method
+        DB '5',7,VAR_DISPLAY,DISP_BANK7
+        DW lbl_bank,vals_bank
 
 lbl_ay:     DB "1 AY chip",255
 lbl_turbo:  DB "2 TurboSound",255
@@ -559,19 +665,36 @@ lbl_fb:     DB "4 Covox 0xFB",255
 lbl_dd:     DB "5 Covox 0xDD",255
 lbl_df:     DB "6 Covox 0xDF",255
 lbl_border: DB "7 Extend to 16:9",255
-lbl_auto:   DB "8 Auto interlace",255
-lbl_mix:    DB "9 Mixing always on",255
-lbl_mode:   DB "M Mode",255
-lbl_page:   DB "P Detect per page",255
 lbl_hud:    DB "H HUD",255
+lbl_auto:   DB "1 Detection",255
+lbl_locked: DB "2 Locked",255
+lbl_mode:   DB "3 Mode",255
+lbl_method: DB "4 Method",255
+lbl_bank:   DB "5 1st bank",255
+
+vals_onoff:
+        DW txt_on,txt_off
+vals_method:
+        DW txt_page,txt_line
+vals_bank:
+        DW txt_sec,txt_pri
 
 ; Documented defaults, and the feature number of each state variable.
 defaults:
-        DB FEAT_DEFAULT, 0x00, DISP_AUTO|DISP_PAGE, 0x01
+        DB FEAT_DEFAULT, 0x00, DISP_DEFAULT, 0x01
 featnums:
         DB 1, 2, 3, 0xFF
 state:  DS 4
 cursor: DB 0
+main_cursor:
+        DB 0
+page:   DB 0                            ; 0 main page, 1 GIGASCREEN page
+cur_items:
+        DW 0
+cur_n:  DB 0
+val_col:
+        DB 0
+r_vals: DW 0
 a_idx:  DB 0
 r_idx:  DB 0
 r_row:  DB 0
@@ -586,24 +709,48 @@ txt_blank:
 txt_on: DB 16,1,"ON ",255
 txt_off:
         DB 16,2,"OFF",255
+txt_page:
+        DB 16,0,"Per page",255
+txt_line:
+        DB 16,0,"Per line",255
+txt_sec:
+        DB 16,0,"Secondary",255
+txt_pri:
+        DB 16,0,"Primary  ",255
+txt_spaces:
+        DB "                          ",255     ; the 26 cells of the box
+txt_clr:
+        DB 17,7,16,0,19,1,255
 
 ; Display mode names, 16 bytes each, in the order of mode bits 00, 01, 10, 11.
+; Each entry is padded to 16 bytes. Mode 11 is reserved and is never selected or sent.
 mode_names:
-        DB "50/50 mix      ",255
-        DB "CRT-style mix  ",255
-        DB "Line weave     ",255
-        DB "Reserved       ",255
+        DB 16,0,"50/50 mix  ",255
+        DS 2
+        DB 16,0,"CRT-style  ",255
+        DS 2
+        DB 16,0,"Double high",255
+        DS 2
+        DB 16,0,"Reserved   ",255
+        DS 2
 
 ; AT is 22,row,column. INK is 16, PAPER 17, BRIGHT 19.
-txt_static:
-        DB 22,0,4,17,0,16,7,19,1,"SP-Pie Panel"
+txt_main:
+        DB 22,0,4,17,0,16,7,19,1,"SP-Pie Panel     "
         DB 22,2,4,17,7,16,1,19,1,"DEVICES"
         DB 22,9,4,"BORDER"
-        DB 22,11,4,"DISPLAY"
-        DB 22,16,4,"DEBUG"
-        DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press a key."
-        DB 22,19,1,"S send all  R defaults  Q quit"
-        DB 22,20,1,"This shows what the panel has"
+        DB 22,12,4,"GIGASCREEN"
+        DB 22,13,5,17,7,16,0,19,1,"G Display settings"
+        DB 22,15,4,16,1,"DEBUG"
+        DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press a key.  "
+        DB 22,19,1,"S send all  R defaults  Q quit",255
+txt_sub:
+        DB 22,0,4,17,0,16,7,19,1,"SP-Pie Gigascreen"
+        DB 22,2,4,17,7,16,1,19,1,"DISPLAY"
+        DB 22,18,1,17,7,16,0,19,0,"Arrows+ENTER, or press 1 to 5. "
+        DB 22,19,1,"S send R defaults G/SPACE back",255
+txt_note:
+        DB 22,20,1,17,7,16,0,19,0,"This shows what the panel has"
         DB 22,21,1,"set, not what the board holds.",255
 
         INCLUDE "snd_lib.inc"
