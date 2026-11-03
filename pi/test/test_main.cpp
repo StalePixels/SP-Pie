@@ -3325,9 +3325,8 @@ static void TestInterlaceSkip (void)
 	CHECK_EQ (nNotMixed, 0u);
 }
 
-// The modes: the CRT-style mix (the newest 5/8), the line weave (the
-// newest as written, the frame before for the second frame buffer line),
-// mixing always on, and the reserved mode leaving the feature alone.
+// The modes: the CRT-style mix (the newest 5/8), mixing always on, and
+// the reserved values leaving the feature alone.
 static void TestInterlaceModes (void)
 {
 	CInterlaceRig Rig;
@@ -3340,50 +3339,294 @@ static void TestInterlaceModes (void)
 	CHECK_EQ (Rig.Screen (), MixPixelsCrt (Green, Red));
 	CHECK_EQ (Rig.Screen (), 0xFF3C6400u);		// 3/8 and 5/8 of 0xA0
 	CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);	// always: every line
-	CHECK (Rig.Presenter.WeavePicture () == nullptr);
+	CHECK (Rig.Presenter.SecondPicture () == nullptr);
 
-	Rig.Feature (3, 0x0A);				// always, line weave
-	Rig.Attributes (0x5800, PaperRed);
+	// The reserved mode (11), the reserved detection methods (10, 11)
+	// leave the feature as it was; bit 7 is dropped.
+	Rig.Feature (3, 0x49);				// detection, double high, bank 7 first
 	Rig.End ();
-	CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeWeave);
-	CHECK_EQ (Rig.Screen (), Red);
-	const uint32_t *pWeave = Rig.Presenter.WeavePicture ();
-	CHECK (pWeave != nullptr);
-	if (pWeave != nullptr)
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x49u);
+	for (uint8_t nReserved : { (uint8_t) 0x4D, (uint8_t) 0x69, (uint8_t) 0x79, (uint8_t) 0x0F })
 	{
-		unsigned nOffset = (39 + 12 * 8 + 3) * PictureWidth + 48 + 16 * 8 + 3;
-		CHECK_EQ (pWeave[nOffset], Green);
-
-		// The two frame buffer lines of one display line.
-		std::vector<uint32_t> Display (DisplayWidth, 0xFF123456u);
-		unsigned y = 39 + 12 * 8 + 3;
-		for (unsigned x = 0; x < PictureWidth; x++)
-		{
-			Display[PictureLeft + x] = Rig.Output[y * PictureWidth + x];
-		}
-		std::vector<uint32_t> First (DisplayWidth), Second (DisplayWidth);
-		WeaveLine (Display.data (), pWeave + y * PictureWidth, PictureLeft, PictureWidth,
-			   DisplayWidth, 0, First.data ());
-		WeaveLine (Display.data (), pWeave + y * PictureWidth, PictureLeft, PictureWidth,
-			   DisplayWidth, 1, Second.data ());
-		CHECK (First == Display);
-		CHECK_EQ (Second[0], 0xFF123456u);		// the side areas as drawn
-		CHECK_EQ (Second[DisplayWidth - 1], 0xFF123456u);
-		CHECK_EQ (Second[PictureLeft + 48 + 16 * 8 + 3], Green);
-		CHECK_EQ (First[PictureLeft + 48 + 16 * 8 + 3], Red);
+		Rig.Feature (3, nReserved);
+		Rig.End ();
+		CHECK_EQ (Rig.Presenter.Control ().Display (), 0x49u);
 	}
-
-	// The reserved mode leaves the weave on; 0 turns mixing off.
-	Rig.Feature (3, 0x0E);
+	Rig.Feature (3, 0xC9);
 	Rig.End ();
-	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x0Au);
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x49u);
+	Rig.Feature (3, 0x89);
+	Rig.End ();
+	CHECK_EQ (Rig.Presenter.Control ().Display (), 0x09u);
+
+	// 0 turns mixing off.
 	Rig.Feature (3, 0x00);
 	Rig.Attributes (0x5800, PaperGreen);
 	Rig.End ();
 	CHECK_EQ (Rig.Presenter.Mixing (), -1);
 	CHECK_EQ (Rig.Presenter.MixedLines (), 0u);
 	CHECK_EQ (Rig.Screen (), Green);
-	CHECK (Rig.Presenter.WeavePicture () == nullptr);
+	CHECK (Rig.Presenter.SecondPicture () == nullptr);
+}
+
+// --- the frame buffer and double high -------------------------------------
+
+// The 480 x 270 display of the rig's output: the picture in the middle,
+// nSide in the side areas.
+static std::vector<uint32_t> RigDisplay (const CInterlaceRig &rRig, uint32_t nSide)
+{
+	std::vector<uint32_t> Display (DisplayWidth * DisplayHeight, nSide);
+	for (unsigned y = 0; y < PictureHeight; y++)
+	{
+		for (unsigned x = 0; x < PictureWidth; x++)
+		{
+			Display[(PictureTop + y) * DisplayWidth + PictureLeft + x] = rRig.Output[y * PictureWidth + x];
+		}
+	}
+	return Display;
+}
+
+// A frame buffer with some padding at the end of each line, as the
+// firmware's pitch may have, filled with a marker.
+static const unsigned TestPitchWords = FrameBufferWidth / 2 + 8;
+static const uint64_t PadMarker = 0x5A5A5A5A5A5A5A5Aull;
+
+// Pixel (x, y) of the frame buffer.
+static uint32_t FrameBufferPixel (const std::vector<uint64_t> &rBuffer, unsigned x, unsigned y)
+{
+	uint64_t nWord = rBuffer[y * TestPitchWords + x / 2];
+	return (uint32_t) ((x & 1) ? nWord >> 32 : nWord);
+}
+
+static std::vector<uint64_t> RenderFrameBuffer (const std::vector<uint32_t> &rDisplay,
+						const uint32_t *pSecondPicture)
+{
+	std::vector<uint64_t> Buffer (TestPitchWords * FrameBufferHeight, PadMarker);
+	WriteFrameBuffer (rDisplay.data (), pSecondPicture, Buffer.data (), TestPitchWords);
+	return Buffer;
+}
+
+// A normal frame: every frame buffer pixel (x, y) is display pixel
+// (x / 2, y / 2), side areas included, and the padding is not touched.
+static void TestFrameBufferScale (void)
+{
+	CInterlaceRig Rig;
+	TwoScreens (Rig);
+	for (unsigned i = 0; i < 0x1800; i += 3)
+	{
+		Rig.Push (0, KindMemory, (uint16_t) (0x4000 + i), (uint8_t) (0x81 + i));
+	}
+	Rig.Push (0, KindIo, 0x00FE, 0x03);
+	Rig.Push (FirstScreenTState (100) + 40, KindIo, 0x00FE, 0x05);
+	Rig.End ();
+	CHECK (Rig.Presenter.SecondPicture () == nullptr);
+
+	std::vector<uint32_t> Display = RigDisplay (Rig, 0xFF123456u);
+	for (unsigned x = 0; x < DisplayWidth; x++)	// a different colour on each line's side
+	{
+		Display[x] = 0xFF000000u | x;
+		Display[(DisplayHeight - 1) * DisplayWidth + x] = 0xFF00FF00u | x;
+	}
+	std::vector<uint64_t> Buffer = RenderFrameBuffer (Display, Rig.Presenter.SecondPicture ());
+
+	unsigned nWrong = 0, nPadWrong = 0;
+	for (unsigned y = 0; y < FrameBufferHeight; y++)
+	{
+		for (unsigned x = 0; x < FrameBufferWidth; x++)
+		{
+			nWrong += FrameBufferPixel (Buffer, x, y) != Display[(y / 2) * DisplayWidth + x / 2];
+		}
+		for (unsigned w = FrameBufferWidth / 2; w < TestPitchWords; w++)
+		{
+			nPadWrong += Buffer[y * TestPitchWords + w] != PadMarker;
+		}
+	}
+	CHECK_EQ (nWrong, 0u);
+	CHECK_EQ (nPadWrong, 0u);
+	CHECK (Display[100 * DisplayWidth + PictureLeft + 5] != Display[100 * DisplayWidth + 5]);
+}
+
+// Double high screens: bank 5 with pixel bytes 0xF0, blue ink on red
+// paper; bank 7 with 0x0F, yellow ink on green paper. The border is
+// magenta.
+static const uint8_t AttrBank5 = 0x11, AttrBank7 = 0x26;
+
+static void DoubleHighScreens (CInterlaceRig &rRig)
+{
+	rRig.Push (0, KindIo, 0x7FFD, 0x07);		// bank 7 at 0xC000
+	rRig.Attributes (0x5800, AttrBank5);
+	rRig.Attributes (0xD800, AttrBank7);
+	for (unsigned i = 0; i < 0x1800; i++)
+	{
+		rRig.Push (0, KindMemory, (uint16_t) (0x4000 + i), 0xF0);
+		rRig.Push (0, KindMemory, (uint16_t) (0xC000 + i), 0x0F);
+	}
+	rRig.Push (0, KindIo, 0x00FE, 0x03);
+}
+
+// The screen line of picture line y in a picture of PictureWidth pixels.
+static const uint32_t *PictureRow (const uint32_t *pPicture, unsigned y)
+{
+	return pPicture + y * PictureWidth;
+}
+
+// Double high, with the screens flipping every frame: each display line
+// that flips is two frame buffer lines, bank 5's pixels and bank 7's, in
+// the order bit 6 gives; both in the ink and paper of the bank shown on
+// that frame (the attribute the ULA fetched); the border parts as Fuse's
+// picture on both. No blending.
+static void TestDoubleHighOrder (void)
+{
+	for (uint8_t nDisplay : { (uint8_t) 0x09, (uint8_t) 0x49, (uint8_t) 0x19 })
+	{
+		bool bBank7First = (nDisplay & 0x40) != 0;
+		CInterlaceRig Rig;
+		DoubleHighScreens (Rig);
+		Rig.Feature (3, nDisplay);
+		Rig.End ();
+		unsigned nChecked = 0, nWrong = 0;
+		for (unsigned n = 1; n < 12; n++)
+		{
+			bool bShown7 = (n & 1) != 0;
+			Rig.Push (0, KindIo, 0x7FFD, bShown7 ? 0x0F : 0x07);
+			Rig.End ();
+			if (n < 3)
+			{
+				continue;
+			}
+			CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeDoubleHigh);
+			CHECK_EQ (Rig.Presenter.MixedLines (), PictureHeight);
+			const uint32_t *pSecond = Rig.Presenter.SecondPicture ();
+			CHECK (pSecond != nullptr);
+			if (pSecond == nullptr)
+			{
+				return;
+			}
+
+			uint32_t nInk = bShown7 ? Yellow : Blue, nPaper = bShown7 ? Green : Red;
+			const uint32_t *pFirst = Rig.Output.data ();
+			const uint32_t *pBank5 = bBank7First ? pSecond : pFirst;
+			const uint32_t *pBank7 = bBank7First ? pFirst : pSecond;
+			for (unsigned y = ScreenTop; y < ScreenTop + ScreenHeight; y++)
+			{
+				for (unsigned x = 0; x < ScreenWidth; x++)
+				{
+					bool bLeft = (x & 7) < 4;
+					nWrong += PictureRow (pBank5, y)[ScreenLeft + x] != (bLeft ? nInk : nPaper);
+					nWrong += PictureRow (pBank7, y)[ScreenLeft + x] != (bLeft ? nPaper : nInk);
+				}
+				// The border parts: Fuse's border on both lines.
+				nWrong += PictureRow (pFirst, y)[0] != Colour (3);
+				nWrong += PictureRow (pSecond, y)[0] != Colour (3);
+				nWrong += PictureRow (pSecond, y)[PictureWidth - 1] != Colour (3);
+			}
+			nWrong += PictureRow (pSecond, 10)[100] != Colour (3);
+			nWrong += PictureRow (pFirst, 10)[100] != Colour (3);
+			nChecked++;
+
+			// In the frame buffer: line 2y is the first, 2y + 1 the second.
+			std::vector<uint32_t> Display = RigDisplay (Rig, 0xFF123456u);
+			std::vector<uint64_t> Buffer = RenderFrameBuffer (Display, pSecond);
+			unsigned y = ScreenTop + 99, x = PictureLeft + ScreenLeft + 16 * 8;
+			CHECK_EQ (FrameBufferPixel (Buffer, 2 * x, 2 * y), bBank7First ? nPaper : nInk);
+			CHECK_EQ (FrameBufferPixel (Buffer, 2 * x + 1, 2 * y), bBank7First ? nPaper : nInk);
+			CHECK_EQ (FrameBufferPixel (Buffer, 2 * x, 2 * y + 1), bBank7First ? nInk : nPaper);
+			CHECK_EQ (FrameBufferPixel (Buffer, 2 * x + 1, 2 * y + 1), bBank7First ? nInk : nPaper);
+			CHECK_EQ (FrameBufferPixel (Buffer, 0, 2 * y), 0xFF123456u);
+			CHECK_EQ (FrameBufferPixel (Buffer, 0, 2 * y + 1), 0xFF123456u);
+		}
+		CHECK_EQ (nChecked, 9u);
+		CHECK_EQ (nWrong, 0u);
+	}
+}
+// Double high with an attribute change for each line of a character row
+// in the middle of every frame (multicolour), bank 5 shown and mixing
+// locked on: on both lines of each display line, the ink the ULA used on
+// that line, over bank 5's pixels on one and bank 7's on the other.
+static void TestDoubleHighMulticolour (void)
+{
+	CInterlaceRig Rig;
+	DoubleHighScreens (Rig);			// bank 5 shown, bank 7 at 0xC000
+	Rig.Feature (3, 0x0A);				// always, double high
+	Rig.End ();
+
+	const unsigned nRow = 12, nCol = 16;
+	const uint8_t Ink[8] = { 1, 2, 3, 4, 5, 6, 1, 2 };
+	unsigned nWrong = 0, nOther = 0;
+	for (unsigned n = 0; n < 4; n++)
+	{
+		for (unsigned k = 0; k < 8; k++)
+		{
+			uint32_t t = ChunkTState (6 + nCol, ScreenTop + nRow * 8 + k) + 3;
+			Rig.Push (t, KindMemory, (uint16_t) (0x4000 + AttrOffset (nRow * 8, nCol)),
+				  (uint8_t) (0x38 | Ink[k]));
+		}
+		Rig.End ();
+	}
+	CHECK_EQ (Rig.Presenter.Mixing (), (int) CControlPorts::DisplayModeDoubleHigh);
+	const uint32_t *pSecond = Rig.Presenter.SecondPicture ();
+	CHECK (pSecond != nullptr);
+	if (pSecond == nullptr)
+	{
+		return;
+	}
+	for (unsigned k = 0; k < 8; k++)
+	{
+		unsigned y = ScreenTop + nRow * 8 + k, x = ScreenLeft + nCol * 8;
+		uint32_t nInk = Colour (Ink[k]);
+		// Fuse's picture shows the line's own ink.
+		CHECK_EQ (PictureRow (Rig.Output.data (), y)[x], nInk);
+		// Bank 5 (0xF0) on the first line, bank 7 (0x0F) on the second,
+		// both in the same ink and white paper.
+		nWrong += PictureRow (Rig.Output.data (), y)[x] != nInk;
+		nWrong += PictureRow (Rig.Output.data (), y)[x + 4] != White;
+		nWrong += PictureRow (pSecond, y)[x] != White;
+		nWrong += PictureRow (pSecond, y)[x + 4] != nInk;
+		// The cell next to it keeps bank 5's own attribute on both.
+		nOther += PictureRow (pSecond, y)[x + 8] != Red;
+		nOther += PictureRow (pSecond, y)[x + 12] != Blue;
+	}
+	CHECK_EQ (nWrong, 0u);
+	CHECK_EQ (nOther, 0u);
+}
+
+// Mode 10 with neither detection nor mixing locked on, and with
+// detection on but no screen flips: the normal picture, no second
+// picture.
+static void TestDoubleHighOff (void)
+{
+	for (uint8_t nDisplay : { (uint8_t) 0x08, (uint8_t) 0x18, (uint8_t) 0x48 })
+	{
+		CInterlaceRig Rig;
+		DoubleHighScreens (Rig);
+		Rig.Feature (3, nDisplay);
+		Rig.End ();
+		for (unsigned n = 1; n < 10; n++)
+		{
+			bool bShown7 = (n & 1) != 0;
+			Rig.Push (0, KindIo, 0x7FFD, bShown7 ? 0x0F : 0x07);
+			Rig.End ();
+			CHECK_EQ (Rig.Presenter.Mixing (), -1);
+			CHECK_EQ (Rig.Presenter.MixedLines (), 0u);
+			CHECK (Rig.Presenter.SecondPicture () == nullptr);
+			// The shown bank's own pixels and colours.
+			unsigned y = ScreenTop + 99;
+			CHECK_EQ (PictureRow (Rig.Output.data (), y)[ScreenLeft], bShown7 ? Green : Blue);
+			CHECK_EQ (PictureRow (Rig.Output.data (), y)[ScreenLeft + 4], bShown7 ? Yellow : Red);
+		}
+	}
+
+	CInterlaceRig Rig;
+	DoubleHighScreens (Rig);
+	Rig.Feature (3, 0x09);
+	Rig.End ();
+	for (unsigned n = 1; n < 10; n++)
+	{
+		Rig.End ();
+		CHECK_EQ (Rig.Presenter.Mixing (), -1);
+		CHECK (Rig.Presenter.SecondPicture () == nullptr);
+	}
+	CHECK_EQ (PictureRow (Rig.Output.data (), ScreenTop)[ScreenLeft], Blue);
 }
 
 // --- config.txt -----------------------------------------------------------
@@ -3565,8 +3808,8 @@ static void ReportCost (void)
 	auto t8 = std::chrono::steady_clock::now ();
 
 	// Core 0's picture path: one frame with its snapshot, line banks and
-	// output, not mixed, averaged and CRT-style (every line); the frame
-	// buffer lines of the weave; and the detector.
+	// output, not mixed, averaged and CRT-style (every line); the 960 x
+	// 540 frame buffer write; and the detector.
 	double PictureUs[3];
 	const uint8_t Displays[3] = { 0x00, 0x02, 0x06 };
 	for (unsigned m = 0; m < 3; m++)
@@ -3583,18 +3826,15 @@ static void ReportCost (void)
 		PictureUs[m] = std::chrono::duration<double, std::micro> (tb - ta).count () / nFramesRun;
 	}
 	std::vector<uint32_t> DisplayRows (DisplayWidth * DisplayHeight, 0xFF000000u);
-	std::vector<uint32_t> WeaveFrom (PictureWidth * PictureHeight, 0xFF00A000u);
-	std::vector<uint32_t> LineOut (DisplayWidth);
-	uint64_t nWeaveSink = 0;
+	std::vector<uint32_t> SecondFrom (PictureWidth * PictureHeight, 0xFF00A000u);
+	std::vector<uint64_t> BufferOut (FrameBufferWidth / 2 * FrameBufferHeight);
+	uint64_t nBufferSink = 0;
 	auto tc = std::chrono::steady_clock::now ();
 	for (unsigned f = 0; f < nFramesRun; f++)
 	{
-		for (unsigned y = 0; y < DisplayHeight; y++)
-		{
-			WeaveLine (DisplayRows.data () + y * DisplayWidth, WeaveFrom.data () + y * PictureWidth,
-				   PictureLeft, PictureWidth, DisplayWidth, 1, LineOut.data ());
-			nWeaveSink += LineOut[y];
-		}
+		WriteFrameBuffer (DisplayRows.data (), (f & 1) ? SecondFrom.data () : nullptr,
+				  BufferOut.data (), FrameBufferWidth / 2);
+		nBufferSink += BufferOut[f % BufferOut.size ()];
 	}
 	auto td = std::chrono::steady_clock::now ();
 
@@ -3614,10 +3854,10 @@ static void ReportCost (void)
 	auto tf = std::chrono::steady_clock::now ();
 
 	printf ("cost (host): picture path on core 0 %.0f us per frame unmixed, %.0f averaged, "
-		"%.0f CRT-style; weave lines %.0f us per frame (%llu); detector %.2f us per frame (%u)\n",
+		"%.0f CRT-style; frame buffer write %.0f us per frame (%llu); detector %.2f us per frame (%u)\n",
 		PictureUs[0], PictureUs[1], PictureUs[2],
 		std::chrono::duration<double, std::micro> (td - tc).count () / nFramesRun,
-		(unsigned long long) (nWeaveSink & 1),
+		(unsigned long long) (nBufferSink & 1),
 		std::chrono::duration<double, std::micro> (tf - te).count () / nDetectFrames,
 		nOnSink & 1);
 
@@ -3672,7 +3912,11 @@ int main (void)
 	Run ("interlace: per-page method mixes every line when any flips", TestInterlacePage);
 	Run ("interlace: no screen flips, no mixing", TestInterlaceNoFlips);
 	Run ("interlace: skipped and repeated frames blend the right frames", TestInterlaceSkip);
-	Run ("interlace: CRT-style, line weave, always, reserved mode", TestInterlaceModes);
+	Run ("interlace: CRT-style, always, reserved values", TestInterlaceModes);
+	Run ("frame buffer: each display pixel as 2 x 2", TestFrameBufferScale);
+	Run ("double high: bank 5 and bank 7 lines in the order of bit 6", TestDoubleHighOrder);
+	Run ("double high: multicolour on both lines", TestDoubleHighMulticolour);
+	Run ("double high: off without detection or lock", TestDoubleHighOff);
 	Run ("config.txt: the [sp-pie] section and the defaults", TestBootConfig);
 	Run ("audio: resampler interpolation", TestResamplerLine);
 	Run ("audio: resampler against clock differences", TestResampler);

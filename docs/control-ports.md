@@ -26,7 +26,7 @@ This selects the debug feature and turns the HUD off.
 | 0 | SP-Pie | Reserved. | 0x00 |
 | 1 | Attached devices | Bit 0: AY. Bit 1: TurboSound, a second AY. Bit 2: beeper. Bit 3: Covox on port 0xFB. Bit 4: Covox on port 0xDD. Bit 5: Covox on port 0xDF. Bits 6 and 7 are reserved. | 0x07: AY, TurboSound and beeper on, every Covox off |
 | 2 | Border | Bit 0: border extension. Bits 1 to 7 are reserved for later border functions. | 0x00: off |
-| 3 | Display | Bit 0: interlace detection. Bit 1: interlace mixing always on. Bits 3 and 2: mixing mode, 00 average, 01 CRT-style, 10 line weave; 11 is reserved. Bits 5 and 4: detection method, 00 per line, 01 per page; 10 and 11 are reserved. Bits 6 and 7 are reserved. | 0x11: detection on, average, per page |
+| 3 | Display | Bit 0: interlace detection. Bit 1: interlace mixing always on. Bits 3 and 2: mixing mode, 00 average, 01 CRT-style, 10 double high; 11 is reserved. Bits 5 and 4: detection method, 00 per line, 01 per page; 10 and 11 are reserved. Bit 6: double high first line, 0 bank 5, 1 bank 7. Bit 7 is reserved. | 0x11: detection on, average, per page, bank 5 first |
 | 0xFF | Debug | Bit 0: HUD. Bits 1 to 7 are reserved for later debug flags and parameters. | 0x01: HUD on |
 
 Every other feature number is reserved. SP-Pie ignores data writes to a reserved feature and ignores reserved bits. Write 0 to reserved bits: a later version can give them a meaning.
@@ -81,7 +81,7 @@ The border feature applies from the Spectrum frame that holds the data write.
 
 ## Display
 
-Feature 3 sets interlace mixing. Some programs show two pictures in turn, one in each frame, by flipping between the normal and the shadow screen (port 0x7FFD bit 3), so that the eye mixes them on a CRT: more colours or finer detail than one frame holds. On HDMI the same program flickers, and a frame that SP-Pie skips or repeats shows one of the two pictures twice. Mixing shows the last two complete Spectrum frames together instead.
+Feature 3 sets interlace mixing. Some programs show two pictures in turn, one in each frame, by flipping between the normal and the shadow screen (port 0x7FFD bit 3), so that the eye mixes them on a CRT: more colours or finer detail than one frame holds. On HDMI the same program flickers, and a frame that SP-Pie skips or repeats shows one of the two pictures twice. Mixing shows the two pictures together instead: the average and CRT-style modes blend the last two complete Spectrum frames, and double high shows both screens at once, on alternate lines.
 
 No detection method suits every program, so bits 5 and 4 choose one. Both use the screen bank alone, and neither compares the pictures.
 
@@ -95,8 +95,10 @@ Bits 3 and 2 give the mix:
 |---|---|---|
 | 00 | Average | Each pixel of a line that mixes is half of the newest frame and half of the same pixel in the frame before. |
 | 01 | CRT-style | 5/8 of the newest frame and 3/8 of the frame before, on each line that mixes. On a CRT the eye sees the picture that the beam has just drawn brighter than the one before it, which has faded. This weight leans towards the newest frame while both stay clearly visible. It is a chosen weight, not a measurement. |
-| 10 | Line weave | Not available: it needs a frame buffer with two lines for each display line, and the firmware does not stretch such a buffer. It shows the newest frame. |
+| 10 | Double high | No blending. Each display line that mixes shows as two lines, one above the other: one with the screen's pixels from bank 5 and one with the screen's pixels from bank 7, both at 50 frames per second (below). |
 | 11 | Reserved | A data write with this mode is ignored. |
+
+In double high, each display line that mixes becomes two lines. One line has the pixel bytes of bank 5 and the other has the pixel bytes of bank 7, from the same screen address. For each 8-pixel cell, both lines use the ink and paper that the ULA used for that cell on that line. That is the attribute it read at that point of the frame, from the bank on show then. So attribute changes during the frame (multicolour) show on both lines. The border parts of both lines are the border of that line as drawn. Bit 6 gives the order: 0 puts bank 5 on the first (upper) line, 1 puts bank 7 there. The pixel bytes of the bank on show are the ones the ULA drew. The pixel bytes of the other bank are the ones in that bank at the end of the frame. Lines that do not mix show the normal picture. With mode 10 and neither detection finding flips nor bit 1 set, the whole display is the normal picture.
 
 The display feature applies from the Spectrum frame that holds the data write. The splash screen is never mixed.
 

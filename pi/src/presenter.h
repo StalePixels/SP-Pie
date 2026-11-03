@@ -72,13 +72,14 @@ public:
 	// Interlace mixing (interlace.h, control-port feature 3) of the
 	// picture written by the last Present (): the mode, or -1 when no
 	// line is mixing; whether picture line y is mixing; and the number
-	// of lines mixing. In the line weave mode the picture written is the
-	// newest frame, and WeavePicture () is the frame before, for the
-	// other lines; otherwise WeavePicture () is 0.
+	// of lines mixing. In the double high mode the picture written holds
+	// the first line of each display line, and SecondPicture () the
+	// second (352 x 270, PictureWidth pixels between rows); lines that do
+	// not mix are the same in both. Otherwise SecondPicture () is 0.
 	int Mixing (void) const			{ return m_nMixing; }
 	bool LineMixed (unsigned y) const	{ return y < MixLines && m_LineMixed[y]; }
 	unsigned MixedLines (void) const	{ return m_nMixedLines; }
-	const uint32_t *WeavePicture (void) const;
+	const uint32_t *SecondPicture (void) const;
 
 	uint32_t LastFrame (void) const		{ return m_nLastFrame; }
 	const TFrameRecord &LastRecord (void) const { return m_LastRecord; }
@@ -110,6 +111,7 @@ private:
 	unsigned	m_nOutputPitch;
 	uint32_t	*m_pFuse;		// Fuse's picture: the newest frame
 	uint32_t	*m_pPrevious;		// the frame before it
+	uint32_t	*m_pSecond;		// double high: the second lines
 	static const unsigned MixLines = CInterlaceDetector::MaxLines;
 	CInterlaceDetector m_Interlace;
 	int		m_nMixing;

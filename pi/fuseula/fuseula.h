@@ -47,6 +47,10 @@ enum fuseula_machine
 #define FUSEULA_PICTURE_WIDTH	352
 #define FUSEULA_PICTURE_HEIGHT	270
 
+/* The 256 x 192 screen inside the picture: its first pixel and line. */
+#define FUSEULA_SCREEN_LEFT	48
+#define FUSEULA_SCREEN_TOP	39
+
 /* Starts Fuse with the 48K selected. Fuse draws into the 352 x 270 picture
    at pPicture, nPitch pixels between rows, in 0xAARRGGBB. Returns 0 on
    success. A second call keeps Fuse's modules and RAM, selects the 48K
@@ -93,6 +97,15 @@ void fuseula_end_frame (void);
    above and below the screen take the bank at the same place in their
    line. A 48K always shows bank 5. */
 const uint8_t *fuseula_line_screens (void);
+
+/* Draws screen line nLine (0 to 191) with the pixel bytes of RAM bank nBank
+   (5 or 7), 256 pixels into pOut, in 0xAARRGGBB. Each 8-pixel chunk has
+   the ink and paper the picture shows for it: the colours Fuse gave the
+   chunk at its beam time, from the attribute of the bank shown then, with
+   FLASH and ULAplus applied. The pixel byte is the one Fuse drew when
+   nBank is the bank it drew the chunk from, else the byte in the Pi's copy
+   of the bank now (after the frame last ended). */
+void fuseula_screen_line (unsigned nBank, unsigned nLine, uint32_t *pOut);
 
 /* State, for the tests. */
 uint8_t fuseula_ram (unsigned nBank, unsigned nOffset);

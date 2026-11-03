@@ -30,6 +30,7 @@ CFramePresenter::CFramePresenter (CEventLog *pLog, CAudioFifo *pAudio)
 	m_nOutputPitch (0),
 	m_pFuse (0),
 	m_pPrevious (0),
+	m_pSecond (0),
 	m_nMixing (-1)
 {
 	Reset ();
@@ -47,7 +48,8 @@ bool CFramePresenter::Initialize (uint32_t *pPicture, unsigned nPitch)
 	{
 		m_pFuse = new uint32_t[PicturePixels];
 		m_pPrevious = new uint32_t[PicturePixels];
-		if (m_pFuse == 0 || m_pPrevious == 0)
+		m_pSecond = new uint32_t[PicturePixels];
+		if (m_pFuse == 0 || m_pPrevious == 0 || m_pSecond == 0)
 		{
 			return false;
 		}
@@ -56,6 +58,7 @@ bool CFramePresenter::Initialize (uint32_t *pPicture, unsigned nPitch)
 	{
 		m_pFuse[i] = 0xFF000000u;
 		m_pPrevious[i] = 0xFF000000u;
+		m_pSecond[i] = 0xFF000000u;
 	}
 	m_pOutput = pPicture;
 	m_nOutputPitch = nPitch;
@@ -80,9 +83,9 @@ bool CFramePresenter::Initialize (uint32_t *pPicture, unsigned nPitch)
 
 static_assert (CInterlaceDetector::MaxLines == PictureHeight, "a detector line per picture line");
 
-const uint32_t *CFramePresenter::WeavePicture (void) const
+const uint32_t *CFramePresenter::SecondPicture (void) const
 {
-	return m_nMixing == CControlPorts::DisplayModeWeave ? m_pPrevious : 0;
+	return m_nMixing == CControlPorts::DisplayModeDoubleHigh ? m_pSecond : 0;
 }
 
 void CFramePresenter::WritePicture (void)
@@ -93,6 +96,9 @@ void CFramePresenter::WritePicture (void)
 	bool bAuto = (nDisplay & CControlPorts::DisplayInterlaceAuto) != 0;
 	bool bPage = (nDisplay & CControlPorts::DisplayDetectMask) == CControlPorts::DisplayDetectPage;
 	int nMode = nDisplay & CControlPorts::DisplayModeMask;
+	bool bDoubleHigh = nMode == CControlPorts::DisplayModeDoubleHigh;
+	unsigned nFirstBank = (nDisplay & CControlPorts::DisplayFirstBank7) != 0 ? 7 : 5;
+	unsigned nSecondBank = nFirstBank ^ 2;	// 5 and 7
 	m_nMixedLines = 0;
 
 	for (unsigned y = 0; y < PictureHeight; y++)
@@ -100,6 +106,7 @@ void CFramePresenter::WritePicture (void)
 		const uint32_t *pNew = m_pFuse + y * PictureWidth;
 		const uint32_t *pOld = m_pPrevious + y * PictureWidth;
 		uint32_t *pOut = m_pOutput + y * m_nOutputPitch;
+		uint32_t *pSecond = m_pSecond + y * PictureWidth;
 
 		bool bMix = bAlways || (bAuto && (bPage ? m_Interlace.PageOn () : m_Interlace.On (y)));
 		m_LineMixed[y] = bMix;
@@ -121,8 +128,22 @@ void CFramePresenter::WritePicture (void)
 			}
 			break;
 
-		default:	// not mixing, or the line weave
+		case CControlPorts::DisplayModeDoubleHigh:
 			memcpy (pOut, pNew, PictureWidth * sizeof *pOut);
+			memcpy (pSecond, pNew, PictureWidth * sizeof *pSecond);
+			if (y >= ScreenTop && y < ScreenTop + ScreenHeight)
+			{
+				fuseula_screen_line (nFirstBank, y - ScreenTop, pOut + ScreenLeft);
+				fuseula_screen_line (nSecondBank, y - ScreenTop, pSecond + ScreenLeft);
+			}
+			break;
+
+		default:	// not mixing
+			memcpy (pOut, pNew, PictureWidth * sizeof *pOut);
+			if (bDoubleHigh)
+			{
+				memcpy (pSecond, pNew, PictureWidth * sizeof *pSecond);
+			}
 			break;
 		}
 	}

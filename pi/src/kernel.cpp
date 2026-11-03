@@ -61,14 +61,15 @@ boolean CKernel::Initialize (void)
 		}
 	}
 
-	// 480 x 270 at 32 bits per pixel (FrameBufferLines lines for each
-	// display line), twice as high for the flip. The firmware scales it to
-	// the HDMI mode, x4 for 1080p, and keeps its shape.
-	m_pFrameBuffer = new CBcmFrameBuffer (DisplayWidth, DisplayHeight * FrameBufferLines, 32,
-					      DisplayWidth, DisplayHeight * FrameBufferLines * 2);
+	// 960 x 540 at 32 bits per pixel (picture.h: 2 x 2 frame buffer pixels
+	// for each display pixel), twice as high for the flip. The firmware
+	// scales it to the HDMI mode, x2 for 1080p, and keeps its shape.
+	m_pFrameBuffer = new CBcmFrameBuffer (FrameBufferWidth, FrameBufferHeight, 32,
+					      FrameBufferWidth, FrameBufferHeight * 2);
 	if (   m_pFrameBuffer == 0
 	    || !m_pFrameBuffer->Initialize ()
-	    || m_pFrameBuffer->GetPitch () < DisplayWidth * 4)
+	    || m_pFrameBuffer->GetPitch () < FrameBufferWidth * 4
+	    || m_pFrameBuffer->GetPitch () % 8 != 0)
 	{
 		Fail (FailFrameBuffer);
 	}

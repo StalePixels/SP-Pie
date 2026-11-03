@@ -9,9 +9,14 @@
 // repeated frame shows one of the two pictures twice. Mixing shows, on each
 // line that flips, that line of the newest complete Spectrum frame blended
 // with the same line of the frame before: half each, or the CRT-style
-// weight. The line weave mode needs a second frame buffer line for each
-// display line, which the frame buffer does not have (picture.h), so it
-// shows the newest frame.
+// weight. The double high mode does not blend: each display line that
+// flips becomes its two frame buffer lines (picture.h), one with the
+// screen area's pixel bytes from bank 5 and one with those from bank 7
+// (fuseula_screen_line ()). Both lines take, for each 8-pixel chunk, the
+// ink and paper the ULA used for that chunk: the attribute fetched at the
+// chunk's beam time from the bank shown then, so attribute changes inside
+// the frame (multicolour) show on both lines. The border parts of both
+// lines are Fuse's picture.
 //
 // CInterlaceDetector decides line by line from the screen bank alone: for
 // each picture line of each frame, the bank Fuse showed on that line
@@ -57,23 +62,6 @@ inline uint32_t MixPixelsCrt (uint32_t a, uint32_t b)
 		nOut |= ((5 * ca + 3 * cb) >> 3) << nShift;
 	}
 	return nOut;
-}
-
-// One frame buffer line of the line weave. The frame buffer has two lines
-// for each display line; the first shows the display line as drawn, the
-// second the same line with the picture area taken from the frame before
-// (pWeaveRow, the picture's line), when the weave is on (pWeaveRow not 0).
-// pDisplayRow is the 480-pixel display line, pOut the frame buffer line.
-inline void WeaveLine (const uint32_t *pDisplayRow, const uint32_t *pWeaveRow,
-		       unsigned nPictureLeft, unsigned nPictureWidth, unsigned nDisplayWidth,
-		       unsigned nSubLine, uint32_t *pOut)
-{
-	for (unsigned x = 0; x < nDisplayWidth; x++)
-	{
-		bool bOld = nSubLine == 1 && pWeaveRow != 0
-			    && x >= nPictureLeft && x < nPictureLeft + nPictureWidth;
-		pOut[x] = bOld ? pWeaveRow[x - nPictureLeft] : pDisplayRow[x];
-	}
 }
 
 class CInterlaceDetector

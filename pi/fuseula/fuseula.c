@@ -34,6 +34,11 @@
 #define FUSE_LEFT	( ( PICTURE_CHUNKS - DISPLAY_SCREEN_WIDTH_COLS ) / 2 )	/* 2 chunks */
 #define FUSE_TOP	( ( FUSEULA_PICTURE_HEIGHT - DISPLAY_SCREEN_HEIGHT ) / 2 )	/* 15 lines */
 
+#if FUSEULA_SCREEN_LEFT != ( FUSE_LEFT + DISPLAY_BORDER_WIDTH_COLS ) * CHUNK_PIXELS || \
+    FUSEULA_SCREEN_TOP != FUSE_TOP + DISPLAY_BORDER_HEIGHT
+#error "FUSEULA_SCREEN_LEFT and FUSEULA_SCREEN_TOP must match Fuse's area"
+#endif
+
 /* Fuse's beam rule (display.c, get_beam_position): a change at T-state t
    on line y shows from chunk ( t - line_times[y] ) / 4 on. So the chunk
    that starts at T-state T shows the state of T + 3. */
@@ -106,6 +111,17 @@ static int screen_start, screen_current;
 static screen_change screen_changes[ MAX_SCREEN_CHANGES ];
 static unsigned screen_change_count;
 static uint8_t line_screens[ FUSEULA_PICTURE_HEIGHT ];
+
+/* The last drawing of each screen chunk (32 columns x 192 lines): the
+   colours Fuse gave it, as 0xAARRGGBB, the pixel byte and the bank it came
+   from. Fuse draws a chunk only when its pixel byte, attribute or FLASH
+   phase has changed, so this holds what the picture shows. */
+typedef struct screen_chunk {
+  libspectrum_dword ink, paper;
+  libspectrum_byte data, bank;
+} screen_chunk;
+
+static screen_chunk screen_chunks[ DISPLAY_HEIGHT ][ DISPLAY_WIDTH_COLS ];
 
 /* Lookup cursor: the state at cursor_tstate, after the first cursor_next
    changes. */
@@ -263,6 +279,44 @@ end_line_screens( void )
   screen_change_count = 0;
 }
 
+/* --- the screen chunks for double high ------------------------------ */
+
+static void
+note_screen_chunk( int x, int y, libspectrum_byte data, libspectrum_dword ink,
+                   libspectrum_dword paper )
+{
+  int column = x - DISPLAY_BORDER_WIDTH_COLS, row = y - DISPLAY_BORDER_HEIGHT;
+  screen_chunk *chunk;
+
+  if( column < 0 || column >= DISPLAY_WIDTH_COLS || row < 0 || row >= DISPLAY_HEIGHT )
+    return;
+
+  chunk = &screen_chunks[ row ][ column ];
+  chunk->ink = ink;
+  chunk->paper = paper;
+  chunk->data = data;
+  chunk->bank = (libspectrum_byte) memory_current_screen;
+}
+
+void
+fuseula_screen_line( unsigned nBank, unsigned nLine, uint32_t *pOut )
+{
+  int column, i;
+
+  if( nLine >= DISPLAY_HEIGHT ) return;
+
+  for( column = 0; column < DISPLAY_WIDTH_COLS; column++ ) {
+    const screen_chunk *chunk = &screen_chunks[ nLine ][ column ];
+    libspectrum_byte data = chunk->bank == ( nBank & 7 ) ? chunk->data :
+      RAM[ nBank & 7 ][ display_line_start[ nLine ] + column ];
+
+    for( i = 0; i < CHUNK_PIXELS; i++ ) {
+      pOut[ column * CHUNK_PIXELS + i ] =
+        ( data & ( 0x80 >> i ) ) ? chunk->ink : chunk->paper;
+    }
+  }
+}
+
 /* --- Fuse's drawing calls ---------------------------------------------- */
 
 int
@@ -306,6 +360,8 @@ uidisplay_plot8( int x, int y, libspectrum_byte data, libspectrum_byte ink,
   if( !( state->mode & 0x01 ) ) {
     fill_chunk( px, py, data, normal_colours[ ink & 0x0f ],
                 normal_colours[ paper & 0x0f ] );
+    note_screen_chunk( x, y, data, normal_colours[ ink & 0x0f ],
+                       normal_colours[ paper & 0x0f ] );
     return;
   }
 
@@ -321,10 +377,13 @@ uidisplay_plot8( int x, int y, libspectrum_byte data, libspectrum_byte ink,
     libspectrum_byte attr =
       RAM[ memory_current_screen ][ display_attr_start[ row ] + column ];
     unsigned group = ( attr >> 6 ) * 16;
+    libspectrum_dword ulaplus_ink =
+      ulaplus_colour( state->palette[ group + ( attr & 7 ) ] );
+    libspectrum_dword ulaplus_paper =
+      ulaplus_colour( state->palette[ group + 8 + ( ( attr >> 3 ) & 7 ) ] );
 
-    fill_chunk( px, py, data,
-                ulaplus_colour( state->palette[ group + ( attr & 7 ) ] ),
-                ulaplus_colour( state->palette[ group + 8 + ( ( attr >> 3 ) & 7 ) ] ) );
+    fill_chunk( px, py, data, ulaplus_ink, ulaplus_paper );
+    note_screen_chunk( x, y, data, ulaplus_ink, ulaplus_paper );
   } else {
     libspectrum_dword colour =
       ulaplus_colour( state->palette[ 8 + ( paper & 7 ) ] );
@@ -456,6 +515,7 @@ fuseula_init( uint32_t *pPicture, unsigned nPitch )
   screen_start = screen_current = memory_current_screen;
   screen_change_count = 0;
   memset( line_screens, screen_current, sizeof line_screens );
+  memset( screen_chunks, 0, sizeof screen_chunks );
 
   return 0;
 }

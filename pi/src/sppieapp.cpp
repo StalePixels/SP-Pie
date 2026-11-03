@@ -408,11 +408,12 @@ void CSpPieApp::RunRenderer (void)
 
 	// Both halves of the frame buffer start black. The frame buffer is
 	// device memory: aligned 64-bit stores, two pixels each.
-	const unsigned nHalfLines = DisplayHeight * FrameBufferLines;
+	const unsigned nHalfLines = FrameBufferHeight;
+	const unsigned nPitchWords = nPitchBytes / 8;
 	for (unsigned y = 0; y < 2 * nHalfLines; y++)
 	{
 		volatile u64 *pDest = (volatile u64 *) (nBuffer + y * nPitchBytes);
-		for (unsigned x = 0; x < DisplayWidth / 2; x++)
+		for (unsigned x = 0; x < FrameBufferWidth / 2; x++)
 		{
 			pDest[x] = 0xFF000000FF000000ull;
 		}
@@ -421,7 +422,6 @@ void CSpPieApp::RunRenderer (void)
 	// The border extension and the overlay change the side areas, so whole
 	// rows are copied, into both halves of the frame buffer in turn.
 	boolean bExtensionShown = FALSE;
-	u32 WeaveRow[DisplayWidth] __attribute__ ((aligned (8)));
 
 #if SPPIE_OVERLAY
 	COverlay Overlay;
@@ -525,30 +525,14 @@ void CSpPieApp::RunRenderer (void)
 		bHudShown = bHud;
 #endif
 
-		// Copy into the hidden half, two frame buffer lines for each
-		// display line. In the line weave the second takes the picture
-		// from the frame before (interlace.h).
-		const u32 *pWeave = bSplash ? 0 : m_Presenter.WeavePicture ();
-		for (unsigned y = 0; y < DisplayHeight; y++)
-		{
-			const u64 *pSrc = (const u64 *) (pDraw + y * DisplayWidth);
-			for (unsigned nSub = 0; nSub < FrameBufferLines; nSub++)
-			{
-				if (nSub == 1 && pWeave != 0 && y >= PictureTop && y < PictureTop + PictureHeight)
-				{
-					WeaveLine (pDraw + y * DisplayWidth,
-						   pWeave + (y - PictureTop) * PictureWidth,
-						   PictureLeft, PictureWidth, DisplayWidth, 1, WeaveRow);
-					pSrc = (const u64 *) WeaveRow;
-				}
-				volatile u64 *pDest = (volatile u64 *) (nBuffer
-					+ (nHidden * nHalfLines + y * FrameBufferLines + nSub) * nPitchBytes);
-				for (unsigned x = 0; x < DisplayWidth / 2; x++)
-				{
-					pDest[x] = pSrc[x];
-				}
-			}
-		}
+		// Copy into the hidden half, each display pixel as 2 x 2 frame
+		// buffer pixels. In double high the second line of each display
+		// line takes its picture from the presenter's second picture
+		// (interlace.h).
+		const u32 *pSecond = bSplash ? 0 : m_Presenter.SecondPicture ();
+		WriteFrameBuffer (pDraw, pSecond,
+				  (volatile u64 *) (nBuffer + nHidden * nHalfLines * nPitchBytes),
+				  nPitchWords);
 
 #if SPPIE_OVERLAY
 		u64 nDrawn = ReadTicks ();

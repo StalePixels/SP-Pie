@@ -15,7 +15,10 @@
 //  Feature 3, display:           bit 0 = interlace detection, bit 1 =
 //                                interlace mixing always, bits 3 and 2 =
 //                                mixing mode (00 average, 01 CRT-style,
-//                                10 line weave, 11 reserved)
+//                                10 double high, 11 reserved), bits 5 and
+//                                4 = detection method (00 per line, 01 per
+//                                page, 10 and 11 reserved), bit 6 = double
+//                                high first line from bank 7
 //  Feature 0xFF, debug:          bit 0 = HUD (the overlay in the side areas)
 //
 // Other features and other bits are reserved: the data write is ignored,
@@ -65,12 +68,13 @@ public:
 	static const uint8_t DisplayModeMask	= 0x0C;
 	static const uint8_t DisplayModeAverage	= 0x00;	// the two frames, half each
 	static const uint8_t DisplayModeCrt	= 0x04;	// the newest 5/8, the one before 3/8
-	static const uint8_t DisplayModeWeave	= 0x08;	// alternate lines of the two
+	static const uint8_t DisplayModeDoubleHigh = 0x08;	// bank 5 and bank 7 on alternate lines
 	static const uint8_t DisplayModeReserved = 0x0C;
 	static const uint8_t DisplayDetectMask	= 0x30;	// the detection method
 	static const uint8_t DisplayDetectLine	= 0x00;	// each line by its own bank
 	static const uint8_t DisplayDetectPage	= 0x10;	// the whole frame when any line flips
-	static const uint8_t DisplayBits	= 0x3F;
+	static const uint8_t DisplayFirstBank7	= 0x40;	// double high: bank 7 on the first line
+	static const uint8_t DisplayBits	= 0x7F;
 	static const uint8_t DisplayDefault	= DisplayInterlaceAuto | DisplayModeAverage | DisplayDetectPage;
 
 	static const uint8_t DebugHud		= 0x01;
