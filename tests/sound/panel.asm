@@ -264,7 +264,7 @@ scan_keys:
 keymap: DB 0xF7,'1','2','3','4','5'
         DB 0xEF,0,'9','8','7','6'
         DB 0xFB,'q',0,0,'r',0
-        DB 0xDF,0,0,0,0,0
+        DB 0xDF,'p',0,0,0,0
         DB 0xFD,0,'s',0,0,0
         DB 0xBF,13,0,0,0,'h'
         DB 0xFE,0,0,0,0,0
