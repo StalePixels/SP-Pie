@@ -23,7 +23,7 @@ python3 convert.py     # only to regenerate data/ and preview/
 ./build.sh
 ```
 
-`convert.py` needs Python 3 with numpy and Pillow. It takes about half a minute. The files in `data/` are kept in the repository, so `build.sh` does not need Python. `build.sh` needs `sjasmplus`. The script looks first at `/u/GIT/ZX/bin/sjasmplus`, then at `sjasmplus` on the path. Set `SJASMPLUS=/path/to/sjasmplus` to use another copy. The output is `build/demo.tap`. The `build/` folder is not tracked by git.
+`convert.py` needs Python 3 with numpy and Pillow. It takes about half a minute. The files in `data/` are kept in the repository, so `build.sh` does not need Python. `build.sh` needs `sjasmplus`. The script uses `sjasmplus` on the path. Set `SJASMPLUS=/path/to/sjasmplus` to use another copy. The output is `build/demo.tap`. The `build/` folder is not tracked by git.
 
 Play the tape, or give it to a tape emulator. On a 128K, +2, +2A or +3, choose Tape Loader from the menu, so that the 48K ROM is paged in. The tape holds a BASIC loader, three picture blocks (about 34 KB) and the program, so loading takes several minutes at normal tape speed. The picture blocks load into RAM banks 1, 3 and 4 and the program copies them to the screens. Q returns to BASIC.
 
@@ -94,11 +94,9 @@ On SP-Pie:
 | Picture 3, ULAplus on | The macaw in 64 palette colours, as `ulaplus.png` shows. |
 | Picture 3, key 0 (ULAplus off) | The same screen with the standard colours. The attribute bits for FLASH and BRIGHT now select the table, so the colours are wrong and the picture is garish. This is the difference that the ULAplus picture shows. |
 
-Not verified on SP-Pie: double high with no flipping (key 6 off) when Gigascreen is Always. The control-ports document says double high shows both screens when mixing is locked on (Always), so it should show both banks, but this was not tested.
-
 ## MAME
 
-`mame/run.sh` runs the tape in MAME with no window (`-video none -sound none`), presses the keys through the emulated keyboard matrix and saves a screenshot after each. `mame/demo_keys.lua` is the key script. MAME comes from the scratchpad build described in `../sound/README.md`. The tape takes about five minutes of emulated time to load, so the run starts its keys at 300 seconds:
+`mame/run.sh` runs the tape in MAME with no window (`-video none -sound none`), presses the keys through the emulated keyboard matrix and saves a screenshot after each. `mame/demo_keys.lua` is the key script. Set `MAME` to a MAME binary with the `spec128` and `specpls3` drivers (the default is `mame` on the path), and `ROMPATH` to a MAME rompath that holds their ROMs. The tape takes about five minutes of emulated time to load, so the run starts its keys at 300 seconds:
 
 ```
 mame/run.sh spec128 OUTDIR 300

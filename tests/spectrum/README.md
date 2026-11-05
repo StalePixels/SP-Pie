@@ -10,7 +10,7 @@ Every program disables interrupts, then runs in a loop until you press reset.
 ./build.sh
 ```
 
-This needs `sjasmplus`. The script looks first at `/u/GIT/ZX/bin/sjasmplus`, then at `sjasmplus` on the path. Set `SJASMPLUS=/path/to/sjasmplus` to use another copy. It writes one `.tap` file for each program, plus a listing, into `build/`. That folder is not tracked by git.
+This needs `sjasmplus`. The script uses `sjasmplus` on the path. Set `SJASMPLUS=/path/to/sjasmplus` to use another copy. It writes one `.tap` file for each program, plus a listing, into `build/`. That folder is not tracked by git.
 
 ## Load
 

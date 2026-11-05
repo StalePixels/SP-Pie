@@ -3,10 +3,8 @@
 # Override the assembler with SJASMPLUS=/path/to/sjasmplus.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
-asm=${SJASMPLUS:-/u/GIT/ZX/bin/sjasmplus}
-if [ ! -x "$asm" ]; then
-    asm=$(command -v sjasmplus) || { echo "sjasmplus not found" >&2; exit 1; }
-fi
+asm=${SJASMPLUS:-sjasmplus}
+command -v "$asm" >/dev/null || { echo "sjasmplus not found" >&2; exit 1; }
 cd "$here"
 mkdir -p build
 for src in ldir_fill push_clear border_loop ulaplus shadow_flip bank5_c000 \

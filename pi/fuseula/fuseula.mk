@@ -3,11 +3,11 @@
 #
 # The Fuse sources the Pi kernel and the host tests build, unmodified, and
 # the generated headers they need. Included by ../Makefile and
-# ../test/Makefile, which set FUSEULA_ROOT to the path of public/ from their
+# ../test/Makefile, which set FUSEULA_ROOT to the path of the repository root from their
 # own directory.
 #
-# Fuse and libspectrum are pinned submodules (public/fuse and
-# public/libspectrum). Their own builds use autoconf; here the headers that
+# Fuse and libspectrum are pinned submodules (fuse/ and
+# libspectrum/). Their own builds use autoconf; here the headers that
 # autoconf and their Perl scripts would make are generated into FUSEULA_GEN
 # with the same scripts:
 #

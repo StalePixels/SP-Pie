@@ -7,13 +7,13 @@
 #
 # Environment:
 #   QUARTUS_HOME   Host path of the Quartus install (the directory that holds
-#                  the "quartus" folder). Default: /u/toolchains/quartus
+#                  the "quartus" folder). Required.
 #   QUARTUS_IMAGE  Container image name. Default: quartus13-env. If it does not
 #                  exist, it is built from ubuntu:22.04 plus the 32-bit and
 #                  64-bit runtime libraries Quartus 13.0sp1 needs.
 set -eu
 
-QUARTUS_HOME="${QUARTUS_HOME:-/u/toolchains/quartus}"
+QUARTUS_HOME="${QUARTUS_HOME:?set QUARTUS_HOME to the Quartus install}"
 QUARTUS_IMAGE="${QUARTUS_IMAGE:-quartus13-env}"
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then

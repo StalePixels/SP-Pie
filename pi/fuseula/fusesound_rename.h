@@ -1,7 +1,7 @@
 /*
  * fusesound_rename.h
  *
- * Fuse's sound.c (public/fuse, pinned) keeps one sound generator in
+ * Fuse's sound.c (fuse/, pinned) keeps one sound generator in
  * globals. SP-Pie needs several: one per AY chip and one for the ULA and
  * the Covox DACs. Each is a separate compile of the unmodified sound.c,
  * from a wrapper file that defines FUSESOUND_INSTANCE and includes this

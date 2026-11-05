@@ -482,10 +482,10 @@ Simulation checks function only. It does not check timing or metastability.
 Quartus II 13.0sp1 Web Edition runs only on x86-64 Linux or Windows. On an Apple Silicon Mac it runs in an amd64 container under OrbStack.
 
 1. Install OrbStack and check that `docker` works.
-2. Download "Quartus II Web Edition 13.0sp1 for Linux" (`Quartus-web-13.0.1.232-linux.tar`) from Altera. The download needs a free Altera account. Extract it, then install the Linux edition into `/u/toolchains/quartus` from a directory that holds only `QuartusSetupWeb-13.0.1.232.run` and `max_web-13.0.1.232.qdz`. Hard links work there; symbolic links make the installer fail with "payload initialization failed". Run the installer in the `quartus13-env` container with `--mode unattended --unattendedmodeui none`.
-3. Run `public/cpld/quartus.sh public/cpld`. The `.pof` goes to `public/cpld/output_files/`. The script builds the `quartus13-env` container image the first time.
+2. Download "Quartus II Web Edition 13.0sp1 for Linux" (`Quartus-web-13.0.1.232-linux.tar`) from Altera. The download needs a free Altera account. Extract it, then install the Linux edition from a directory that holds only `QuartusSetupWeb-13.0.1.232.run` and `max_web-13.0.1.232.qdz`. Hard links work there; symbolic links make the installer fail with "payload initialization failed". Run the installer in the `quartus13-env` container with `--mode unattended --unattendedmodeui none`.
+3. Set `QUARTUS_HOME` to the installation directory, then run `cpld/quartus.sh cpld` from the repository root. The `.pof` goes to `cpld/output_files/`. The script builds the `quartus13-env` container image the first time.
 
-`QUARTUS_HOME` selects another installation and `QUARTUS_IMAGE` another container image.
+`QUARTUS_IMAGE` selects another container image.
 
 ## Programming
 
@@ -508,7 +508,7 @@ openFPGALoader -c usb-blaster output_files/sp_pie_cpld_verify.svf
 
 openFPGALoader compares the TDO values in the verify `.svf`, so a device that holds a different design fails with "TDO value ... isn't the one expected". "TDO is stuck at 0" in the scan means the blaster gets no VCC on pin 4, no ground, or no answer from the board.
 
-The upstream TK-Pie design can be put back the same way from `upstream/CPLD/EPM240.pof`.
+The upstream TK-Pie design can be put back the same way from `CPLD/EPM240.pof` in the TK-Pie repository (<https://gitlab.com/victor.trucco/TK-Pie>).
 
 ## Logic elements
 
@@ -523,38 +523,3 @@ From the Quartus 13.0sp1 fitter report. A MAX II logic element (LE) has one 4-in
 DEPTH 4 is the default.
 
 The project has no timing constraints (`.sdc`) yet, so the Timing Analyzer uses default clocks and its slack figures mean nothing. Its Fmax figures (DEPTH 4) are 39.4 MHz for the write clock, 57.7 MHz for the SOE clock, and 112.5 MHz for FCLK and for the edge-connector clock (86.5 MHz restricted by a hold check on the edge-connector clock), where the time counter's paths through `tclk` are counted under both. FCLK needs 25 MHz. Quartus puts `CLK`, SOE, `wclk` and `tclk` on the four global clocks, and reports `tclk` as a clock multiplexer. The fitter reports no latches and no combinational loops.
-
-## Not verified
-
-- Timing against real constraints. An `.sdc` with the /WR and SOE clocks and
-  the input and output delays is needed for real slack figures.
-- The /IORQ flag and the frame flag use an asynchronous set driven by logic
-  (/IORQ and /WR both low; /M1 and /IORQ both low). How Quartus implements
-  them on MAX II is not known.
-- The write-side clock `wclk` is made by logic (/WR and `rst_n`). Quartus
-  puts it on a global clock; its skew against the bus inputs is not known.
-- The rise time of /RESET on each Spectrum model, and whether a slow or
-  bouncing edge gives more than one reset event.
-- The SOE low and high times the read side needs. They depend on the Quartus
-  timing report.
-- The Z80A (NMOS) data hold time after /WR rises.
-- The stall measurement on hardware: the phase lengths on a 48K and a 128K,
-  their duty cycle, and the level at which each ULA holds the
-  edge-connector clock. The logic measures both phases. With a duty cycle
-  far from 50 %, the margin of the thresholds shrinks below two FCLK
-  periods.
-- The FCLK detector against a real GPIO 4: that a GPIO 4 left as an input
-  stays at a steady level, and that no other use of GPIO 4 makes it toggle.
-  A toggling GPIO 4 would be taken as FCLK.
-- The clock switch on hardware: that the one short pulse on `tclk` when FCLK
-  starts or stops only disturbs the count, as the logic expects.
-- How Quartus implements the asynchronous set of `stl_r` (by `stl_p`) on
-  MAX II, as for the /IORQ flag and the frame flag.
-- The Z80 /WR delay after the falling clock edge. Where the edge-connector
-  clock is the inverse of the Z80 clock, a delay of 80 ns or more would let
-  the count at /WR include the edge before it on some writes and not on
-  others. Without FCLK, that edge and /WR always come close together, so the
-  event's count can be one count off. The same holds for a reset event,
-  whose edge comes just after a clock edge, without FCLK.
-- Metastability of the count samples. The simulation does not model it.
-- Behaviour on hardware. The design is programmed and verified in a board, but not yet run with the Pi software on a Spectrum.

@@ -23,7 +23,7 @@
 #define HAVE_GETOPT_LONG 1
 
 /* libspectrum.c reports this as its version. It is the release that
-   public/libspectrum is pinned to. */
+   the libspectrum submodule is pinned to. */
 #define VERSION "1.8.0"
 
 #endif

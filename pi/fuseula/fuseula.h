@@ -3,7 +3,7 @@
  *
  * The C interface between the SP-Pie C++ code and the Fuse ULA model.
  *
- * Fuse (public/fuse, pinned) emulates the ZX Spectrum. This layer builds
+ * Fuse (fuse/, pinned) emulates the ZX Spectrum. This layer builds
  * only its display model (display.c), its memory and paging code
  * (memory_pages.c and the machine files) and its peripheral port decode,
  * unmodified, and feeds them the Spectrum's own writes instead of a Z80:

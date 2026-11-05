@@ -2,14 +2,11 @@
 # Build the sound test programs.
 #   build/tap/NAME.tap   tape file for 48K, 128K, +2 and +3
 #   build/dot/NAME       ESXDOS dot command (copy to the BIN folder of the SD card)
-# Needs sjasmplus. The script looks first at /u/GIT/ZX/bin/sjasmplus, then at
-# sjasmplus on the path. Set SJASMPLUS=/path/to/sjasmplus to use another copy.
+# Needs sjasmplus on the path. Set SJASMPLUS=/path/to/sjasmplus to use another copy.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
-asm=${SJASMPLUS:-/u/GIT/ZX/bin/sjasmplus}
-if [ ! -x "$asm" ]; then
-    asm=$(command -v sjasmplus) || { echo "sjasmplus not found" >&2; exit 1; }
-fi
+asm=${SJASMPLUS:-sjasmplus}
+command -v "$asm" >/dev/null || { echo "sjasmplus not found" >&2; exit 1; }
 cd "$here"
 mkdir -p build/tap build/dot build/lst
 for src in ay turbosound beeper covox hud border spppanel; do

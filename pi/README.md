@@ -4,8 +4,6 @@ This is a bare-metal kernel for the Raspberry Pi Zero 2 W on the TK-Pie board. T
 
 It is built on [Circle](https://github.com/rsta2/circle) for AArch64 (`RASPPI=3`, `kernel8.img`). The interface to the CPLD is in [../docs/protocol.md](../docs/protocol.md).
 
-None of this has run on hardware yet. See [What is not verified](#what-is-not-verified).
-
 ## Architecture
 
 ### Cores
@@ -131,7 +129,7 @@ A reset button bounces at both the press and the release, and the CPLD sends a r
 
 ### Fuse
 
-Fuse and libspectrum are submodules of `public/`, pinned to release tags and never modified:
+Fuse and libspectrum are submodules of this repository, pinned to release tags and never modified:
 
 | Path | Upstream | Pinned at | Licence |
 |---|---|---|---|
@@ -235,7 +233,7 @@ These are the delays inside SP-Pie, from the design. They are not measured, and 
 
 It is drawn in the Spectrum's colours, on bright white paper: a black title bar with the name and the four-colour stripe of the Spectrum's packaging (bright red, yellow, green and cyan), the same stripe along the foot, and these lines:
 
-- the firmware version, `git describe --tags --always --dirty` of `public/` when the kernel was built (`src/version.h`, made by the Makefile),
+- the firmware version, `git describe --tags --always --dirty` of this repository when the kernel was built (`src/version.h`, made by the Makefile),
 - the HDMI mode: its size, which the firmware gives at start-up before the frame buffer is set up (property tag `GET_DISPLAY_DIMENSIONS`, as Circle reads it to choose a frame buffer size), and its frame rate, measured from when the firmware's vertical sync returns, over the last 50 HDMI frames,
 - `CPLD link`: found while empty pairs from the CPLD keep coming,
 - `Spectrum clock`: found while Spectrum frames complete, which needs the CPLD's count to advance,
@@ -254,7 +252,7 @@ The detector looks at one byte for each line. Blending reads the frame before on
 
 - Average: each channel `(a >> 1) + (b >> 1) + (a & b & 1)`, which rounds down.
 - CRT-style: each channel `(5 x newest + 3 x previous) >> 3`.
-- Double high: the contract (`../docs/control-ports.md`) is bank 5 and bank 7, each from its own memory, on alternate lines on every frame. `fuseula_screen_line` builds the two lines. On the board the mode does not engage: the output keeps square pixels (`../../docs/open_issues.html`).
+- Double high: the contract (`../docs/control-ports.md`) is bank 5 and bank 7, each from its own memory, on alternate lines on every frame. `fuseula_screen_line` builds the two lines.
 - Line alternate: no blending, normal height. On each line that mixes, the screen area of picture line y comes from `fuseula_bank_line`: screen line n = y - 39 of Spectrum frame f shows the first bank (feature 3 bit 6) when n + f is even, and the other bank when it is odd. f is the presenter's number of the frame shown, so the order swaps every Spectrum frame and stays with the Spectrum frame across a skip or a repeat. The line has that bank's own pixel bytes and attributes. A chunk that Fuse drew from that bank is the chunk as drawn. For any other chunk, `fuseula_end_frame` draws both banks from their memory at the end of the frame, before `display_frame`, so `display_parse_attr` gives the FLASH phase of the frame just drawn, and with the ULAplus state at the chunk's beam time. It does this only for a frame that ends with mode 11 set (`fuseula_bank_lines`), because it is about as much work as drawing the screen twice. Multicolour inside the screen area shows only on the lines of the bank shown at the time.
 
 **Pentagon Gigascreen (port #EFF7).** With feature 1 bit 6 set, `CControlPorts` takes a write to 0xEFF7, on all 16 address bits. Data bit 4 = 1 keeps feature 3 and sets bit 1 and mode 11; bit 4 = 0 puts the kept value back; a reset clears it ([../docs/control-ports.md](../docs/control-ports.md), Pentagon Gigascreen). The Pentagon hardware is Dmitry Pugachev's, described in two Russian sources: Dmitry Pugachev (SchemeMan, Dark Souls Group), "Gigascreen для Pentagon с интерлейсом: аппаратная модификация для расширения цветовой палитры", Black Crow #04 (2000), <https://zxpress.ru/ru/ezines/black-crow/04/gigascreen-dlya-pentagon-s-interleysom-apparatnaya-modifikaciya-dlya-rasshireniya-cvetovoy-palitry>, and "Автор аппаратного гигаскрина", real.speccy echo (2002), <https://zxpress.ru/ru/zxnet/real.speccy/avtor-aparatnogo-gigaskrina>. From them come the line-by-line alternation of pages 5 and 7, the order swapped every frame, no colour mixing, and the control by port #EFF7 bit 4. They do not give the polarity of bit 4; bit 4 = 1 for on is an assumption.
@@ -266,7 +264,7 @@ You need:
 - the Arm GNU toolchain for `aarch64-none-elf` on `PATH`,
 - GNU make 4 or later (`gmake` on macOS),
 - perl and a host C compiler, for the Fuse headers,
-- the `fuse` and `libspectrum` submodules of `public/` checked out (`git submodule update --init fuse libspectrum` in `public/`),
+- the `fuse` and `libspectrum` submodules checked out (`git submodule update --init fuse libspectrum` at the repository root),
 - bash 5 and GNU getopt to build the Circle world (see [../circle-libsdl2/docs/BUILDING.md](../circle-libsdl2/docs/BUILDING.md)).
 
 ### 1. Build the Circle world for the Pi 3 class
@@ -426,34 +424,3 @@ On the build machine the sound costs core 0 about 50 µs per quiet frame and abo
 Core 0 also copies Fuse's picture once per Spectrum frame (the frame before, 380 KB, for interlace mixing) and writes the picture to show (380 KB) on every HDMI frame. On the build machine a Spectrum frame with no writes, through Fuse, the sound and this picture path, takes about 61 µs unmixed, 69 µs with every line averaged and 101 µs with every line CRT-style. In double high the presenter also writes the second picture (380 KB). In line alternate the Fuse layer also draws both screen banks from memory at the end of each Spectrum frame, which adds about 29 µs per frame on the build machine; other modes do not do this work. The splash screen and the reading of `config.txt` cost nothing once the Spectrum runs: the splash is not drawn, and the file is read once at start-up.
 
 On every HDMI frame core 0 writes the 960 x 540 frame buffer: 2 MB, as 259,200 aligned 64-bit stores to device memory. The 480 x 270 buffer took a quarter of that, 64,800 stores, and all of `RN` (Fuse, sound, side areas and copy) was 1.7 to 2.0 ms with it, so one store took at most about 30 ns. At that rate the 960 x 540 write takes at most about 8 ms of the 20 ms HDMI frame. This is an upper bound from that measurement, not a measurement of the new buffer; `RN` shows the real figure.
-
-## What is not verified
-
-No hardware was attached during development. Everything below is untested:
-
-- SMI on the Zero 2 W in 18-bit mode, and whether the CPLD keeps up with the chosen timing.
-- That in 18-bit mode with no packing each read lands as one 32-bit FIFO word with the data in bits 17 to 0.
-- The SMI clock source. Circle assumes PLLD at 500 MHz. If that is wrong, every timing above scales with it, and so do the read times used for the wraps across stops.
-- The width of the SMI length register, and so the largest transfer count.
-- Whether clearing the SMI enable bit stops a transfer at once.
-- Whether SMI leaves SD0 to SD17 undriven at all times when it only does reads.
-- Whether a word is in memory by the time the DMA destination register has moved past it. If it is not, the consumer can read a stale word.
-- Whether the firmware applies the virtual offset at the next vertical sync. If it applies it at once, a flip can land mid-scan, between two complete frames.
-- That an SMI transfer gives exactly 65,534 ring words, and that reads run at exactly the read period from the moment core 1 starts a transfer. A late first read shortens the time used for the wraps across that stop.
-- The CPLD's measurement of the held Z80 clock on a real 48K and 128K, and GPCLK0 on GPIO 4 reaching the CPLD.
-- That the 48K's edge-connector clock stops during contention like the 128K's (from the Sinclair Wiki; measured on a 128K only).
-- Whether the /WR rising edge can meet a counting edge of the edge-connector clock on the +2A/+3, which can make a count one clock off (see `../cpld/README.md`).
-- That Fuse's write points (memory at the end of the cycle, I/O one T-state after its start) match the relation of /WR to the ULA on the real machines; Fuse is calibrated against the real machines with its own Z80 timing, which is not run here.
-- Whether the firmware scales the 960 x 540 frame buffer to 1080p with sharp pixels or with smoothing.
-- The time core 0 takes to write the 960 x 540 frame buffer on the Pi (see [Cost](#cost)).
-- That the firmware ignores the keys in `[sp-pie]`. The Raspberry Pi documentation describes `[all]` and the filters it knows; it does not say what an unknown name does. The keys are not firmware settings in any case.
-- That Circle's SD card driver reads `config.txt` on the Zero 2 W at start-up with the other devices as they are set up here.
-- That `GET_DISPLAY_DIMENSIONS` before the frame buffer is set up gives the size of the HDMI mode from `config.txt` (`hdmi_timings`) on the Zero 2 W. The splash shows what it returns.
-- The real restart gaps, backlog and CPU times. They exist only once the kernel runs on the board.
-- HDMI sound: that Circle's HDMI sound device starts in polling mode on the Zero 2 W with `hdmi_drive=2`, that core 3 keeps the HDMI audio FIFO filled, and the sound itself.
-- The depth of the HDMI audio FIFO (see [Latency](#latency)).
-- How long after a vertical sync `WaitForVerticalSync` returns, and how much that varies; the guard and the fill target assume at most 0.5 ms more than the guard covers.
-- The time from the end of a vertical-sync wait to the end of the first band of the copy, which the fill target assumes is at most 4 ms.
-- Every latency figure in [Latency](#latency): they come from the design, not from a measurement.
-- The cost of the sound on core 0 and of the resampler on core 3 on the Pi. Only the host times above are measured.
-- How far apart the Spectrum's clock and the Pi's HDMI audio clock really are. The resampler follows up to 1,000 ppm, Blip_Buffer's 113 ppm included.

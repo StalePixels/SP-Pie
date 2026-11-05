@@ -42,7 +42,7 @@ A Spectrum reset restores the defaults.
 ./build.sh
 ```
 
-This needs `sjasmplus`. The script looks first at `/u/GIT/ZX/bin/sjasmplus`, then at `sjasmplus` on the path. Set `SJASMPLUS=/path/to/sjasmplus` to use another copy. Each program is built twice from the same source. The `build/` folder is not tracked by git.
+This needs `sjasmplus`. The script uses `sjasmplus` on the path. Set `SJASMPLUS=/path/to/sjasmplus` to use another copy. Each program is built twice from the same source. The `build/` folder is not tracked by git.
 
 | Folder | Content |
 | --- | --- |

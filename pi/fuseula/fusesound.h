@@ -3,7 +3,7 @@
  *
  * The C interface to SP-Pie's sound: the AY chips, TurboSound, the
  * beeper and the Covox DACs, made from the Spectrum's port writes with
- * Fuse's sound generator (public/fuse/sound.c, pinned and unmodified).
+ * Fuse's sound generator (fuse/sound.c, pinned and unmodified).
  *
  * Four copies of Fuse's generator run side by side (fusesound_rename.h):
  * one for AY chip 0, one for AY chip 1 (TurboSound), one for the ULA

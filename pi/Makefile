@@ -43,7 +43,7 @@ OBJS	= src/main.o src/kernel.o src/sppieapp.o src/smieventreader.o \
 
 DEFINE	+= -DSPPIE_OVERLAY=$(OVERLAY)
 
-# The firmware version on the splash screen: git describe of public/ at
+# The firmware version on the splash screen: git describe of this repository at
 # build time. src/version.h changes only when the version does, so only
 # the files that include it are built again.
 SPPIE_VERSION := $(shell git -C .. describe --tags --always --dirty 2>/dev/null || echo unknown)
